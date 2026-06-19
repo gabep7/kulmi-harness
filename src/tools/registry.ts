@@ -12,6 +12,7 @@ export interface ToolExecution {
 export class ToolRegistry {
   readonly #tools = new Map<string, AnyTool>();
   readonly #providerTools: ProviderTool[];
+  readonly #providerToolsByName = new Map<string, ProviderTool>();
 
   constructor(tools: AnyTool[]) {
     for (const tool of tools) {
@@ -25,12 +26,18 @@ export class ToolRegistry {
         function: {
           name: tool.name,
           description: tool.description,
-          parameters: canonicalize(tool.providerSchema ?? z.toJSONSchema(tool.schema)) as Record<string, unknown>,
+          parameters: canonicalize(z.toJSONSchema(tool.schema)) as Record<string, unknown>,
         },
       }));
+    for (const tool of this.#providerTools) this.#providerToolsByName.set(tool.function.name, tool);
   }
 
-  providerTools(): ProviderTool[] {
+  providerTools(names?: readonly string[]): ProviderTool[] {
+    if (names) {
+      return names
+        .map((name) => this.#providerToolsByName.get(name))
+        .filter((tool): tool is ProviderTool => tool !== undefined);
+    }
     return this.#providerTools;
   }
 

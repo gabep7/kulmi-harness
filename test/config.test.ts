@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { configTemplate, resolveModel, type KulmiConfig, type ModelConfig } from "../src/config/config.js";
+import { applyFileConfig, configTemplate, resolveModel, type KulmiConfig, type ModelConfig } from "../src/config/config.js";
 
 describe("MiMo configuration", () => {
   const saved = { api: process.env.MIMO_API_KEY, plan: process.env.MIMO_TOKEN_PLAN_API_KEY };
@@ -23,6 +23,16 @@ describe("MiMo configuration", () => {
     expect(template).toContain("token-plan-ams.xiaomimimo.com/v1");
     expect(template).not.toMatch(/deepseek/i);
   });
+
+  it("rejects invalid limits, endpoints, billing environments, and removed MCP config", () => {
+    const base = config(payg());
+    expect(() => applyFileConfig(base, { max_steps: 0 })).toThrow("max_steps");
+    expect(() => applyFileConfig(base, { models: { api: { base_url: "file:///tmp/model" } } })).toThrow("http or https");
+    expect(() => applyFileConfig(base, {
+      models: { api: { billing: "token-plan", api_key_env: "MIMO_API_KEY" } },
+    })).toThrow("MIMO_TOKEN_PLAN_API_KEY");
+    expect(() => applyFileConfig(base, { mcp: { servers: {} } })).toThrow("MCP configuration is no longer supported");
+  });
 });
 
 function config(...models: ModelConfig[]): KulmiConfig {
@@ -35,14 +45,13 @@ function config(...models: ModelConfig[]): KulmiConfig {
     commandTimeoutSeconds: 120,
     maxOutputBytes: 200_000,
     models: Object.fromEntries(models.map((model, index) => [names[index], model])),
-  search: {
+    search: {
       mode: "off",
       resultLimit: 5,
       provider: "auto",
       searxngUrl: "",
-  },
-  mcpServers: {},
-};
+    },
+  };
 }
 
 function payg(): ModelConfig {

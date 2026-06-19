@@ -83,6 +83,8 @@ kulmi doctor
 
 Running `kulmi` opens the responsive TUI. Running `kulmi exec` keeps the stable headless interface for scripts and CI.
 
+Chat starts with only the task-promotion schema, so greetings and direct questions do not pay for the full coding-tool catalog. A normal request that needs files, commands, edits, or research promotes itself and receives the full tools on the next model turn. `/goal` performs the same promotion explicitly.
+
 ## Terminal interface
 
 The interface deliberately keeps the transcript dominant. Tool activity is compressed into one-line status rows; reasoning is collapsed unless requested; plan and worker state appear in a right rail on wider terminals and disappear cleanly on narrow terminals. Model deltas are coalesced at roughly 30 FPS to avoid a render for every streamed token.
@@ -93,7 +95,7 @@ Controls:
 - `Ctrl+O` expands or collapses the current thinking stream.
 - `Ctrl+C` stops an active run, or exits while idle.
 - `?` opens the compact command and shortcut guide.
-- `/sessions` lists durable sessions.
+- `/sessions` opens a keyboard picker for durable sessions in the current workspace.
 - `/fork` creates an independent continuation.
 - `/workers` shows child agents.
 - `/steer`, `/cancel`, `/retry`, and `/integrate` control workers without leaving the TUI.
@@ -152,28 +154,9 @@ Running workers can be redirected with `steer_agent`. Failed or interrupted work
 
 `kulmi fork <session-id>` creates an independent continuation without mutating the source session. Interactive shell commands include `/help`, `/status`, `/sessions`, and `/loop <task>`.
 
-Local MCP servers can be configured under `[mcp.servers.<name>]`. Kulmi uses the official MCP SDK, exposes tools with stable `mcp__<server>__<tool>` names, forwards only explicitly listed environment variables plus the SDK safe baseline, supports cancellation, and shuts servers down with the session.
-
-### Optional FFF file search
-
-[FFF](https://github.com/dmtrKovalenko/fff) is useful for large repositories and long sessions where file and content searches happen repeatedly. It keeps a background index, supports typo-tolerant and fuzzy matching, ranks by frecency, and annotates Git state. Kulmi keeps its built-in glob and ripgrep-style tools as the zero-setup default, while FFF can be added through the existing MCP boundary:
-
-```sh
-brew install dmtrKovalenko/fff/fff-mcp
-```
-
-```toml
-[mcp.servers.fff]
-command = "fff-mcp"
-args = []
-env = []
-```
-
-After that, Kulmi exposes FFF's `fffind`, `ffgrep`, and multi-search tools with their original JSON schemas. It remains optional so small repositories do not pay for another process and index on startup.
-
 ## Cache contract
 
-MiMo prompt caching is automatic and prefix-based. Kulmi optimizes it by keeping the system message byte-stable, sorting tools canonically, canonicalizing every JSON schema, preserving message and tool-result order, and appending volatile state only at the conversation tail. Compaction happens only near the 1M context boundary and only at a complete message boundary.
+MiMo prompt caching is automatic and prefix-based. Kulmi optimizes it by keeping the system message byte-stable, sorting tools canonically, canonicalizing every JSON schema, preserving message and tool-result order, and appending volatile state only at the conversation tail. Chat and task mode use separate cache scopes so the one deliberate tool-catalog expansion cannot invalidate either stable prefix. Compaction happens only near the 1M context boundary and only at a complete message boundary.
 
 MiMo reports cache reads through `usage.prompt_tokens_details.cached_tokens`. Kulmi reports cached and fresh tokens independently for every request and in the macOS inspector. Cache writes are currently free according to MiMo's pricing documentation, while cache-hit input for `mimo-v2.5-pro` is priced far below uncached input.
 
@@ -181,7 +164,7 @@ MiMo reports cache reads through `usage.prompt_tokens_details.cached_tokens`. Ku
 
 Autonomy levels are `read`, `low`, `medium`, and `high`. The shell policy blocks deletion, privilege escalation, remote publication, unsafe redirects, nested shells, dynamic interpreters, and credential exposure. Model-controlled processes receive a minimal environment, isolated home, closed stdin, timeout, bounded output, process-group cancellation, and secret redaction.
 
-Sessions persist messages, events, run state, checkpoints, artifacts, worker jobs, model profile, and completion evidence. Interrupted assistant tool-call turns are repaired with an explicit uncertain result instead of replaying a potentially non-idempotent action.
+Sessions persist versioned, validated messages, events, run state, checkpoints, artifacts, worker jobs, model profile, and completion evidence. Existing unversioned sessions migrate on open. Interrupted assistant tool-call turns are repaired with an explicit uncertain result instead of replaying a potentially non-idempotent action. Task completion requires an evidence-backed plan and, for modified work, an explicit successful current-revision verification command covering the changed files.
 
 ## Development
 

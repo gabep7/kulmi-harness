@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render } from "ink-testing-library";
 import { EventBus } from "../src/core/events.js";
 import { TuiApp } from "../src/tui/app.js";
@@ -38,13 +38,34 @@ describe("Kulmi TUI", () => {
       usage: { promptTokens: 1_000, completionTokens: 100, totalTokens: 1_100, cacheHitTokens: 800, cacheMissTokens: 200 },
     });
     await bus.emit({ type: "assistant.message", agentId: "agent_1", text: "## Result\n\n- **Cache path** verified with `hit`\n1. Keep it stable\n> Evidence attached\n\n```ts\nconst hit = true;\n```" });
+    await bus.emit({ type: "tool.started", agentId: "agent_1", callId: "call_complete", tool: "complete_task", input: {} });
+    await bus.emit({
+      type: "tool.finished",
+      agentId: "agent_1",
+      callId: "call_complete",
+      tool: "complete_task",
+      output: JSON.stringify({
+        status: "completed",
+        modified_files: ["src/cache.ts"],
+        verifications: [{ command: "npm test" }],
+        verification_command: "npm test",
+      }),
+      isError: false,
+      durationMs: 2,
+    });
     await pause();
     const frame = view.frames.join("\n");
     expect(frame).toContain("◆ kulmi");
     expect(frame).toContain("Improve the cache layer");
     expect(frame).toContain("Read file");
     expect(frame).toContain("Audit cache behavior");
-    expect(frame).toContain("80% cache");
+    expect(frame).toContain("1.1k processed");
+    expect(frame).toContain("200 fresh");
+    expect(frame).toContain("800 cached");
+    expect(frame).toContain("100 out");
+    expect(frame).toContain("1 changed file");
+    expect(frame).toContain("src/cache.ts");
+    expect(frame).toContain("npm test");
     expect(frame).toContain("Cache path verified");
     expect(frame).toContain("const hit = true;");
     expect(frame).toContain("1. Keep it stable");
@@ -76,6 +97,56 @@ describe("Kulmi TUI", () => {
     await expect(pending).resolves.toBe(true);
   });
 
+  it("denies a permission request when enter is pressed", async () => {
+    const store = new TuiStore();
+    const pending = store.requestPermission({ tool: "shell", risk: "high", reason: "removes a file", command: "rm old.txt", input: {} });
+    const view = render(
+      <TuiApp
+        store={store}
+        model="mimo-v2.5-pro"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        search="off"
+        onSubmit={async () => undefined}
+        onCommand={async () => undefined}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    view.stdin.write("\r");
+    await expect(pending).resolves.toBe(false);
+  });
+
+  it("cancels the active run with escape", async () => {
+    const store = new TuiStore();
+    const cancel = vi.fn();
+    let finishRun: (() => void) | undefined;
+    const view = render(
+      <TuiApp
+        store={store}
+        model="mimo-v2.5-pro"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        search="free"
+        onSubmit={() => new Promise<void>((resolve) => { finishRun = resolve; })}
+        onCommand={async () => undefined}
+        onCancel={cancel}
+        onExit={() => undefined}
+      />,
+    );
+    view.stdin.write("inspect this repo");
+    await pause();
+    view.stdin.write("\r");
+    await pause();
+    expect(view.lastFrame()).toContain("Kulmi is working. Esc to stop.");
+    view.stdin.write("\u001b");
+    await pause();
+    expect(cancel).toHaveBeenCalledOnce();
+    finishRun?.();
+  });
+
   it("opens a compact command palette without covering the composer", async () => {
     const store = new TuiStore();
     const view = render(
@@ -100,6 +171,77 @@ describe("Kulmi TUI", () => {
     expect(frame).toContain("/steer");
     expect(frame).toContain("/integrate");
     expect(frame).toContain("› /");
+  });
+
+  it("opens and switches sessions from the keyboard picker", async () => {
+    const store = new TuiStore();
+    const switchSession = vi.fn(async () => ({
+      model: "mimo-v2.5",
+      sessionId: "session_fedcba0987654321",
+      cwd: "/workspace/kulmi",
+      autonomy: "medium" as const,
+      search: "free" as const,
+      mode: "task" as const,
+    }));
+    const view = render(
+      <TuiApp
+        store={store}
+        model="mimo-v2.5-pro"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        search="free"
+        onSubmit={async () => undefined}
+        onCommand={async (command) => command === "/sessions" ? {
+          sessions: [
+            { id: "session_1234567890abcdef", status: "idle", model: "mimo-v2.5-pro", title: "Current work", current: true },
+            { id: "session_fedcba0987654321", status: "completed", model: "mimo-v2.5", title: "Previous work", current: false },
+          ],
+        } : undefined}
+        onSwitchSession={switchSession}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    view.stdin.write("/sessions");
+    await pause();
+    view.stdin.write("\r");
+    await pause();
+    expect(view.lastFrame()).toContain("Previous work");
+    view.stdin.write("\u001b[B");
+    await pause();
+    view.stdin.write("\r");
+    await pause();
+    expect(switchSession).toHaveBeenCalledWith("session_fedcba0987654321");
+    expect(view.lastFrame()).toContain("mimo-v2.5  ·  fedcba09");
+    expect(view.lastFrame()).toContain("goal");
+  });
+
+  it("runs an inline goal and exposes goal mode in the footer", async () => {
+    const store = new TuiStore();
+    const submit = vi.fn(async () => undefined);
+    const command = vi.fn(async (_name: string, args: string) => ({ submit: args, mode: "task" as const }));
+    const view = render(
+      <TuiApp
+        store={store}
+        model="mimo-v2.5-pro"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        search="free"
+        onSubmit={submit}
+        onCommand={command}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    view.stdin.write("/goal fix the cache");
+    await pause();
+    view.stdin.write("\r");
+    await pause();
+    expect(command).toHaveBeenCalledWith("/goal", "fix the cache");
+    expect(submit).toHaveBeenCalledWith("fix the cache");
+    expect(view.lastFrame()).toContain("goal");
   });
 
   it("coalesces high-frequency streamed deltas", async () => {
@@ -181,6 +323,27 @@ describe("Kulmi TUI", () => {
     expect(snapshot.transcript.filter((item) => item.kind === "user")).toHaveLength(1);
     expect(snapshot.transcript.some((item) => item.kind === "tool")).toBe(false);
     expect(snapshot.live.some((item) => item.id === "call_1" && item.kind === "tool")).toBe(true);
+  });
+
+  it("replaces transient state when switching sessions", async () => {
+    const bus = new EventBus();
+    const store = new TuiStore();
+    store.attach(bus);
+    await bus.emit({ type: "agent.started", agentId: "root", prompt: "old task" });
+    await bus.emit({ type: "assistant.text.delta", agentId: "root", text: "old stream" });
+    store.replaceSession([
+      { role: "user", content: "new task" },
+      { role: "assistant", content: "new answer" },
+    ]);
+    expect(store.getSnapshot()).toMatchObject({
+      live: [],
+      reasoning: "",
+      streaming: "",
+      plan: [],
+      status: "idle",
+    });
+    expect(store.getSnapshot().transcript.map((item) => item.kind === "user" || item.kind === "assistant" ? item.text : ""))
+      .toEqual(["new task", "new answer"]);
   });
 
   it("pins the active request while many tool calls run and shows compact errors", async () => {

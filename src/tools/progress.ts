@@ -8,7 +8,7 @@ export function progressTools(): AnyTool[] {
 
 const inspectPlanTool = defineTool({
   name: "inspect_plan",
-  description: "Read the canonical task plan, dependency state, evidence, modified files, and verification records.",
+  description: "Read the task plan, evidence, modified files, and verification records.",
   schema: z.object({}),
   readOnly: true,
   async execute(context) {
@@ -23,16 +23,13 @@ const inspectPlanTool = defineTool({
 const updatePlanTool = defineTool({
   name: "update_plan",
   description:
-    "Replace the canonical dependency plan. Independent worker-owned steps may run together. Every completed step needs evidence and all dependencies complete first.",
+    "Replace the task plan. Keep it concise. Every completed step needs concrete evidence.",
   schema: z.object({
     steps: z.array(z.object({
       id: z.string().min(1).max(40),
       title: z.string().min(1).max(200),
       status: z.enum(["pending", "in_progress", "completed"]),
       evidence: z.string().max(1_000).optional(),
-      depends_on: z.array(z.string().min(1).max(40)).max(20).default([]),
-      acceptance_criteria: z.array(z.string().min(1).max(500)).max(20).default([]),
-      owner: z.string().min(1).max(80).optional(),
     })).min(1).max(30),
   }),
   readOnly: false,
@@ -41,10 +38,9 @@ const updatePlanTool = defineTool({
       id: step.id,
       title: step.title,
       status: step.status,
-      dependsOn: step.depends_on,
-      acceptanceCriteria: step.acceptance_criteria,
+      dependsOn: [],
+      acceptanceCriteria: [],
       ...(step.evidence ? { evidence: step.evidence } : {}),
-      ...(step.owner ? { owner: step.owner } : {}),
     }));
     validatePlan(steps);
     const previous = new Map(context.state.plan.map((step) => [step.id, step]));
@@ -79,11 +75,12 @@ const startTaskTool = defineTool({
 const completeTaskTool = defineTool({
   name: "complete_task",
   description:
-    "Request task completion or report a hard blocker. Completed work is accepted only when every plan step is complete and modified files have successful verification evidence.",
+    "Request task completion or report a hard blocker. Completion requires a non-empty evidence-backed plan; modified work also requires the exact successful current-revision verification_command.",
   schema: z.object({
     status: z.enum(["completed", "blocked"]),
     summary: z.string().min(1).max(4_000),
     evidence: z.array(z.string().min(1).max(1_000)).max(30).default([]),
+    verification_command: z.string().min(1).max(2_000).optional(),
   }),
   readOnly: false,
   async execute(context, input) {
@@ -92,20 +89,34 @@ const completeTaskTool = defineTool({
       if (pendingWorkers.length > 0) {
         throw new Error(`cannot complete while child agents are still running: ${pendingWorkers.join(", ")}`);
       }
+      if (context.state.plan.length === 0) {
+        throw new Error("cannot complete a task without a plan");
+      }
       const unfinished = context.state.plan.filter((step) => step.status !== "completed");
       if (unfinished.length > 0) {
         throw new Error(`cannot complete task with unfinished plan steps: ${unfinished.map((step) => step.id).join(", ")}`);
       }
-      if (
-        context.state.modifiedFiles.size > 0 &&
-        !context.state.verifications.some((verification) =>
-          verification.exitCode === 0 &&
-          !verification.timedOut &&
-          !verification.truncated &&
-          verification.revision === context.state.revision
-        )
-      ) {
-        throw new Error("cannot complete modified work without a successful test, check, lint, or build command");
+      if (input.evidence.length === 0) {
+        throw new Error("cannot complete a task without explicit evidence");
+      }
+      if (context.state.modifiedFiles.size > 0) {
+        if (!input.verification_command) {
+          throw new Error("modified work requires an explicit verification_command");
+        }
+        const verification = context.state.verifications.find((candidate) =>
+          candidate.command === input.verification_command &&
+          candidate.exitCode === 0 &&
+          !candidate.timedOut &&
+          !candidate.truncated &&
+          candidate.revision === context.state.revision
+        );
+        if (!verification) {
+          throw new Error(`verification_command was not a successful current-revision check: ${input.verification_command}`);
+        }
+        const uncovered = [...context.state.modifiedFiles].filter((path) => !verification.changedFiles.includes(path));
+        if (uncovered.length > 0) {
+          throw new Error(`verification does not cover modified files: ${uncovered.join(", ")}`);
+        }
       }
     }
     context.state.completion = {
@@ -119,6 +130,7 @@ const completeTaskTool = defineTool({
         status: input.status,
         modified_files: [...context.state.modifiedFiles],
         verifications: context.state.verifications,
+        verification_command: input.verification_command ?? null,
       }),
     };
   },
@@ -131,23 +143,5 @@ export function validatePlan(steps: PlanStep[]): void {
     if (step.status === "completed" && !step.evidence?.trim()) {
       throw new Error(`completed plan step ${step.id} requires evidence`);
     }
-    for (const dependency of step.dependsOn) {
-      if (!byId.has(dependency)) throw new Error(`plan step ${step.id} has unknown dependency ${dependency}`);
-      if (dependency === step.id) throw new Error(`plan step ${step.id} cannot depend on itself`);
-      if (step.status !== "pending" && byId.get(dependency)?.status !== "completed") {
-        throw new Error(`plan step ${step.id} cannot be ${step.status} before dependency ${dependency} completes`);
-      }
-    }
   }
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (id: string) => {
-    if (visiting.has(id)) throw new Error(`plan dependency cycle includes ${id}`);
-    if (visited.has(id)) return;
-    visiting.add(id);
-    for (const dependency of byId.get(id)?.dependsOn ?? []) visit(dependency);
-    visiting.delete(id);
-    visited.add(id);
-  };
-  for (const id of byId.keys()) visit(id);
 }

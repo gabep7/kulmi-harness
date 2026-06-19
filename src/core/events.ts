@@ -37,13 +37,19 @@ export interface EventEnvelope {
 
 export type EventListener = (event: EventEnvelope) => void | Promise<void>;
 
+interface RegisteredListener {
+  listener: EventListener;
+  critical: boolean;
+}
+
 export class EventBus {
-  readonly #listeners = new Set<EventListener>();
+  readonly #listeners = new Set<RegisteredListener>();
   #sequence = 0;
 
-  on(listener: EventListener): () => void {
-    this.#listeners.add(listener);
-    return () => this.#listeners.delete(listener);
+  on(listener: EventListener, options: { critical?: boolean } = {}): () => void {
+    const registered = { listener, critical: options.critical ?? false };
+    this.#listeners.add(registered);
+    return () => this.#listeners.delete(registered);
   }
 
   async emit(event: RuntimeEvent): Promise<EventEnvelope> {
@@ -53,7 +59,17 @@ export class EventBus {
       event: redactKnownSecrets(event),
     };
 
-    await Promise.all([...this.#listeners].map((listener) => listener(envelope)));
+    const critical: Promise<void>[] = [];
+    for (const registered of this.#listeners) {
+      try {
+        const result = registered.listener(envelope);
+        if (registered.critical) critical.push(Promise.resolve(result));
+        else void Promise.resolve(result).catch(() => undefined);
+      } catch (error) {
+        if (registered.critical) critical.push(Promise.reject(error));
+      }
+    }
+    await Promise.all(critical);
     return envelope;
   }
 }

@@ -28,7 +28,6 @@ import { ArtifactStore } from "./artifacts.js";
 import { readArtifactTool } from "../tools/artifacts.js";
 import { fetchUrlTool, freeWebSearchTool } from "../tools/web-search.js";
 import { skillTools } from "../tools/skills.js";
-import { McpClientPool } from "../mcp/client.js";
 
 export interface ControllerOptions {
   cwd: string;
@@ -55,7 +54,6 @@ export class SessionController {
   readonly #state: RunState;
   readonly #agent: Agent;
   readonly #scheduler: SubagentScheduler;
-  readonly #mcp: McpClientPool;
   #closed = false;
 
   private constructor(options: {
@@ -68,7 +66,6 @@ export class SessionController {
     workspaceRoot: string;
     autonomy: AutonomyLevel;
     scheduler: SubagentScheduler;
-    mcp: McpClientPool;
     searchMode: SearchMode;
   }) {
     this.events = options.events;
@@ -78,7 +75,6 @@ export class SessionController {
     this.#state = options.state;
     this.#agent = options.agent;
     this.#scheduler = options.scheduler;
-    this.#mcp = options.mcp;
     this.sessionId = options.session.id;
     this.model = options.provider.model;
     this.workspaceRoot = options.workspaceRoot;
@@ -88,6 +84,10 @@ export class SessionController {
 
   get messages(): readonly ProviderMessage[] {
     return this.#agent.messages;
+  }
+
+  get mode(): AgentMode {
+    return this.#state.mode;
   }
 
   static async create(options: ControllerOptions): Promise<SessionController> {
@@ -140,8 +140,6 @@ export class SessionController {
     const instructions = loadInstructions(workspaceRoot, cwd);
     const skills = discoverSkills(workspaceRoot);
     const skillsInventory = skillsPromptInventory(skills);
-    const mcp = new McpClientPool();
-    const mcpTools = await mcp.connect(config.mcpServers, cwd);
     const state: RunState = loaded?.session.state ?? {
       agentId: createId("agent"),
       mode: options.mode,
@@ -151,7 +149,7 @@ export class SessionController {
       verifications: [],
       revision: 0,
     };
-    state.mode = options.mode;
+    if (!loaded || options.mode === "task") state.mode = options.mode;
 
     const rootCheckpoint = new CheckpointStore(session.path, workspaceRoot);
     const worktrees = new WorktreeManager(workspaceRoot);
@@ -188,8 +186,8 @@ export class SessionController {
       const readOnly = job.mode !== "implement";
       const searchTools = search.mode === "free" ? [freeWebSearchTool(search), fetchUrlTool()] : [];
       const childTools = readOnly
-        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...mcpTools.filter((tool) => tool.readOnly)])
-        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...mcpTools]);
+        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills)])
+        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills)]);
       const childAgent = new Agent({
         provider,
         tools: childTools,
@@ -211,7 +209,7 @@ export class SessionController {
         commandTimeoutMs: config.commandTimeoutSeconds * 1_000,
         maxOutputBytes: config.maxOutputBytes,
         contextWindow: resolved.contextWindow,
-        permissions,
+        ...(!readOnly && permissions ? { permissions } : {}),
       });
       activeWorkers.set(job.id, childAgent);
       try {
@@ -262,7 +260,6 @@ export class SessionController {
       ...progressTools(),
       ...subagentTools(),
       ...skillTools(skills),
-      ...mcpTools,
     ];
     const agent = new Agent({
       provider,
@@ -298,7 +295,6 @@ export class SessionController {
       state,
       agent,
       scheduler,
-      mcp,
       searchMode: search.mode,
       workspaceRoot,
       autonomy,
@@ -329,7 +325,6 @@ export class SessionController {
     if (this.#closed) return;
     this.#closed = true;
     await this.#scheduler.cancelAll();
-    await this.#mcp.close();
     await this.events.emit({
       type: "session.finished",
       sessionId: this.sessionId,

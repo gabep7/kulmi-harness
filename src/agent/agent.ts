@@ -78,7 +78,8 @@ export class Agent {
     let repeatedCalls = 0;
     let previousError = "";
     let repeatedErrors = 0;
-    let promptTokens = estimateTokens(this.#messages, this.#options.tools.providerTools());
+    let providerTools = this.#providerTools();
+    let promptTokens = estimateTokens(this.#messages, providerTools);
 
     try {
       for (let step = 0; step < this.#options.maxSteps; step++) {
@@ -93,13 +94,14 @@ export class Agent {
         }
         if (promptTokens >= this.#options.contextWindow * 0.78) {
           await this.#compact(signal);
-          promptTokens = estimateTokens(this.#messages, this.#options.tools.providerTools());
+          providerTools = this.#providerTools();
+          promptTokens = estimateTokens(this.#messages, providerTools);
         }
         const response = await this.#options.provider.complete({
           messages: this.#messages,
-          tools: this.#options.tools.providerTools(),
+          tools: providerTools,
           signal,
-          cacheScope: state.agentId,
+          cacheScope: `${state.agentId}:${state.mode}`,
           onReasoningDelta: (text) => events.emit({
             type: "assistant.reasoning.delta",
             agentId: state.agentId,
@@ -124,7 +126,7 @@ export class Agent {
             message: `MiMo web search: ${response.searchError}`,
           });
         }
-        promptTokens = response.usage.promptTokens || estimateTokens(this.#messages, this.#options.tools.providerTools());
+        promptTokens = response.usage.promptTokens || estimateTokens(this.#messages, providerTools);
 
         if (response.finishReason === "length") {
           throw new Error("MiMo stopped because the output limit was reached");
@@ -200,7 +202,8 @@ export class Agent {
           } else {
             for (const call of calls) await appendResult(await runCall(call));
           }
-          promptTokens = Math.max(promptTokens, estimateTokens(this.#messages, this.#options.tools.providerTools()));
+          providerTools = this.#providerTools();
+          promptTokens = Math.max(promptTokens, estimateTokens(this.#messages, providerTools));
           if (repeatedErrors >= 10) throw new Error("agent repeated the same tool error ten times");
           continue;
         }
@@ -262,6 +265,13 @@ export class Agent {
       ...(options.subagents ? { subagents: options.subagents } : {}),
       ...(options.permissions ? { permissions: options.permissions } : {}),
     };
+  }
+
+  #providerTools(): ProviderTool[] {
+    if (this.#options.state.mode === "chat") {
+      return this.#options.tools.providerTools(["start_task"]);
+    }
+    return this.#options.tools.providerTools().filter((tool) => tool.function.name !== "start_task");
   }
 
   async #compact(signal: AbortSignal): Promise<void> {

@@ -142,6 +142,55 @@ describe("Agent", () => {
     }
   });
 
+  it("defers task tools in chat and changes cache scope after promotion", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
+    const provider = new ScriptedProvider([
+      toolResponse("call_start", "start_task", JSON.stringify({ goal: "inspect it" }), "promote"),
+      toolResponse("call_plan", "update_plan", JSON.stringify({
+        steps: [{ id: "inspect", title: "Inspect", status: "completed", evidence: "done", depends_on: [], acceptance_criteria: ["done"] }],
+      }), "plan"),
+      toolResponse("call_complete", "complete_task", JSON.stringify({ status: "completed", summary: "done", evidence: ["done"] }), "complete"),
+      textResponse("done"),
+    ]);
+    const events = new EventBus();
+    const session = await SessionStore.create({ cwd: workspace, model: provider.model });
+    session.attach(events);
+    const state: RunState = {
+      agentId: "agent_deferred",
+      mode: "chat",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry(progressTools()),
+      events,
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "stable",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "medium",
+      maxSteps: 10,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 1_000_000,
+    });
+
+    expect((await agent.run("inspect it", new AbortController().signal)).text).toBe("done");
+    expect(provider.requests[0]?.tools.map((tool) => tool.function.name)).toEqual(["start_task"]);
+    for (const request of provider.requests.slice(1)) {
+      expect(request.tools.map((tool) => tool.function.name)).toEqual(["complete_task", "inspect_plan", "update_plan"]);
+    }
+    expect(provider.requests[0]?.cacheScope).toBe("agent_deferred:chat");
+    expect(provider.requests[1]?.cacheScope).toBe("agent_deferred:task");
+  });
+
   it("repairs interrupted tool groups as uncertain instead of replaying them", () => {
     const repaired = sanitizeToolPairing([
       { role: "system", content: "stable" },
@@ -218,10 +267,10 @@ describe("Agent", () => {
         status: "completed",
         evidence: "done",
         depends_on: [],
-        acceptance_criteria: [],
+        acceptance_criteria: ["change remains valid"],
       }],
     });
-    const completion = JSON.stringify({ status: "completed", summary: "done", evidence: [] });
+    const completion = JSON.stringify({ status: "completed", summary: "done", evidence: ["plan complete"] });
     const provider = new ScriptedProvider([
       toolResponse("plan", "update_plan", completedPlan, "plan"),
       toolResponse("complete_one", "complete_task", completion, "complete"),
@@ -295,6 +344,7 @@ function structuredCloneRequest(request: ProviderRequest): ProviderRequest {
     messages: structuredClone(request.messages),
     tools: structuredClone(request.tools),
     signal: request.signal,
+    ...(request.cacheScope ? { cacheScope: request.cacheScope } : {}),
   };
 }
 

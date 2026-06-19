@@ -27,6 +27,13 @@ export interface TuiSnapshot {
   status: AgentStatus;
   pendingApproval: PendingApproval | undefined;
   expandedThinking: boolean;
+  completion: CompletionSummary | undefined;
+}
+
+export interface CompletionSummary {
+  status: "completed" | "blocked";
+  modifiedFiles: string[];
+  verificationCommands: string[];
 }
 
 const emptyUsage: TokenUsage = {
@@ -57,6 +64,7 @@ export class TuiStore {
       status: "idle",
       pendingApproval: undefined,
       expandedThinking: false,
+      completion: undefined,
     };
   }
 
@@ -83,6 +91,24 @@ export class TuiStore {
     this.#update({ transcript: historyFeed(messages) }, true);
   }
 
+  replaceSession(messages: readonly ProviderMessage[]): void {
+    this.#rootAgentId = undefined;
+    this.#snapshot.pendingApproval?.resolve(false);
+    this.#snapshot = {
+      transcript: historyFeed(messages),
+      live: [],
+      reasoning: "",
+      streaming: "",
+      plan: [],
+      usage: emptyUsage,
+      status: "idle",
+      pendingApproval: undefined,
+      expandedThinking: this.#snapshot.expandedThinking,
+      completion: undefined,
+    };
+    this.#notify();
+  }
+
   toggleThinking(): void {
     this.#update({ expandedThinking: !this.#snapshot.expandedThinking }, true);
   }
@@ -90,7 +116,7 @@ export class TuiStore {
   // Render the user's message the instant they submit, before the run round-trips
   // through the event bus. agent.started dedupes against this so it is not doubled.
   echoUserMessage(text: string): void {
-    this.#commit({ id: `user-local-${Date.now()}`, kind: "user", text }, { status: "running", reasoning: "", streaming: "" }, true);
+    this.#commit({ id: `user-local-${Date.now()}`, kind: "user", text }, { status: "running", reasoning: "", streaming: "", completion: undefined }, true);
   }
 
   requestPermission(request: PermissionRequest): Promise<boolean> {
@@ -121,9 +147,9 @@ export class TuiStore {
           this.#rootAgentId = event.agentId;
           const last = this.#snapshot.transcript.at(-1);
           if (last?.kind === "user" && last.text === event.prompt) {
-            this.#update({ status: "running", reasoning: "", streaming: "" });
+            this.#update({ status: "running", reasoning: "", streaming: "", completion: undefined });
           } else {
-            this.#commit({ id: `user-${envelope.sequence}`, kind: "user", text: event.prompt }, { status: "running", reasoning: "", streaming: "" });
+            this.#commit({ id: `user-${envelope.sequence}`, kind: "user", text: event.prompt }, { status: "running", reasoning: "", streaming: "", completion: undefined });
           }
         }
         break;
@@ -159,6 +185,10 @@ export class TuiStore {
         });
         break;
       case "tool.finished":
+        if (event.tool === "complete_task" && !event.isError) {
+          const completion = parseCompletion(event.output);
+          if (completion) this.#update({ completion });
+        }
         if (this.#snapshot.live.some((item) => item.id === event.callId)) {
           this.#finalizeLive(event.callId, (item) => item.kind === "tool"
             ? {
@@ -289,12 +319,11 @@ function friendlyTool(name: string): string {
     inspect_plan: "Inspect plan",
     complete_task: "Complete task",
     start_task: "Start task",
-    list_skills: "List skills",
     read_skill: "Read skill",
     read_artifact: "Read artifact",
   };
   if (labels[name]) return labels[name];
-  return name.replace(/^mcp__/, "mcp ").replaceAll("__", " · ").replaceAll("_", " ");
+  return name.replaceAll("_", " ");
 }
 
 function toolDetail(input: unknown): string {
@@ -312,4 +341,20 @@ function shortPrompt(value: string): string {
 
 function compactError(value: string): string {
   return value.replace(/\s+/g, " ").slice(0, 120);
+}
+
+function parseCompletion(value: string): CompletionSummary | undefined {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (parsed.status !== "completed" && parsed.status !== "blocked") return undefined;
+    const modifiedFiles = Array.isArray(parsed.modified_files)
+      ? parsed.modified_files.filter((item): item is string => typeof item === "string")
+      : [];
+    const verificationCommands = typeof parsed.verification_command === "string"
+      ? [parsed.verification_command]
+      : [];
+    return { status: parsed.status, modifiedFiles, verificationCommands };
+  } catch {
+    return undefined;
+  }
 }

@@ -27,6 +27,7 @@ export interface VerificationRecord {
   revision: number;
   timedOut: boolean;
   truncated: boolean;
+  changedFiles: string[];
 }
 
 export interface CompletionRecord {

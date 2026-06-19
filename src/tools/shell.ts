@@ -15,8 +15,9 @@ export const shellTool = defineTool({
   readOnly: false,
   async execute(context, input) {
     const decision = decideCommand(input.command, context.autonomy, context.workspaceRoot);
+    let approvedDenial = false;
     if (!decision.allowed) {
-      const approvable = context.permissions && isApprovableDenial(decision.reason);
+      const approvable = context.autonomy !== "read" && context.permissions && isApprovableDenial(decision.reason);
       const approved = approvable ? await context.permissions!.request({
         tool: "shell",
         risk: decision.risk === "read" || decision.risk === "blocked" ? "high" : decision.risk,
@@ -27,8 +28,9 @@ export const shellTool = defineTool({
       if (!approved) {
         return { content: JSON.stringify({ blocked: true, risk: decision.risk, reason: decision.reason }), isError: true };
       }
+      approvedDenial = true;
     }
-    const snapshot = decision.risk === "read"
+    const snapshot = decision.risk === "read" && !approvedDenial
       ? undefined
       : await WorkspaceSnapshot.capture(context.workspaceRoot);
     let result: Awaited<ReturnType<typeof runShell>> | undefined;
@@ -59,6 +61,7 @@ export const shellTool = defineTool({
         revision: context.state.revision,
         timedOut: result.timedOut,
         truncated: result.truncated,
+        changedFiles: [...context.state.modifiedFiles].sort(),
       });
     }
     const content = [

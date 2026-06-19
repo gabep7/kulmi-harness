@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -58,6 +58,7 @@ describe("shell tool", () => {
       revision: 1,
       timedOut: false,
       truncated: false,
+      changedFiles: ["target.txt"],
     });
 
     let requested = false;
@@ -74,5 +75,23 @@ describe("shell tool", () => {
     expect(requested).toBe(true);
     expect(deletion.isError).toBeFalsy();
     await expect(access(join(root, "target.txt"))).rejects.toThrow();
+    expect(state.modifiedFiles).toContain("target.txt");
+    expect(state.revision).toBe(2);
+    expect(state.verifications).not.toContainEqual(expect.objectContaining({ revision: 2 }));
+
+    let readOnlyRequested = false;
+    const readOnlyWrite = await shellTool.execute({
+      ...context,
+      autonomy: "read",
+      permissions: {
+        request: async () => {
+          readOnlyRequested = true;
+          return true;
+        },
+      },
+    }, { command: "cp source.txt target.txt" });
+    expect(readOnlyWrite.isError).toBe(true);
+    expect(readOnlyRequested).toBe(false);
+    await expect(readFile(join(root, "target.txt"), "utf8")).rejects.toThrow();
   });
 });

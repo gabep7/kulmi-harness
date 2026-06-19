@@ -60,7 +60,6 @@ export interface Tool<TSchema extends z.ZodType = z.ZodType> {
   schema: TSchema;
   readOnly: boolean;
   isParallelSafe?: (input: z.output<TSchema>) => boolean;
-  providerSchema?: Record<string, unknown>;
   execute(context: ToolContext, input: z.output<TSchema>): Promise<ToolResult>;
 }
 

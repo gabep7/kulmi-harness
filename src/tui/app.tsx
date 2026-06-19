@@ -1,8 +1,8 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
-import type { AutonomyLevel, PlanStep } from "../core/types.js";
-import type { TuiStore, FeedItem } from "./store.js";
+import type { AgentMode, AutonomyLevel, PlanStep } from "../core/types.js";
+import type { CompletionSummary, TuiStore, FeedItem } from "./store.js";
 import { glyph, theme } from "./theme.js";
 
 export interface TuiAppProps {
@@ -12,16 +12,42 @@ export interface TuiAppProps {
   cwd: string;
   autonomy: AutonomyLevel;
   search: "off" | "free";
+  mode?: AgentMode;
   onSubmit: (prompt: string) => Promise<void>;
-  onCommand: (command: string, args: string) => Promise<string | { submit: string } | undefined>;
+  onCommand: (command: string, args: string) => Promise<TuiCommandResult>;
+  onSwitchSession?: (sessionId: string) => Promise<TuiRuntimeInfo>;
   onCancel: () => void;
   onExit: () => void;
 }
 
+export interface TuiSessionOption {
+  id: string;
+  status: string;
+  model: string;
+  title: string;
+  current: boolean;
+}
+
+export interface TuiRuntimeInfo {
+  model: string;
+  sessionId: string;
+  cwd: string;
+  autonomy: AutonomyLevel;
+  search: "off" | "free";
+  mode: AgentMode;
+}
+
+export type TuiCommandResult = string | {
+  submit?: string;
+  notice?: string;
+  mode?: AgentMode;
+  sessions?: TuiSessionOption[];
+} | undefined;
+
 const commands = [
   ["/help", "show commands and keys"],
   ["/goal", "start a goal-oriented task"],
-  ["/sessions", "show recent sessions"],
+  ["/sessions", "switch sessions"],
   ["/status", "show runtime details"],
   ["/thinking", "expand or collapse reasoning"],
   ["/fork", "fork this session"],
@@ -42,6 +68,16 @@ export function TuiApp(props: TuiAppProps) {
   const [input, setInput] = useState("");
   const [help, setHelp] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [sessions, setSessions] = useState<TuiSessionOption[] | undefined>();
+  const [sessionCursor, setSessionCursor] = useState(0);
+  const [runtime, setRuntime] = useState<TuiRuntimeInfo>({
+    model: props.model,
+    sessionId: props.sessionId,
+    cwd: props.cwd,
+    autonomy: props.autonomy,
+    search: props.search,
+    mode: props.mode ?? "chat",
+  });
 
   useEffect(() => {
     const resize = () => setSize(terminalSize(stdout));
@@ -53,6 +89,47 @@ export function TuiApp(props: TuiAppProps) {
     if (snapshot.pendingApproval) {
       if (value.toLowerCase() === "y") props.store.resolvePermission(true);
       if (value.toLowerCase() === "n" || key.escape || key.return) props.store.resolvePermission(false);
+      return;
+    }
+    if (sessions) {
+      if (key.ctrl && value === "c") {
+        props.onExit();
+        exit();
+        return;
+      }
+      if (busy) return;
+      if (key.escape) {
+        setSessions(undefined);
+        return;
+      }
+      if (key.upArrow) {
+        setSessionCursor((index) => (index - 1 + sessions.length) % sessions.length);
+        return;
+      }
+      if (key.downArrow) {
+        setSessionCursor((index) => (index + 1) % sessions.length);
+        return;
+      }
+      if (key.return) {
+        const selected = sessions[sessionCursor];
+        if (!selected || selected.current) {
+          setSessions(undefined);
+          return;
+        }
+        if (!props.onSwitchSession) {
+          props.store.addNotice("Session switching is unavailable", true);
+          setSessions(undefined);
+          return;
+        }
+        setBusy(true);
+        void props.onSwitchSession(selected.id).then((next) => {
+          setRuntime(next);
+          setSessions(undefined);
+        }, (error: unknown) => {
+          props.store.addNotice(error instanceof Error ? error.message : String(error), true);
+        }).finally(() => setBusy(false));
+        return;
+      }
       return;
     }
     if (key.escape && busy) props.onCancel();
@@ -86,20 +163,27 @@ export function TuiApp(props: TuiAppProps) {
         props.store.toggleThinking();
         return;
       }
+      setBusy(true);
       try {
         const result = await props.onCommand(command, parts.join(" "));
         if (typeof result === "string") {
           if (result) props.store.addNotice(result);
-        } else if (result?.submit) {
-          setBusy(true);
-          try {
-            await props.onSubmit(result.submit);
-          } finally {
-            setBusy(false);
+        } else if (result) {
+          if (result.notice) props.store.addNotice(result.notice);
+          if (result.mode) setRuntime((current) => ({ ...current, mode: result.mode! }));
+          if (result.sessions) {
+            if (result.sessions.length === 0) props.store.addNotice("No saved sessions in this workspace");
+            else {
+              setSessionCursor(Math.max(0, result.sessions.findIndex((session) => session.current)));
+              setSessions(result.sessions);
+            }
           }
+          if (result.submit) await props.onSubmit(result.submit);
         }
       } catch (error) {
         props.store.addNotice(error instanceof Error ? error.message : String(error), true);
+      } finally {
+        setBusy(false);
       }
       return;
     }
@@ -136,15 +220,18 @@ export function TuiApp(props: TuiAppProps) {
         )}
 
         {snapshot.plan.length > 0 && <PlanBlock plan={snapshot.plan} />}
+        {snapshot.completion && <CompletionBlock completion={snapshot.completion} />}
 
         {help && <Help onClose={() => setHelp(false)} />}
-        {!help && !snapshot.pendingApproval && input.startsWith("/") && <CommandPalette query={input} columns={size.columns} />}
+        {!help && !snapshot.pendingApproval && !sessions && input.startsWith("/") && <CommandPalette query={input} columns={size.columns} />}
 
         {snapshot.pendingApproval
           ? <Approval request={snapshot.pendingApproval.request} />
-          : <Composer value={input} onChange={setInput} onSubmit={submit} busy={busy} />}
+          : sessions
+            ? <SessionPicker sessions={sessions} cursor={sessionCursor} />
+            : <Composer value={input} onChange={setInput} onSubmit={submit} busy={busy} />}
 
-        <Footer {...props} status={snapshot.status} usage={snapshot.usage} busy={busy} />
+        <Footer runtime={runtime} status={snapshot.status} usage={snapshot.usage} busy={busy} />
       </Box>
     </Box>
   );
@@ -217,6 +304,17 @@ function PlanBlock({ plan }: { plan: PlanStep[] }) {
   );
 }
 
+function CompletionBlock({ completion }: { completion: CompletionSummary }) {
+  return (
+    <Box marginTop={1} borderStyle="round" borderColor={completion.status === "completed" ? theme.sage : theme.rust} paddingX={1} flexDirection="column">
+      <Text color={completion.status === "completed" ? theme.sage : theme.rose} bold>{completion.status}</Text>
+      <Text color={theme.muted}>{completion.modifiedFiles.length} changed file{completion.modifiedFiles.length === 1 ? "" : "s"}</Text>
+      {completion.modifiedFiles.slice(0, 5).map((path) => <Text key={path} color={theme.faint}>· {path}</Text>)}
+      {completion.verificationCommands.map((command) => <Text key={command} color={theme.sand}>✓ {command}</Text>)}
+    </Box>
+  );
+}
+
 function Composer({ value, onChange, onSubmit, busy }: { value: string; onChange: (value: string) => void; onSubmit: (value: string) => void; busy: boolean }) {
   return (
     <Box marginTop={1} borderStyle="round" borderColor={busy ? theme.faint : theme.cocoa} paddingX={1}>
@@ -233,6 +331,20 @@ function Approval({ request }: { request: import("../tools/types.js").Permission
       <Text color={theme.ink}>{request.reason}</Text>
       {request.command && <Text color={theme.sand}>$ {request.command}</Text>}
       <Text color={theme.muted}><Text color={theme.sage}>y</Text> allow once   <Text color={theme.rose}>n</Text> deny</Text>
+    </Box>
+  );
+}
+
+function SessionPicker({ sessions, cursor }: { sessions: TuiSessionOption[]; cursor: number }) {
+  return (
+    <Box marginTop={1} borderStyle="round" borderColor={theme.cocoa} paddingX={1} flexDirection="column">
+      <Text color={theme.cream} bold>sessions</Text>
+      {sessions.map((session, index) => (
+        <Text key={session.id} color={index === cursor ? theme.sand : theme.muted} bold={index === cursor}>
+          {index === cursor ? "›" : " "} {session.id.replace("session_", "").slice(0, 8)}  {session.status.padEnd(9)}  {clampLine(session.title, 56)}{session.current ? "  current" : ""}
+        </Text>
+      ))}
+      <Text color={theme.faint}>↑↓ select  ·  enter open  ·  esc close</Text>
     </Box>
   );
 }
@@ -303,15 +415,16 @@ function MarkdownBlock({ text, width }: { text: string; width: number }) {
   );
 }
 
-function Footer({ model, status, autonomy, search, usage, busy }: TuiAppProps & { status: string; usage: ReturnType<TuiStore["getSnapshot"]>["usage"]; busy: boolean }) {
-  const cacheRate = usage.promptTokens > 0 ? Math.round((usage.cacheHitTokens / usage.promptTokens) * 100) : 0;
+function Footer({ runtime, status, usage, busy }: { runtime: TuiRuntimeInfo; status: string; usage: ReturnType<TuiStore["getSnapshot"]>["usage"]; busy: boolean }) {
   return (
     <Box flexDirection="column">
       <Box justifyContent="space-between">
-        <Text color={theme.faint} wrap="truncate-end">{glyph.brand} kulmi  ·  <Text color={statusColor(status)}>{status}</Text>  ·  {busy ? "esc stop" : "? help"}  ·  {autonomyLabel(autonomy)}  ·  search {search}</Text>
-        <Text color={theme.faint}>{compactNumber(usage.totalTokens)} tokens  ·  <Text color={cacheRate > 50 ? theme.sage : theme.muted}>{cacheRate}% cache</Text></Text>
+        <Text color={theme.faint} wrap="truncate-end">{glyph.brand} kulmi  ·  <Text color={statusColor(status)}>{status}</Text>  ·  {runtime.mode === "task" ? "goal" : "chat"}  ·  {busy ? "esc stop" : "? help"}  ·  {autonomyLabel(runtime.autonomy)}  ·  search {runtime.search}</Text>
       </Box>
-      <Text color={theme.faint} wrap="truncate-end">{model}</Text>
+      <Box justifyContent="space-between">
+        <Text color={theme.faint} wrap="truncate-end">{runtime.model}  ·  {runtime.sessionId.replace("session_", "").slice(0, 8)}</Text>
+        <Text color={theme.faint}>{compactNumber(usage.totalTokens)} processed  ·  <Text color={theme.ink}>{compactNumber(usage.cacheMissTokens)} fresh</Text>  ·  <Text color={usage.cacheHitTokens > 0 ? theme.sage : theme.muted}>{compactNumber(usage.cacheHitTokens)} cached</Text>  ·  {compactNumber(usage.completionTokens)} out</Text>
+      </Box>
     </Box>
   );
 }

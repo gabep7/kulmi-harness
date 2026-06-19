@@ -6,17 +6,6 @@ export function skillTools(skills: SkillDefinition[]): AnyTool[] {
   const byName = new Map(skills.map((skill) => [skill.name, skill]));
   return [
     defineTool({
-      name: "list_skills",
-      description: "List locally installed project and user skills. Skills contain optional workflows and domain instructions.",
-      schema: z.object({}),
-      readOnly: true,
-      async execute() {
-        return {
-          content: JSON.stringify(skills.map(({ name, description, source }) => ({ name, description, source })), null, 2),
-        };
-      },
-    }),
-    defineTool({
       name: "read_skill",
       description: "Read one local skill by exact name before applying its workflow.",
       schema: z.object({ name: z.string().min(1).max(80) }),

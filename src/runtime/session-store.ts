@@ -8,6 +8,16 @@ import type { AgentStatus, RunState } from "../core/types.js";
 import type { ProviderMessage } from "../provider/types.js";
 import { redactKnownSecrets } from "../core/redact.js";
 import type { WorkerJob } from "../agent/scheduler.js";
+import {
+  decodeMessages,
+  decodeMetadata,
+  decodeState,
+  decodeWorkers,
+  encodeMessages,
+  encodeMetadata,
+  encodeState,
+  encodeWorkers,
+} from "./session-schema.js";
 
 export interface SessionMetadata {
   id: string;
@@ -82,54 +92,42 @@ export class SessionStore {
   static async open(id: string): Promise<{ store: SessionStore; session: LoadedSession }> {
     if (!/^session_[a-f0-9]{16}$/.test(id)) throw new Error(`invalid session ID ${id}`);
     const path = join(dataRoot(), "sessions", id);
-    const metadata = JSON.parse(
-      await readFile(join(path, "session.json"), "utf8"),
-    ) as SessionMetadata;
-    const messages = JSON.parse(
-      await readFile(join(path, "messages.json"), "utf8"),
-    ) as ProviderMessage[];
-    let state: RunState | undefined;
-    let workers: WorkerJob[] | undefined;
-    try {
-      const stored = JSON.parse(await readFile(join(path, "state.json"), "utf8")) as Omit<RunState, "modifiedFiles"> & { modifiedFiles: string[] };
-      state = {
-        ...stored,
-        revision: stored.revision ?? 0,
-        plan: stored.plan.map((step) => ({
-          ...step,
-          dependsOn: step.dependsOn ?? [],
-          acceptanceCriteria: step.acceptanceCriteria ?? [],
-        })),
-        verifications: stored.verifications.map((verification) => ({
-          ...verification,
-          revision: verification.revision ?? -1,
-          timedOut: verification.timedOut ?? false,
-          truncated: verification.truncated ?? false,
-        })),
-        modifiedFiles: new Set(stored.modifiedFiles),
-      };
-    } catch {
-      state = undefined;
+    const decodedMetadata = decodeFile(
+      await readRequiredJson(join(path, "session.json"), "session metadata"),
+      "session metadata",
+      decodeMetadata,
+    );
+    if (decodedMetadata.value.id !== id) {
+      throw new Error(`invalid session metadata: expected ID ${id}, found ${decodedMetadata.value.id}`);
     }
-    try {
-      workers = JSON.parse(await readFile(join(path, "workers.json"), "utf8")) as WorkerJob[];
-    } catch {
-      workers = undefined;
-    }
+    const decodedMessages = decodeFile(
+      await readRequiredJson(join(path, "messages.json"), "session messages"),
+      "session messages",
+      decodeMessages,
+    );
+    const rawState = await readOptionalJson(join(path, "state.json"), "run state");
+    const rawWorkers = await readOptionalJson(join(path, "workers.json"), "worker state");
+    const decodedState = rawState === undefined ? undefined : decodeFile(rawState, "run state", decodeState);
+    const decodedWorkers = rawWorkers === undefined ? undefined : decodeFile(rawWorkers, "worker state", decodeWorkers);
+    const store = new SessionStore(path, decodedMetadata.value);
+    if (decodedMetadata.migrated) await store.#writeMetadata();
+    if (decodedMessages.migrated) await store.saveMessages(decodedMessages.value);
+    if (decodedState?.migrated) await store.saveRunState(decodedState.value);
+    if (decodedWorkers?.migrated) await store.saveWorkerJobs(decodedWorkers.value);
     return {
-      store: new SessionStore(path, metadata),
+      store,
       session: {
-        metadata,
-        messages,
-        ...(state ? { state } : {}),
-        ...(workers ? { workers } : {}),
+        metadata: decodedMetadata.value,
+        messages: decodedMessages.value,
+        ...(decodedState ? { state: decodedState.value } : {}),
+        ...(decodedWorkers ? { workers: decodedWorkers.value } : {}),
       },
     };
   }
 
   attach(bus: EventBus): void {
     this.#unsubscribe?.();
-    this.#unsubscribe = bus.on((event) => this.appendEvent(event));
+    this.#unsubscribe = bus.on((event) => this.appendEvent(event), { critical: true });
   }
 
   async appendEvent(event: EventEnvelope): Promise<void> {
@@ -137,18 +135,15 @@ export class SessionStore {
   }
 
   async saveMessages(messages: ProviderMessage[]): Promise<void> {
-    await this.#enqueue(() => writeJsonAtomic(this.#messagesPath, redactKnownSecrets(messages)));
+    await this.#enqueue(() => writeJsonAtomic(this.#messagesPath, redactKnownSecrets(encodeMessages(messages))));
   }
 
   async saveRunState(state: RunState): Promise<void> {
-    await this.#enqueue(() => writeJsonAtomic(this.#statePath, redactKnownSecrets({
-      ...state,
-      modifiedFiles: [...state.modifiedFiles],
-    })));
+    await this.#enqueue(() => writeJsonAtomic(this.#statePath, redactKnownSecrets(encodeState(state))));
   }
 
   async saveWorkerJobs(workers: WorkerJob[]): Promise<void> {
-    await this.#enqueue(() => writeJsonAtomic(this.#workersPath, redactKnownSecrets(workers)));
+    await this.#enqueue(() => writeJsonAtomic(this.#workersPath, redactKnownSecrets(encodeWorkers(workers))));
   }
 
   async archiveMessages(messages: ProviderMessage[], reason: string): Promise<string> {
@@ -175,7 +170,7 @@ export class SessionStore {
   }
 
   #writeMetadata(): Promise<void> {
-    return this.#enqueue(() => writeJsonAtomic(this.#metadataPath, this.#metadata));
+    return this.#enqueue(() => writeJsonAtomic(this.#metadataPath, encodeMetadata(this.#metadata)));
   }
 
   #enqueue(operation: () => Promise<void>): Promise<void> {
@@ -195,7 +190,7 @@ export async function listSessions(limit = 20): Promise<SessionMetadata[]> {
     if (!entry.isDirectory()) continue;
     try {
       sessions.push(
-        JSON.parse(await readFile(join(root, entry.name, "session.json"), "utf8")) as SessionMetadata,
+        decodeMetadata(JSON.parse(await readFile(join(root, entry.name, "session.json"), "utf8"))).value,
       );
     } catch {
       continue;
@@ -239,4 +234,33 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await rename(temporary, path);
+}
+
+async function readRequiredJson(path: string, label: string): Promise<unknown> {
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as unknown;
+  } catch (error) {
+    throw new Error(`cannot read ${label}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function readOptionalJson(path: string, label: string): Promise<unknown | undefined> {
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as unknown;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined;
+    throw new Error(`cannot read ${label}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function decodeFile<T>(
+  raw: unknown,
+  label: string,
+  decode: (value: unknown) => { value: T; migrated: boolean },
+): { value: T; migrated: boolean } {
+  try {
+    return decode(raw);
+  } catch (error) {
+    throw new Error(`invalid ${label}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

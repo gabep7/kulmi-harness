@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { parse } from "smol-toml";
+import { z } from "zod";
 import type { AutonomyLevel } from "../core/types.js";
 
 export type MiMoBilling = "pay-as-you-go" | "token-plan";
@@ -26,12 +27,6 @@ export interface SearchConfig {
   searxngUrl: string;
 }
 
-export interface McpServerConfig {
-  command: string;
-  args: string[];
-  env: string[];
-}
-
 export interface KulmiConfig {
   defaultModel: string;
   defaultAutonomy: AutonomyLevel;
@@ -41,7 +36,6 @@ export interface KulmiConfig {
   maxOutputBytes: number;
   models: Record<string, ModelConfig>;
   search: SearchConfig;
-  mcpServers: Record<string, McpServerConfig>;
 }
 
 export interface ResolvedModel extends ModelConfig {
@@ -100,29 +94,45 @@ const defaults: KulmiConfig = {
     provider: "auto",
     searxngUrl: "",
   },
-  mcpServers: {},
 };
 
-interface FileConfig {
-  default_model?: string;
-  default_autonomy?: AutonomyLevel;
-  max_steps?: number;
-  max_subagents?: number;
-  command_timeout_seconds?: number;
-  max_output_bytes?: number;
-  search?: Partial<SearchConfig> & {
-    result_limit?: number;
-    provider?: FreeSearchProvider;
-    searxng_url?: string;
-  };
-  models?: Record<string, Partial<ModelConfig> & {
-    base_url?: string;
-    api_key_env?: string;
-    context_window?: number;
-    max_output_tokens?: number;
-  }>;
-  mcp?: { servers?: Record<string, { command?: string; args?: string[]; env?: string[] }> };
-}
+const httpUrlSchema = z.string().url().refine((value) => {
+  const protocol = new URL(value).protocol;
+  return protocol === "http:" || protocol === "https:";
+}, "must use http or https");
+const positiveInt = z.number().int().positive();
+const modelFileSchema = z.object({
+  model: z.string().min(1).optional(),
+  billing: z.enum(["pay-as-you-go", "token-plan"]).optional(),
+  base_url: httpUrlSchema.optional(),
+  baseUrl: httpUrlSchema.optional(),
+  api_key_env: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+  apiKeyEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
+  thinking: z.boolean().optional(),
+  context_window: positiveInt.optional(),
+  contextWindow: positiveInt.optional(),
+  max_output_tokens: positiveInt.optional(),
+  maxOutputTokens: positiveInt.optional(),
+}).passthrough();
+const searchFileSchema = z.object({
+  mode: z.enum(["off", "free"]).optional(),
+  result_limit: z.number().int().min(1).max(10).optional(),
+  resultLimit: z.number().int().min(1).max(10).optional(),
+  provider: z.enum(["auto", "searxng", "bing-rss"]).optional(),
+  searxng_url: z.union([z.literal(""), httpUrlSchema]).optional(),
+  searxngUrl: z.union([z.literal(""), httpUrlSchema]).optional(),
+}).strict();
+const fileConfigSchema = z.object({
+  default_model: z.string().min(1).optional(),
+  default_autonomy: z.enum(["read", "low", "medium", "high"]).optional(),
+  max_steps: z.number().int().min(1).max(10_000).optional(),
+  max_subagents: z.number().int().min(1).max(64).optional(),
+  command_timeout_seconds: z.number().int().min(1).max(1_800).optional(),
+  max_output_bytes: z.number().int().min(1_024).max(100_000_000).optional(),
+  search: searchFileSchema.optional(),
+  models: z.record(z.string().min(1), modelFileSchema).optional(),
+}).passthrough();
+type FileConfig = z.infer<typeof fileConfigSchema>;
 
 export function findWorkspaceRoot(cwd: string): string {
   try {
@@ -143,9 +153,13 @@ export function loadConfig(cwd: string): KulmiConfig {
     join(root, ".kulmi", "config.toml"),
   ]) {
     if (!existsSync(path)) continue;
-    config = mergeConfig(config, parse(readFileSync(path, "utf8")) as FileConfig);
+    config = mergeConfig(config, parseFileConfig(parse(readFileSync(path, "utf8")), path));
   }
   return config;
+}
+
+export function applyFileConfig(base: KulmiConfig, raw: unknown, source = "configuration"): KulmiConfig {
+  return mergeConfig(base, parseFileConfig(raw, source));
 }
 
 function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
@@ -153,9 +167,7 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
   for (const [name, raw] of Object.entries(file.models ?? {})) {
     const previous = models[name] ?? defaults.models["mimo-v2.5-pro"]!;
     const model = raw.model ?? previous.model;
-    if (model !== "mimo-v2.5-pro" && model !== "mimo-v2.5") {
-      continue;
-    }
+    if (model !== "mimo-v2.5-pro" && model !== "mimo-v2.5") continue;
     const billing = raw.billing ?? previous.billing;
     models[name] = {
       model,
@@ -168,13 +180,7 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
     };
   }
   const search = file.search;
-  const mcpServers = { ...base.mcpServers };
-  for (const [name, server] of Object.entries(file.mcp?.servers ?? {})) {
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) throw new Error(`invalid MCP server name ${name}`);
-    if (!server.command) throw new Error(`MCP server ${name} requires command`);
-    mcpServers[name] = { command: server.command, args: server.args ?? [], env: server.env ?? [] };
-  }
-  return {
+  const merged: KulmiConfig = {
     defaultModel: file.default_model ?? base.defaultModel,
     defaultAutonomy: file.default_autonomy ?? base.defaultAutonomy,
     maxSteps: file.max_steps ?? base.maxSteps,
@@ -188,8 +194,34 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
       provider: search?.provider ?? base.search.provider,
       searxngUrl: search?.searxng_url ?? search?.searxngUrl ?? base.search.searxngUrl,
     },
-    mcpServers,
   };
+  validateMergedConfig(merged);
+  return merged;
+}
+
+function parseFileConfig(raw: unknown, source: string): FileConfig {
+  if (raw && typeof raw === "object" && "mcp" in raw) {
+    throw new Error(`${source}: MCP configuration is no longer supported`);
+  }
+  const parsed = fileConfigSchema.safeParse(raw);
+  if (!parsed.success) throw new Error(`${source}: ${z.prettifyError(parsed.error)}`);
+  return parsed.data;
+}
+
+function validateMergedConfig(config: KulmiConfig): void {
+  if (!config.models[config.defaultModel]) throw new Error(`unknown default model ${config.defaultModel}`);
+  if (config.search.provider === "searxng" && !config.search.searxngUrl) {
+    throw new Error("search.provider=searxng requires search.searxng_url");
+  }
+  for (const [name, model] of Object.entries(config.models)) {
+    if (model.maxOutputTokens > model.contextWindow) {
+      throw new Error(`model ${name} max_output_tokens exceeds context_window`);
+    }
+    const expectedEnv = model.billing === "token-plan" ? "MIMO_TOKEN_PLAN_API_KEY" : "MIMO_API_KEY";
+    if (model.apiKeyEnv !== expectedEnv) {
+      throw new Error(`model ${name} with ${model.billing} billing must use ${expectedEnv}`);
+    }
+  }
 }
 
 export function resolveModel(config: KulmiConfig, name?: string): ResolvedModel {
@@ -229,13 +261,6 @@ mode = "free" # off or free
 result_limit = 5
 provider = "auto" # auto, searxng, or bing-rss
 # searxng_url = "http://127.0.0.1:8080" # optional self-hosted instance
-
-# Optional indexed fuzzy file and content search via https://github.com/dmtrKovalenko/fff
-# Install fff-mcp first, then uncomment:
-# [mcp.servers.fff]
-# command = "fff-mcp"
-# args = []
-# env = []
 
 [models.mimo-v2.5-pro]
 model = "mimo-v2.5-pro"
