@@ -197,7 +197,6 @@ export function TuiApp(props: TuiAppProps) {
 
   const width = Math.max(40, size.columns - 4);
   const idle = snapshot.transcript.length === 0 && snapshot.live.length === 0 && !snapshot.streaming && !snapshot.reasoning;
-  const streamCap = Math.max(6, size.rows - 14);
 
   return (
     <Box flexDirection="column">
@@ -214,9 +213,9 @@ export function TuiApp(props: TuiAppProps) {
         {snapshot.reasoning && <Thinking text={snapshot.reasoning} expanded={snapshot.expandedThinking} width={width} />}
 
         {snapshot.streaming && (
-          <Box marginTop={1} alignItems="flex-start">
+          <Box marginTop={1}>
             <Text color={theme.caramel}>{glyph.assistant} </Text>
-            <Text color={theme.ink}>{tailLines(snapshot.streaming, streamCap)}</Text>
+            <Text color={theme.faint}>responding… {wordCount(snapshot.streaming)} words</Text>
           </Box>
         )}
 
@@ -459,6 +458,10 @@ function InlineMarkdown({ text }: { text: string }) {
 function tailLines(text: string, limit: number): string {
   const lines = text.replace(/\n{3,}/g, "\n\n").split("\n");
   return lines.length <= limit ? text.trimEnd() : lines.slice(-limit).join("\n");
+}
+
+function wordCount(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
 }
 
 function clampLine(text: string, width: number): string {
