@@ -1,10 +1,15 @@
 import { MiMoProvider } from "../src/provider/mimo.js";
 import type { ResolvedModel } from "../src/config/config.js";
 import type { ProviderMessage, ProviderTool } from "../src/provider/types.js";
+import { resolveExistingCredential } from "../src/auth/credentials.js";
+
+// Hydrate the key from the macOS Keychain when no env var is set, matching how
+// `kulmi exec` resolves credentials, so the live smoke runs without exporting a key.
+await resolveExistingCredential({ cwd: process.cwd() }).catch(() => undefined);
 
 const tokenPlanKey = process.env.MIMO_TOKEN_PLAN_API_KEY;
 const apiKey = tokenPlanKey ?? process.env.MIMO_API_KEY;
-if (!apiKey) throw new Error("set MIMO_API_KEY or MIMO_TOKEN_PLAN_API_KEY");
+if (!apiKey) throw new Error("set MIMO_API_KEY or MIMO_TOKEN_PLAN_API_KEY, or store one with `kulmi auth`");
 
 const modelId = process.env.MIMO_MODEL === "mimo-v2.5" ? "mimo-v2.5" : "mimo-v2.5-pro";
 const config: ResolvedModel = {

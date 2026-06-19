@@ -82,6 +82,66 @@ describe("Agent", () => {
     }));
   });
 
+  it("keeps an append-only, cache-stable request prefix across turns", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
+    const provider = new ScriptedProvider([
+      toolResponse("call_plan", "update_plan", JSON.stringify({
+        steps: [{ id: "inspect", title: "Inspect", status: "completed", evidence: "done", depends_on: [], acceptance_criteria: ["done"] }],
+      }), "reason about plan"),
+      toolResponse("call_complete", "complete_task", JSON.stringify({ status: "completed", summary: "done", evidence: ["done"] }), "reason about completion"),
+      textResponse("Task completed."),
+    ]);
+    const events = new EventBus();
+    const session = await SessionStore.create({ cwd: workspace, model: provider.model });
+    session.attach(events);
+    const state: RunState = {
+      agentId: "agent_prefix",
+      mode: "task",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry(progressTools()),
+      events,
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "stable",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "medium",
+      maxSteps: 10,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 1_000_000,
+    });
+
+    await agent.run("do it", new AbortController().signal);
+
+    const requests = provider.requests;
+    expect(requests.length).toBeGreaterThanOrEqual(3);
+    for (let index = 1; index < requests.length; index++) {
+      const previous = requests[index - 1]!.messages;
+      const current = requests[index]!.messages;
+      // Each turn must be a strict prefix-extension of the previous request so
+      // MiMo's automatic prefix cache keeps hitting. Rewriting earlier history
+      // (not just appending) would silently destroy the cache prefix.
+      expect(current.length).toBeGreaterThan(previous.length);
+      expect(current.slice(0, previous.length)).toEqual(previous);
+      // The tool block must stay byte-identical for the cached prefix to match.
+      expect(requests[index]!.tools).toEqual(requests[0]!.tools);
+    }
+    // The system message is the cache anchor and must never change.
+    for (const request of requests) {
+      expect(request.messages[0]).toEqual({ role: "system", content: "stable" });
+    }
+  });
+
   it("repairs interrupted tool groups as uncertain instead of replaying them", () => {
     const repaired = sanitizeToolPairing([
       { role: "system", content: "stable" },
