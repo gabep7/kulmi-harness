@@ -1,15 +1,13 @@
 # Kulmi
 
-Kulmi is a MiMo V2.5-native autonomous coding harness with a fast full-screen terminal interface and a headless TypeScript kernel. `mimo-v2.5-pro` is the primary model. `mimo-v2.5`, pay-as-you-go, and MiMo Token Plan profiles are supported. The terminal is the primary product surface; the preliminary SwiftUI client remains deferred.
+Kulmi is a MiMo V2.5-native autonomous coding harness with a fast full-screen terminal interface and a headless TypeScript kernel. `mimo-v2.5-pro` is the primary model. `mimo-v2.5`, pay-as-you-go, and MiMo Token Plan profiles are supported.
 
 The provider adapter talks directly to MiMo. It preserves streamed `reasoning_content`, fully replays reasoning on assistant tool-call turns, uses `max_completion_tokens`, records prompt cache and reasoning usage, and handles MiMo web citations and search billing telemetry.
 
 ## Requirements
 
 - Node.js 22+
-- macOS 14+ for Kulmi Mac
-- A pay-as-you-go MiMo key beginning with `sk-`, or a Token Plan key beginning with `tp-`. The first-run terminal setup can store it in macOS Keychain.
-- A full Xcode installation is recommended for macOS app development. SwiftPM with the command-line tools can build the app executable.
+- A pay-as-you-go MiMo key beginning with `sk-`, or a Token Plan key beginning with `tp-`. The first-run terminal setup can store it in the system keychain.
 
 ## Install
 
@@ -43,7 +41,7 @@ Then start Kulmi:
 kulmi
 ```
 
-On first run, Kulmi asks you to choose `API` or `Token Plan`, then accepts a masked key paste. On macOS it stores the key and the selected billing mode in Keychain. The key is never written into the repository or Kulmi configuration. Run `kulmi auth` later to replace it.
+On first run, Kulmi asks you to choose `API` or `Token Plan`, then accepts a masked key paste. The key is stored in the system keychain and never written into the repository or Kulmi configuration. Run `kulmi auth` later to replace it.
 
 Environment variables remain supported for CI, headless machines, and users who manage secrets through their shell:
 
@@ -116,27 +114,13 @@ Search modes:
 
 Kulmi has no paid search provider, no search API key setting, and does not expose MiMo's billable native search plugin.
 
-## Deferred macOS client
-
-The preliminary client is SwiftUI and AppKit-native. It does not use Electron, Tauri, or a web view. It starts `kulmi rpc` as a child process and consumes the same session controller and typed event stream as the CLI. Further app work is deferred; the CLI and headless runtime are the active surfaces.
-
-```sh
-cd apps/KulmiMac
-swift build
-./scripts/package-app.sh
-```
-
-The packaging script creates `apps/KulmiMac/.build/Kulmi.app` and applies an ad-hoc local signature. In Settings, leave the CLI path blank when `kulmi` is on `PATH`, or select the built `dist/cli.js` file.
-
-The current preview includes session navigation, streaming answers and thinking, tool activity, cancellation, model and search selection, and cache telemetry. Treat it as unfinished until app work resumes.
-
 ## Runtime architecture
 
 ```text
-TUI / headless CLI      Native SwiftUI app
- |                            |
- |                      newline JSON-RPC
- +-------------+--------------+
+TUI / headless CLI
+ |
+ |
+ +-------------+
                |
         SessionController
                |
@@ -146,7 +130,7 @@ TUI / headless CLI      Native SwiftUI app
                              and worktrees
 ```
 
-The runtime is headless. The macOS app only sends commands and renders events. It does not own sessions, permissions, tools, prompts, worker state, or provider credentials.
+The runtime is headless. The TUI and CLI only send commands and render events. They do not own sessions, permissions, tools, prompts, worker state, or provider credentials.
 
 Explore and review subagents are read-only and may share the checkout. Implement subagents receive isolated Git worktrees. Worker state and child transcripts are durable. Integration is explicit and rejects overlapping changes.
 
@@ -158,7 +142,7 @@ Running workers can be redirected with `steer_agent`. Failed or interrupted work
 
 MiMo prompt caching is automatic and prefix-based. Kulmi optimizes it by keeping the system message byte-stable, sorting tools canonically, canonicalizing every JSON schema, preserving message and tool-result order, and appending volatile state only at the conversation tail. Chat and task mode use separate cache scopes so the one deliberate tool-catalog expansion cannot invalidate either stable prefix. Compaction happens only near the 1M context boundary and only at a complete message boundary.
 
-MiMo reports cache reads through `usage.prompt_tokens_details.cached_tokens`. Kulmi reports cached and fresh tokens independently for every request and in the macOS inspector. Cache writes are currently free according to MiMo's pricing documentation, while cache-hit input for `mimo-v2.5-pro` is priced far below uncached input.
+MiMo reports cache reads through `usage.prompt_tokens_details.cached_tokens`. Kulmi reports cached and fresh tokens independently for every request. Cache writes are currently free according to MiMo's pricing documentation, while cache-hit input for `mimo-v2.5-pro` is priced far below uncached input.
 
 ## Safety and persistence
 
@@ -170,7 +154,6 @@ Sessions persist versioned, validated messages, events, run state, checkpoints, 
 
 ```sh
 npm run check
-cd apps/KulmiMac && swift build
 ```
 
 With a real key, `npm run test:live:mimo` performs a low-output two-request smoke test covering thinking, tool-call reasoning replay, tool-result pairing, streaming, and cache telemetry. It is not part of `npm run check` because it incurs provider usage.
