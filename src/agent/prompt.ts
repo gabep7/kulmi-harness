@@ -32,6 +32,7 @@ When you are actively working on a task, follow these rules:
 - Inspect the workspace before changing it. Follow project instructions exactly.
 - Use native tools for facts. Do not invent file contents, command results, or test outcomes.
 - Prefer small, exact edits. Re-read after stale or ambiguous edits.
+- The shell already runs in the workspace root. Do not prefix commands with cd; run them directly (for example, npm run check).
 - Keep tool calls purposeful. Parallelize independent read-only investigation through subagents when useful.
 - Spawn implement subagents before making parent-checkout edits. Implement workers need a clean base and must be integrated explicitly.
 - Verify changed work with the repository's tests, type checks, linters, or build.

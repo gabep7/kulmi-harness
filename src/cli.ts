@@ -26,6 +26,10 @@ const program = new Command();
 program
   .name("kulmi")
   .description("MiMo V2.5-native autonomous coding agent")
+  // Program-level options (for the bare TUI) and subcommands like `exec` both
+  // declare --auto/--model/etc. Without positional options the parent swallows
+  // them, so `kulmi exec --auto medium` would silently run read-only.
+  .enablePositionalOptions()
   .version(VERSION)
   .option("-m, --model <name>", "model profile")
   .option("--auto <level>", "autonomy: read, low, medium, high", "medium")
