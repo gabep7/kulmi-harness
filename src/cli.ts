@@ -153,6 +153,7 @@ program
       ["model", Boolean(config.models[config.defaultModel]), config.defaultModel],
       ["paygo key", Boolean(process.env.MIMO_API_KEY), process.env.MIMO_API_KEY ? "set" : "missing"],
       ["token plan key", Boolean(process.env.MIMO_TOKEN_PLAN_API_KEY), process.env.MIMO_TOKEN_PLAN_API_KEY ? "set" : "optional"],
+      ["deepseek key", Boolean(process.env.DEEPSEEK_API_KEY), process.env.DEEPSEEK_API_KEY ? "set" : "optional"],
       ["search", true, config.search.mode === "free" ? config.search.provider : "off"],
     ] as const;
     for (const [name, ok, detail] of checks) {
@@ -256,6 +257,7 @@ function parseApprovalMode(value: string): ApprovalMode {
 }
 
 function credentialKindForModel(model: string | undefined): CredentialKind {
+  if (model?.includes("deepseek")) return "deepseek";
   return model?.includes("token-plan") ? "token-plan" : "api";
 }
 

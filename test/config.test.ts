@@ -16,12 +16,14 @@ describe("MiMo configuration", () => {
     expect(() => resolveModel(config(tokenPlan()), "plan")).toThrow("must be a Token Plan key");
   });
 
-  it("uses only MiMo V2.5 models and documents the regional Token Plan endpoint", () => {
+  it("documents MiMo V2.5 (with regional Token Plan) and DeepSeek V4 profiles", () => {
     const template = configTemplate();
     expect(template).toContain('model = "mimo-v2.5-pro"');
     expect(template).toContain('model = "mimo-v2.5"');
     expect(template).toContain("token-plan-ams.xiaomimimo.com/v1");
-    expect(template).not.toMatch(/deepseek/i);
+    expect(template).toContain('model = "deepseek-v4-pro"');
+    expect(template).toContain("api.deepseek.com");
+    expect(template).toContain("DEEPSEEK_API_KEY");
   });
 
   it("rejects invalid limits, endpoints, billing environments, and removed MCP config", () => {
@@ -56,6 +58,7 @@ function config(...models: ModelConfig[]): KulmiConfig {
 
 function payg(): ModelConfig {
   return {
+    vendor: "mimo",
     model: "mimo-v2.5-pro",
     billing: "pay-as-you-go",
     baseUrl: "https://api.xiaomimimo.com/v1",

@@ -6,7 +6,7 @@ const execFileAsync = promisify(execFile);
 const keychainService = "dev.kulmi.mimo";
 const selectionService = "dev.kulmi.mimo.selection";
 
-export type CredentialKind = "api" | "token-plan";
+export type CredentialKind = "api" | "token-plan" | "deepseek";
 
 export interface CredentialChoice {
   kind: CredentialKind;
@@ -104,6 +104,13 @@ export async function resolveExistingCredential(options: {
   const config = loadConfig(options.cwd);
   const requested = options.requestedModel ? config.models[options.requestedModel] : undefined;
   if (options.requestedModel && !requested) throw new Error(`unknown model ${options.requestedModel}`);
+  if (requested?.vendor === "deepseek") {
+    const key = process.env.DEEPSEEK_API_KEY;
+    if (key && validateCredential("deepseek", key)) {
+      return { model: options.requestedModel!, kind: "deepseek", source: "environment" };
+    }
+    throw new Error("set DEEPSEEK_API_KEY to use a DeepSeek model");
+  }
   const requestedKind = requested ? kindForBilling(requested.billing) : undefined;
   const environmentKind = requestedKind ?? detectEnvironmentKind();
   if (environmentKind) {
@@ -154,27 +161,30 @@ export async function acceptCredential(options: {
 }
 
 export function validateCredential(kind: CredentialKind, key: string): boolean {
-  const prefix = kind === "api" ? "sk-" : "tp-";
+  const prefix = kind === "token-plan" ? "tp-" : "sk-";
   return key.startsWith(prefix) && key.length >= 10 && !/\s/.test(key);
 }
 
 export function credentialHint(kind: CredentialKind): string {
-  return kind === "api"
-    ? "Pay-as-you-go API keys begin with sk-."
-    : "Token Plan keys begin with tp-.";
+  if (kind === "token-plan") return "Token Plan keys begin with tp-.";
+  if (kind === "deepseek") return "DeepSeek keys begin with sk-.";
+  return "Pay-as-you-go API keys begin with sk-.";
 }
 
 export function defaultModelFor(kind: CredentialKind): string {
+  if (kind === "deepseek") return "deepseek-v4-pro";
   return kind === "api" ? "mimo-v2.5-pro" : "mimo-v2.5-pro-token-plan";
 }
 
 function detectEnvironmentKind(): CredentialKind | undefined {
   if (validateCredential("api", process.env.MIMO_API_KEY ?? "")) return "api";
   if (validateCredential("token-plan", process.env.MIMO_TOKEN_PLAN_API_KEY ?? "")) return "token-plan";
+  if (validateCredential("deepseek", process.env.DEEPSEEK_API_KEY ?? "")) return "deepseek";
   return undefined;
 }
 
-function envName(kind: CredentialKind): "MIMO_API_KEY" | "MIMO_TOKEN_PLAN_API_KEY" {
+function envName(kind: CredentialKind): "MIMO_API_KEY" | "MIMO_TOKEN_PLAN_API_KEY" | "DEEPSEEK_API_KEY" {
+  if (kind === "deepseek") return "DEEPSEEK_API_KEY";
   return kind === "api" ? "MIMO_API_KEY" : "MIMO_TOKEN_PLAN_API_KEY";
 }
 

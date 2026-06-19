@@ -167,6 +167,34 @@ describe("MiMoProvider", () => {
     })).rejects.toThrow("cache prefix changed");
   });
 
+  it("uses DeepSeek wire conventions: bearer auth, max_tokens, stripped reasoning, cache fields", async () => {
+    let auth = "";
+    let body: Record<string, unknown> = {};
+    const url = await serve(servers, (request, response) => {
+      auth = String(request.headers["authorization"] ?? "");
+      collectJson(request).then((parsed) => {
+        body = parsed;
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_cache_hit_tokens":64,"prompt_cache_miss_tokens":36}}\n\ndata: [DONE]\n\n');
+      }).catch((error: unknown) => response.destroy(error instanceof Error ? error : new Error(String(error))));
+    });
+    const result = await new MiMoProvider(deepseekModel(url)).complete({
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "prior", reasoning_content: "secret thoughts", tool_calls: [{ id: "t1", type: "function", function: { name: "noop", arguments: "{}" } }] },
+        { role: "tool", tool_call_id: "t1", name: "noop", content: "done" },
+      ],
+      tools: [],
+      signal: new AbortController().signal,
+    });
+    expect(auth).toBe("Bearer test-key");
+    expect(body).toHaveProperty("max_tokens");
+    expect(body).not.toHaveProperty("max_completion_tokens");
+    const assistantMessage = (body.messages as Array<Record<string, unknown>>)[1]!;
+    expect(assistantMessage).not.toHaveProperty("reasoning_content");
+    expect(result.usage).toMatchObject({ cacheHitTokens: 64, cacheMissTokens: 36 });
+  });
+
   it("parses split CRLF boundaries and a final usage-only chunk", async () => {
     const url = await serve(servers, (_request, response) => {
       response.writeHead(200, { "content-type": "text/event-stream" });
@@ -182,6 +210,7 @@ describe("MiMoProvider", () => {
 function model(baseUrl: string): ResolvedModel {
   return {
     name: "mimo-v2.5-pro",
+    vendor: "mimo",
     model: "mimo-v2.5-pro",
     billing: "pay-as-you-go",
     baseUrl,
@@ -190,6 +219,21 @@ function model(baseUrl: string): ResolvedModel {
     thinking: true,
     contextWindow: 1_000_000,
     maxOutputTokens: 131_072,
+  };
+}
+
+function deepseekModel(baseUrl: string): ResolvedModel {
+  return {
+    name: "deepseek-v4-pro",
+    vendor: "deepseek",
+    model: "deepseek-v4-pro",
+    billing: "pay-as-you-go",
+    baseUrl,
+    apiKeyEnv: "DEEPSEEK_API_KEY",
+    apiKey: "test-key",
+    thinking: true,
+    contextWindow: 128_000,
+    maxOutputTokens: 8_192,
   };
 }
 

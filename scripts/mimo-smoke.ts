@@ -14,6 +14,7 @@ if (!apiKey) throw new Error("set MIMO_API_KEY or MIMO_TOKEN_PLAN_API_KEY, or st
 const modelId = process.env.MIMO_MODEL === "mimo-v2.5" ? "mimo-v2.5" : "mimo-v2.5-pro";
 const config: ResolvedModel = {
   name: tokenPlanKey ? `${modelId}-token-plan` : modelId,
+  vendor: "mimo",
   model: modelId,
   billing: tokenPlanKey ? "token-plan" : "pay-as-you-go",
   baseUrl: tokenPlanKey
