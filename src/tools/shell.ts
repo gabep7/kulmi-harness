@@ -1,0 +1,78 @@
+import { z } from "zod";
+import { decideCommand } from "../security/policy.js";
+import { runShell } from "../runtime/process.js";
+import { WorkspaceSnapshot } from "../runtime/workspace-tracker.js";
+import { defineTool } from "./types.js";
+
+export const shellTool = defineTool({
+  name: "shell",
+  description:
+    "Run one non-interactive shell command in the workspace. Destructive commands, sudo, remote writes, nested shells, and command substitution are hard-blocked.",
+  schema: z.object({
+    command: z.string().min(1),
+    timeout_seconds: z.number().int().positive().max(1_800).optional(),
+  }),
+  readOnly: false,
+  async execute(context, input) {
+    const decision = decideCommand(input.command, context.autonomy, context.workspaceRoot);
+    if (!decision.allowed) {
+      const approvable = context.permissions && isApprovableDenial(decision.reason);
+      const approved = approvable ? await context.permissions!.request({
+        tool: "shell",
+        risk: decision.risk === "read" || decision.risk === "blocked" ? "high" : decision.risk,
+        reason: decision.reason,
+        command: input.command,
+        input,
+      }) : false;
+      if (!approved) {
+        return { content: JSON.stringify({ blocked: true, risk: decision.risk, reason: decision.reason }), isError: true };
+      }
+    }
+    const snapshot = decision.risk === "read"
+      ? undefined
+      : await WorkspaceSnapshot.capture(context.workspaceRoot);
+    let result: Awaited<ReturnType<typeof runShell>> | undefined;
+    try {
+      result = await runShell({
+        command: input.command,
+        cwd: context.cwd,
+        signal: context.signal,
+        timeoutMs: (input.timeout_seconds ?? context.commandTimeoutMs / 1_000) * 1_000,
+        maxOutputBytes: context.maxOutputBytes,
+      });
+    } finally {
+      if (snapshot) {
+        const changed = await snapshot.reconcile(context.checkpoint);
+        if (changed.length > 0) {
+          for (const path of changed) context.state.modifiedFiles.add(path);
+          context.state.revision += 1;
+          delete context.state.completion;
+        }
+      }
+    }
+    if (!result) throw new Error("command did not produce a result");
+    if (decision.verification) {
+      context.state.verifications.push({
+        command: input.command,
+        exitCode: result.exitCode,
+        timestamp: new Date().toISOString(),
+        revision: context.state.revision,
+        timedOut: result.timedOut,
+        truncated: result.truncated,
+      });
+    }
+    const content = [
+      `exit_code: ${result.exitCode}`,
+      `duration_ms: ${result.durationMs}`,
+      `timed_out: ${result.timedOut}`,
+      `truncated: ${result.truncated}`,
+      result.stdout ? `stdout:\n${result.stdout}` : "",
+      result.stderr ? `stderr:\n${result.stderr}` : "",
+    ].filter(Boolean).join("\n");
+    return { content, isError: result.exitCode !== 0 };
+  },
+});
+
+function isApprovableDenial(reason: string): boolean {
+  return !/(?:cannot safely parse|command substitution|nested shell|environment assignment|operator .* blocked|missing program|empty command)/i.test(reason);
+}

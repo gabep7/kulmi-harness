@@ -1,0 +1,10 @@
+node_modules/
+dist/
+target/
+.codegraph/
+apps/KulmiMac/.build/
+coverage/
+*.tgz
+/.kulmi
+/.DS_Store
+**/.DS_Store

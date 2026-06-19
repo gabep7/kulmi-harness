@@ -1,0 +1,166 @@
+import { z } from "zod";
+import type { EventBus } from "../core/events.js";
+import type { ProviderTool } from "../provider/types.js";
+import { redactKnownSecrets } from "../core/redact.js";
+import type { AnyTool, ToolContext, ToolResult } from "./types.js";
+
+export interface ToolExecution {
+  content: string;
+  isError: boolean;
+}
+
+export class ToolRegistry {
+  readonly #tools = new Map<string, AnyTool>();
+  readonly #providerTools: ProviderTool[];
+
+  constructor(tools: AnyTool[]) {
+    for (const tool of tools) {
+      if (this.#tools.has(tool.name)) throw new Error(`duplicate tool ${tool.name}`);
+      this.#tools.set(tool.name, tool);
+    }
+    this.#providerTools = [...this.#tools.values()]
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map((tool) => ({
+        type: "function" as const,
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: canonicalize(tool.providerSchema ?? z.toJSONSchema(tool.schema)) as Record<string, unknown>,
+        },
+      }));
+  }
+
+  providerTools(): ProviderTool[] {
+    return this.#providerTools;
+  }
+
+  names(): string[] {
+    return [...this.#tools.keys()].sort();
+  }
+
+  isParallelSafe(name: string, argumentsJson: string): boolean {
+    const tool = this.#tools.get(name);
+    if (!tool || !tool.readOnly) return false;
+    if (!tool.isParallelSafe) return true;
+    const parsed = parseArguments(argumentsJson);
+    const validated = tool.schema.safeParse(parsed);
+    return validated.success && tool.isParallelSafe(validated.data);
+  }
+
+  async execute(options: {
+    name: string;
+    argumentsJson: string;
+    callId: string;
+    context: ToolContext;
+  }): Promise<ToolExecution> {
+    const started = performance.now();
+    const tool = this.#tools.get(options.name);
+    if (!tool) {
+      return this.#finishUnknown(options.context.events, options, started);
+    }
+
+    let raw: unknown;
+    try {
+      raw = parseArguments(options.argumentsJson);
+    } catch (error) {
+      return this.#finishValidationError(tool, options, started, String(error));
+    }
+    const parsed = tool.schema.safeParse(raw);
+    if (!parsed.success) {
+      return this.#finishValidationError(
+        tool,
+        options,
+        started,
+        z.prettifyError(parsed.error),
+      );
+    }
+
+    if (!tool.readOnly && tool.name !== "complete_task") delete options.context.state.completion;
+
+    await options.context.events.emit({
+      type: "tool.started",
+      agentId: options.context.state.agentId,
+      callId: options.callId,
+      tool: tool.name,
+      input: parsed.data,
+    });
+
+    let result: ToolResult;
+    try {
+      result = await tool.execute(options.context, parsed.data);
+    } catch (error) {
+      result = { content: error instanceof Error ? error.message : String(error), isError: true };
+    }
+    const materialized = await options.context.artifacts.materialize(
+      tool.name,
+      options.callId,
+      redactKnownSecrets(result.content),
+    );
+    const execution = { content: materialized.content, isError: result.isError ?? false };
+    await options.context.events.emit({
+      type: "tool.finished",
+      agentId: options.context.state.agentId,
+      callId: options.callId,
+      tool: tool.name,
+      output: execution.content,
+      isError: execution.isError,
+      durationMs: Math.round(performance.now() - started),
+    });
+    return execution;
+  }
+
+  async #finishUnknown(
+    events: EventBus,
+    options: { name: string; callId: string; context: ToolContext },
+    started: number,
+  ): Promise<ToolExecution> {
+    const content = `unknown tool ${options.name}; available: ${this.names().join(", ")}`;
+    await events.emit({
+      type: "tool.finished",
+      agentId: options.context.state.agentId,
+      callId: options.callId,
+      tool: options.name,
+      output: content,
+      isError: true,
+      durationMs: Math.round(performance.now() - started),
+    });
+    return { content, isError: true };
+  }
+
+  async #finishValidationError(
+    tool: AnyTool,
+    options: { callId: string; context: ToolContext },
+    started: number,
+    detail: string,
+  ): Promise<ToolExecution> {
+    const content = `invalid arguments for ${tool.name}: ${detail}`;
+    await options.context.events.emit({
+      type: "tool.finished",
+      agentId: options.context.state.agentId,
+      callId: options.callId,
+      tool: tool.name,
+      output: content,
+      isError: true,
+      durationMs: Math.round(performance.now() - started),
+    });
+    return { content, isError: true };
+  }
+}
+
+function parseArguments(value: string): unknown {
+  if (!value.trim()) return {};
+  return JSON.parse(value) as unknown;
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== "$schema")
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, canonicalize(child)]),
+    );
+  }
+  return value;
+}

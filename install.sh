@@ -1,0 +1,187 @@
+#!/bin/sh
+set -eu
+
+REPO="${KULMI_REPOSITORY:-gabriele/kulmi-harness}"
+VERSION="${KULMI_INSTALL_VERSION:-latest}"
+SOURCE_REF="${KULMI_SOURCE_REF:-main}"
+RELEASE_URL="${KULMI_RELEASE_URL:-}"
+INSTALL_DIR="${KULMI_INSTALL_DIR:-$HOME/.local/lib/kulmi}"
+BIN_DIR="${KULMI_BIN_DIR:-$HOME/.local/bin}"
+SOURCE_DIR="${KULMI_INSTALL_SOURCE:-}"
+MODE="${KULMI_INSTALL_MODE:-}"
+
+case "${1:-}" in
+  --copy) MODE="copy" ;;
+  --link) MODE="link" ;;
+  --help|-h)
+    printf '%s\n' "usage: ./install.sh [--link|--copy]" "" \
+      "  --link  fast development install linked to this checkout" \
+      "  --copy  clean self-contained production install"
+    exit 0
+    ;;
+  "") ;;
+  *) printf 'kulmi: unknown option %s\n' "$1" >&2; exit 1 ;;
+esac
+
+if [ -z "$SOURCE_DIR" ] && [ "${KULMI_INSTALL_REMOTE:-0}" != "1" ]; then
+  script_dir="$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
+  if [ -n "$script_dir" ] && [ -f "$script_dir/package.json" ]; then
+    SOURCE_DIR="$script_dir"
+  fi
+fi
+
+if [ -z "$MODE" ]; then
+  if [ -n "$SOURCE_DIR" ]; then MODE="link"; else MODE="copy"; fi
+fi
+
+fail() {
+  printf 'kulmi: %s\n' "$1" >&2
+  exit 1
+}
+
+command -v node >/dev/null 2>&1 || fail "Node.js 22 or newer is required"
+command -v npm >/dev/null 2>&1 || fail "npm is required"
+
+major="$(node -p 'process.versions.node.split(".")[0]')"
+[ "$major" -ge 22 ] || fail "Node.js 22 or newer is required, found $(node --version)"
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/kulmi-install.XXXXXX")"
+cleanup() {
+  if [ "${KULMI_KEEP_INSTALL_TEMP:-0}" != "1" ]; then
+    rm -rf "$work"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p "$(dirname "$INSTALL_DIR")" "$BIN_DIR"
+
+legacy_data_dir="$HOME/.local/share/kulmi"
+if [ "$INSTALL_DIR" != "$legacy_data_dir" ]; then
+  if [ -L "$legacy_data_dir" ] && [ -f "$legacy_data_dir/package.json" ]; then
+    unlink "$legacy_data_dir"
+    mkdir -p "$legacy_data_dir"
+    printf 'Separated session data from the previous development link.\n'
+  elif [ -d "$legacy_data_dir/dist" ] && [ -f "$legacy_data_dir/package.json" ]; then
+    mkdir -p "$work/legacy-data"
+    if [ -d "$legacy_data_dir/sessions" ]; then
+      mv "$legacy_data_dir/sessions" "$work/legacy-data/sessions"
+    fi
+    mv "$legacy_data_dir" "$work/legacy-app"
+    mkdir -p "$legacy_data_dir"
+    if [ -d "$work/legacy-data/sessions" ]; then
+      mv "$work/legacy-data/sessions" "$legacy_data_dir/sessions"
+    fi
+    printf 'Migrated sessions from the previous installation layout.\n'
+  fi
+fi
+
+if [ "$MODE" = "link" ]; then
+  [ -n "$SOURCE_DIR" ] || fail "--link requires KULMI_INSTALL_SOURCE or a local checkout"
+  [ -f "$SOURCE_DIR/package.json" ] || fail "KULMI_INSTALL_SOURCE is not a Kulmi checkout"
+  SOURCE_DIR="$(CDPATH= cd "$SOURCE_DIR" && pwd)"
+  [ "$SOURCE_DIR" != "$INSTALL_DIR" ] || fail "source and install directories must differ"
+
+  if [ ! -x "$SOURCE_DIR/node_modules/.bin/tsc" ]; then
+    printf 'Installing dependencies once...\n'
+    (cd "$SOURCE_DIR" && npm ci --ignore-scripts --no-audit --no-fund)
+  fi
+
+  needs_build=0
+  [ -f "$SOURCE_DIR/dist/cli.js" ] || needs_build=1
+  if [ "$needs_build" -eq 0 ] && find "$SOURCE_DIR/src" "$SOURCE_DIR/package.json" "$SOURCE_DIR/tsconfig.build.json" \
+    -type f -newer "$SOURCE_DIR/dist/cli.js" -print -quit | grep -q .; then
+    needs_build=1
+  fi
+  if [ "$needs_build" -eq 1 ]; then
+    printf 'Building changed sources...\n'
+    (cd "$SOURCE_DIR" && npm run build)
+  fi
+
+  chmod +x "$SOURCE_DIR/dist/cli.js"
+  candidate="$work/linked"
+  ln -s "$SOURCE_DIR" "$candidate"
+  install_kind="linked"
+else
+  package="$work/package"
+  mkdir -p "$package"
+  prebuilt=0
+  if [ -n "$SOURCE_DIR" ]; then
+    [ -f "$SOURCE_DIR/package.json" ] || fail "KULMI_INSTALL_SOURCE is not a Kulmi checkout"
+    (cd "$SOURCE_DIR" && tar --exclude='./node_modules' --exclude='./dist' --exclude='./.git' -cf - .) | (cd "$package" && tar -xf -)
+  else
+    command -v curl >/dev/null 2>&1 || fail "curl is required"
+    command -v tar >/dev/null 2>&1 || fail "tar is required"
+    if [ -n "$RELEASE_URL" ]; then
+      release_url="$RELEASE_URL"
+    elif [ "$VERSION" = "latest" ]; then
+      release_url="https://github.com/$REPO/releases/latest/download/kulmi-node.tar.gz"
+    else
+      release_url="https://github.com/$REPO/releases/download/$VERSION/kulmi-node.tar.gz"
+    fi
+    printf 'Downloading prebuilt kulmi %s...\n' "$VERSION"
+    if curl --fail --location --silent --show-error "$release_url" -o "$work/kulmi-node.tar.gz"; then
+      tar -xzf "$work/kulmi-node.tar.gz" -C "$package"
+      [ -f "$package/dist/cli.js" ] || fail "release bundle is missing dist/cli.js"
+      [ -d "$package/node_modules" ] || fail "release bundle is missing production dependencies"
+      prebuilt=1
+    else
+      printf 'No prebuilt release found; falling back to source %s...\n' "$SOURCE_REF"
+      curl --fail --location --silent --show-error \
+        "https://github.com/$REPO/archive/$SOURCE_REF.tar.gz" \
+        | tar -xz --strip-components=1 -C "$package"
+    fi
+  fi
+  if [ "$prebuilt" -eq 0 ]; then
+    printf 'Building a self-contained installation...\n'
+    (cd "$package" && npm ci --ignore-scripts --no-audit --no-fund && npm run build && npm prune --omit=dev --ignore-scripts --no-audit --no-fund)
+  fi
+  chmod +x "$package/dist/cli.js"
+  candidate="$package"
+  install_kind="installed"
+fi
+
+backup=""
+if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then
+  if [ "$MODE" = "link" ] && [ -L "$INSTALL_DIR" ] && [ "$(readlink "$INSTALL_DIR")" = "$SOURCE_DIR" ]; then
+    candidate=""
+  else
+    backup="$work/previous"
+    mv "$INSTALL_DIR" "$backup"
+  fi
+fi
+
+if [ -n "$candidate" ] && ! mv "$candidate" "$INSTALL_DIR"; then
+  [ -z "$backup" ] || mv "$backup" "$INSTALL_DIR"
+  fail "could not install to $INSTALL_DIR"
+fi
+
+ln -sfn "$INSTALL_DIR/dist/cli.js" "$BIN_DIR/kulmi"
+
+path_line='export PATH="$HOME/.local/bin:$PATH"'
+path_updated=0
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ;;
+  *)
+    if [ "${KULMI_NO_PATH_UPDATE:-0}" != "1" ]; then
+      case "${SHELL:-}" in
+        */zsh) profile="$HOME/.zshrc" ;;
+        */bash) profile="$HOME/.bashrc" ;;
+        *) profile="$HOME/.profile" ;;
+      esac
+      touch "$profile"
+      if ! grep -F "$path_line" "$profile" >/dev/null 2>&1; then
+        printf '\n# Kulmi\n%s\n' "$path_line" >> "$profile"
+      fi
+      path_updated=1
+    fi
+    ;;
+esac
+
+printf 'Kulmi %s in %s\n' "$install_kind" "$INSTALL_DIR"
+printf 'Run: kulmi\n'
+if [ "$path_updated" -eq 1 ]; then
+  printf 'Open a new terminal first, or run: export PATH="$HOME/.local/bin:$PATH"\n'
+fi
+if [ -z "${MIMO_API_KEY:-}" ] && [ -z "${MIMO_TOKEN_PLAN_API_KEY:-}" ]; then
+  printf 'Then set MIMO_API_KEY or MIMO_TOKEN_PLAN_API_KEY.\n'
+fi
