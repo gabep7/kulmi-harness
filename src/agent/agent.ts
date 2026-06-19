@@ -146,6 +146,12 @@ export class Agent {
         await this.#options.session.saveMessages(this.#messages);
 
         if (calls.length > 0) {
+          // Commit any visible narration from this tool-call turn to the transcript
+          // before the tool rows, so the conversation reads in true order
+          // (narration → tools → ... → final answer) instead of stacking every
+          // tool above a single closing message.
+          const narration = response.message.content?.trim();
+          if (narration) await events.emit({ type: "assistant.message", agentId: state.agentId, text: narration });
           consecutiveBareFinals = 0;
           const context = this.#toolContext(signal);
           const runCall = async (call: (typeof calls)[number]) => {

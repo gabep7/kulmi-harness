@@ -208,7 +208,8 @@ export function TuiApp(props: TuiAppProps) {
       <Box flexDirection="column" paddingX={1}>
         {idle && <Welcome width={width} />}
 
-        {snapshot.live.map((item) => <FeedRow key={item.id} item={item} width={width} />)}
+        {snapshot.live.length > 8 && <Text color={theme.faint}>  +{snapshot.live.length - 8} more running…</Text>}
+        {snapshot.live.slice(-8).map((item) => <FeedRow key={item.id} item={item} width={width} />)}
 
         {snapshot.reasoning && <Thinking text={snapshot.reasoning} expanded={snapshot.expandedThinking} width={width} />}
 

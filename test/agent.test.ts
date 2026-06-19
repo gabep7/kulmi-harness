@@ -191,6 +191,62 @@ describe("Agent", () => {
     expect(provider.requests[1]?.cacheScope).toBe("agent_deferred:task");
   });
 
+  it("commits mid-turn narration to the transcript before its tool rows", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
+    const provider = new ScriptedProvider([
+      {
+        message: {
+          role: "assistant",
+          content: "Looking into it",
+          reasoning_content: "think",
+          tool_calls: [{ id: "c1", type: "function", function: { name: "noop", arguments: "{}" } }],
+        },
+        finishReason: "tool_calls",
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 },
+      },
+      textResponse("Done."),
+    ]);
+    const events = new EventBus();
+    const order: string[] = [];
+    events.on((envelope) => {
+      const event = envelope.event;
+      if (event.type === "assistant.message") order.push(`msg:${event.text}`);
+      else if (event.type === "tool.started") order.push(`tool:${event.tool}`);
+    });
+    const session = await SessionStore.create({ cwd: workspace, model: provider.model });
+    session.attach(events);
+    const noop = defineTool({ name: "noop", description: "noop", schema: z.object({}), readOnly: true, async execute() { return { content: "ok" }; } });
+    const state: RunState = {
+      agentId: "agent_order",
+      mode: "chat",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([noop]),
+      events,
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "stable",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "medium",
+      maxSteps: 10,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 1_000_000,
+    });
+
+    await agent.run("go", new AbortController().signal);
+    expect(order).toEqual(["msg:Looking into it", "tool:noop", "msg:Done."]);
+  });
+
   it("repairs interrupted tool groups as uncertain instead of replaying them", () => {
     const repaired = sanitizeToolPairing([
       { role: "system", content: "stable" },
