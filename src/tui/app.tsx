@@ -303,12 +303,15 @@ function MarkdownBlock({ text, width }: { text: string; width: number }) {
   );
 }
 
-function Footer({ status, autonomy, search, usage, busy }: TuiAppProps & { status: string; usage: ReturnType<TuiStore["getSnapshot"]>["usage"]; busy: boolean }) {
+function Footer({ model, status, autonomy, search, usage, busy }: TuiAppProps & { status: string; usage: ReturnType<TuiStore["getSnapshot"]>["usage"]; busy: boolean }) {
   const cacheRate = usage.promptTokens > 0 ? Math.round((usage.cacheHitTokens / usage.promptTokens) * 100) : 0;
   return (
-    <Box justifyContent="space-between">
-      <Text color={theme.faint} wrap="truncate-end">{glyph.brand} kulmi  ·  <Text color={statusColor(status)}>{status}</Text>  ·  {busy ? "esc stop" : "? help"}  ·  {autonomyLabel(autonomy)}  ·  search {search}</Text>
-      <Text color={theme.faint}>{compactNumber(usage.totalTokens)} tokens  ·  <Text color={cacheRate > 50 ? theme.sage : theme.muted}>{cacheRate}% cache</Text></Text>
+    <Box flexDirection="column">
+      <Box justifyContent="space-between">
+        <Text color={theme.faint} wrap="truncate-end">{glyph.brand} kulmi  ·  <Text color={statusColor(status)}>{status}</Text>  ·  {busy ? "esc stop" : "? help"}  ·  {autonomyLabel(autonomy)}  ·  search {search}</Text>
+        <Text color={theme.faint}>{compactNumber(usage.totalTokens)} tokens  ·  <Text color={cacheRate > 50 ? theme.sage : theme.muted}>{cacheRate}% cache</Text></Text>
+      </Box>
+      <Text color={theme.faint} wrap="truncate-end">{model}</Text>
     </Box>
   );
 }
