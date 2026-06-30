@@ -37,7 +37,7 @@ MiMo does not document a cache creation endpoint or a cache key request field. I
 5. Assistant tool calls, full reasoning, and tool results retain their original order.
 6. Plans, worker progress, timestamps, usage, and UI state are not injected into the system prefix.
 7. Compaction happens only when estimated context reaches 78 percent and only at a complete assistant/tool boundary.
-8. Every request exposes cached, fresh, completion, and reasoning tokens to the CLI, JSON stream, session log, and macOS inspector.
+8. Every request exposes cached, fresh, completion, and reasoning tokens to the CLI and JSON stream.
 
 MiMo V2.5 Pro overseas prices observed on the audit date were $0.0036 per million cache-hit input tokens, $0.435 per million cache-miss input tokens, and $0.87 per million output tokens. This makes deterministic prefix reuse materially more important than small prompt reductions that rewrite earlier bytes.
 
