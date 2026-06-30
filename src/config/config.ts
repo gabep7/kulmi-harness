@@ -7,11 +7,11 @@ import { z } from "zod";
 import type { AutonomyLevel } from "../core/types.js";
 
 export type MiMoBilling = "pay-as-you-go" | "token-plan";
-export type ModelVendor = "mimo";
+export type ModelVendor = "mimo" | "stepfun";
 export type SearchMode = "off" | "free";
 export type FreeSearchProvider = "auto" | "searxng" | "bing-rss";
 
-export type ModelId = "mimo-v2.5-pro" | "mimo-v2.5";
+export type ModelId = "mimo-v2.5-pro" | "mimo-v2.5" | "step-3.7-flash";
 
 export interface ModelConfig {
   vendor: ModelVendor;
@@ -24,13 +24,14 @@ export interface ModelConfig {
   maxOutputTokens: number;
 }
 
-const knownModels: readonly ModelId[] = ["mimo-v2.5-pro", "mimo-v2.5"];
+const knownModels: readonly ModelId[] = ["mimo-v2.5-pro", "mimo-v2.5", "step-3.7-flash"];
 
-export function vendorForModel(_model: ModelId): "mimo" {
-  return "mimo";
+export function vendorForModel(model: ModelId): "mimo" | "stepfun" {
+  return model.startsWith("step-") ? "stepfun" : "mimo";
 }
 
-export function apiKeyEnvFor(billing: MiMoBilling): string {
+export function apiKeyEnvFor(vendor: "mimo" | "stepfun", billing: MiMoBilling): string {
+  if (vendor === "stepfun") return "STEPFUN_API_KEY";
   return billing === "token-plan" ? "MIMO_TOKEN_PLAN_API_KEY" : "MIMO_API_KEY";
 }
 
@@ -105,6 +106,16 @@ const defaults: KulmiConfig = {
       contextWindow: 1_000_000,
       maxOutputTokens: 32_768,
     },
+    "step-3.7-flash": {
+      vendor: "stepfun",
+      model: "step-3.7-flash",
+      billing: "pay-as-you-go",
+      baseUrl: "https://api.stepfun.ai/step_plan/v1",
+      apiKeyEnv: "STEPFUN_API_KEY",
+      thinking: true,
+      contextWindow: 128_000,
+      maxOutputTokens: 8_192,
+    },
   },
   search: {
     mode: "free",
@@ -120,7 +131,7 @@ const httpUrlSchema = z.string().url().refine((value) => {
 }, "must use http or https");
 const positiveInt = z.number().int().positive();
 const modelFileSchema = z.object({
-  vendor: z.literal("mimo").optional(),
+  vendor: z.enum(["mimo", "stepfun"]).optional(),
   model: z.string().min(1).optional(),
   billing: z.enum(["pay-as-you-go", "token-plan"]).optional(),
   base_url: httpUrlSchema.optional(),
@@ -194,7 +205,7 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
       model,
       billing,
       baseUrl: raw.base_url ?? raw.baseUrl ?? previous.baseUrl,
-      apiKeyEnv: raw.api_key_env ?? raw.apiKeyEnv ?? apiKeyEnvFor(billing),
+      apiKeyEnv: raw.api_key_env ?? raw.apiKeyEnv ?? apiKeyEnvFor(vendor, billing),
       thinking: raw.thinking ?? previous.thinking,
       contextWindow: raw.context_window ?? raw.contextWindow ?? previous.contextWindow,
       maxOutputTokens: raw.max_output_tokens ?? raw.maxOutputTokens ?? previous.maxOutputTokens,
@@ -238,10 +249,10 @@ function validateMergedConfig(config: KulmiConfig): void {
     if (model.maxOutputTokens > model.contextWindow) {
       throw new Error(`model ${name} max_output_tokens exceeds context_window`);
     }
-    if (model.vendor !== "mimo") {
-      throw new Error(`model ${name}: only MiMo is supported`);
+    if (model.vendor !== "mimo" && model.vendor !== "stepfun") {
+      throw new Error(`model ${name}: only MiMo and StepFun are supported`);
     }
-    const expectedEnv = apiKeyEnvFor(model.billing);
+    const expectedEnv = apiKeyEnvFor(model.vendor, model.billing);
     if (model.apiKeyEnv !== expectedEnv) {
       throw new Error(`model ${name} (${model.vendor}/${model.billing}) must use ${expectedEnv}`);
     }
@@ -254,8 +265,10 @@ export function resolveModel(config: KulmiConfig, name?: string): ResolvedModel 
   if (!model) throw new Error(`unknown model ${modelName}`);
   const apiKey = process.env[model.apiKeyEnv];
   if (!apiKey) throw new Error(`missing ${model.apiKeyEnv} for model ${modelName}`);
-  if (model.vendor !== "mimo") {
-    throw new Error(`unknown vendor ${model.vendor} for model ${modelName}`);
+  if (model.vendor === "stepfun") {
+    if (!apiKey.startsWith("sk-")) {
+      throw new Error(`${model.apiKeyEnv} must be a StepFun key beginning with sk-`);
+    }
   } else if (model.billing === "token-plan" && !apiKey.startsWith("tp-")) {
     throw new Error(`${model.apiKeyEnv} must be a Token Plan key beginning with tp-`);
   } else if (model.billing === "pay-as-you-go" && apiKey.startsWith("tp-")) {
@@ -273,7 +286,7 @@ export function expandPath(path: string): string {
 }
 
 export function configTemplate(): string {
-  return `# Kulmi is MiMo V2.5 native. The default profile uses MiMo pay-as-you-go.
+  return `# Kulmi is MiMo V2.5 and StepFun Step Plan native. The default profile uses MiMo pay-as-you-go.
 default_model = "mimo-v2.5-pro"
 default_autonomy = "medium"
 max_steps = 80
@@ -322,5 +335,15 @@ api_key_env = "MIMO_TOKEN_PLAN_API_KEY"
 thinking = true
 context_window = 1000000
 max_output_tokens = 32768
+
+# StepFun Step Plan (set STEPFUN_API_KEY). reasoning_effort is set automatically from thinking.
+[models.step-3.7-flash]
+vendor = "stepfun"
+model = "step-3.7-flash"
+base_url = "https://api.stepfun.ai/step_plan/v1"
+api_key_env = "STEPFUN_API_KEY"
+thinking = true
+context_window = 128000
+max_output_tokens = 8192
 `;
 }

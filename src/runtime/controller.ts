@@ -14,6 +14,7 @@ import { EventBus } from "../core/events.js";
 import { createId } from "../core/ids.js";
 import type { AgentMode, AutonomyLevel, RunState } from "../core/types.js";
 import { MiMoProvider } from "../provider/mimo.js";
+import { StepFunProvider } from "../provider/stepfun.js";
 import type { ModelProvider, ProviderMessage } from "../provider/types.js";
 import { progressTools } from "../tools/progress.js";
 import { fileTools } from "../tools/files.js";
@@ -114,7 +115,7 @@ export class SessionController {
       );
     }
     const search = { ...config.search, mode: options.webSearch ?? config.search.mode };
-    const provider = new MiMoProvider(resolved);
+    const provider = resolved.vendor === "stepfun" ? new StepFunProvider(resolved) : new MiMoProvider(resolved);
     const events = options.events ?? new EventBus();
     const permissions: PermissionApi = {
       request: async (request) => {

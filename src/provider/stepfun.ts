@@ -10,35 +10,15 @@ import type {
   WebCitation,
 } from "./types.js";
 
-interface WireCitation {
-  type?: string | undefined;
-  url?: string | undefined;
-  title?: string | undefined;
-  summary?: string | undefined;
-  site_name?: string | undefined;
-  publish_time?: string | undefined;
-  logo_url?: string | undefined;
-}
-
-const wireChunkSchema = z.object({
+const stepFunWireChunkSchema = z.object({
   choices: z.array(z.object({
     delta: z.object({
       content: z.string().nullable().optional(),
       reasoning_content: z.string().nullable().optional(),
-      error_message: z.string().nullable().optional(),
-      annotations: z.array(z.object({
-        type: z.string().optional(),
-        url: z.string().optional(),
-        title: z.string().optional(),
-        summary: z.string().optional(),
-        site_name: z.string().optional(),
-        publish_time: z.string().optional(),
-        logo_url: z.string().optional(),
-      }).passthrough()).nullable().optional(),
       tool_calls: z.array(z.object({
         index: z.number().int().nonnegative(),
         id: z.string().optional(),
-        type: z.literal("function").optional(),
+        type: z.string().optional(),
         function: z.object({
           name: z.string().optional(),
           arguments: z.string().optional(),
@@ -57,14 +37,12 @@ const wireChunkSchema = z.object({
     prompt_tokens_details: z.object({
       cached_tokens: z.number().int().nonnegative().optional(),
     }).passthrough().nullable().optional(),
-    prompt_cache_hit_tokens: z.number().int().nonnegative().optional(),
-    prompt_cache_miss_tokens: z.number().int().nonnegative().optional(),
   }).passthrough().nullable().optional(),
   error: z.object({ message: z.string().optional() }).passthrough().optional(),
 }).passthrough();
-type WireChunk = z.infer<typeof wireChunkSchema>;
+type StepFunWireChunk = z.infer<typeof stepFunWireChunkSchema>;
 
-export class MiMoProvider implements ModelProvider {
+export class StepFunProvider implements ModelProvider {
   readonly name: string;
   readonly model: string;
   readonly #config: ResolvedModel;
@@ -82,7 +60,7 @@ export class MiMoProvider implements ModelProvider {
   }
 
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
-    const thinking = request.thinking ?? this.#config.thinking;
+    const reasoningEffort = "high";
     const maxCompletionTokens = Math.min(
       this.#config.maxOutputTokens,
       Math.max(1, Math.trunc(request.maxCompletionTokens ?? this.#config.maxOutputTokens)),
@@ -95,18 +73,18 @@ export class MiMoProvider implements ModelProvider {
       ...(tools.length ? { tools } : {}),
       stream: true,
       max_completion_tokens: maxCompletionTokens,
-      thinking: { type: thinking ? "enabled" : "disabled" },
+      reasoning_effort: reasoningEffort,
     });
     if (request.cacheScope) {
       const fingerprint = createHash("sha256").update(JSON.stringify({
         model: this.model,
-        thinking,
+        reasoningEffort,
         system: request.messages.filter((message) => message.role === "system"),
         tools,
       })).digest("hex");
       const previous = this.#cachePrefixes.get(request.cacheScope);
       if (previous && previous !== fingerprint) {
-        throw new Error(`MiMo cache prefix changed inside scope ${request.cacheScope}`);
+        throw new Error(`StepFun cache prefix changed inside scope ${request.cacheScope}`);
       }
       this.#cachePrefixes.set(request.cacheScope, fingerprint);
     }
@@ -120,7 +98,7 @@ export class MiMoProvider implements ModelProvider {
     const resetIdleTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(
-        () => controller.abort(new Error("MiMo stream stalled")),
+        () => controller.abort(new Error("StepFun stream stalled")),
         this.#idleTimeoutMs,
       );
       idleTimer.unref();
@@ -144,16 +122,16 @@ export class MiMoProvider implements ModelProvider {
             controller.signal.aborted ||
             emitted ||
             attempt === 2 ||
-            (error instanceof MiMoHttpError && !error.retryable)
+            (error instanceof StepFunHttpError && !error.retryable)
           ) throw error;
           lastError = error;
-          const delay = error instanceof MiMoHttpError && error.retryAfterMs !== undefined
+          const delay = error instanceof StepFunHttpError && error.retryAfterMs !== undefined
             ? error.retryAfterMs
             : 500 * 2 ** attempt + Math.floor(Math.random() * 200);
           await sleep(delay, controller.signal);
         }
       }
-      throw lastError instanceof Error ? lastError : new Error("MiMo stream failed");
+      throw lastError instanceof Error ? lastError : new Error("StepFun stream failed");
     } finally {
       request.signal.removeEventListener("abort", relayAbort);
       if (idleTimer) clearTimeout(idleTimer);
@@ -167,12 +145,11 @@ export class MiMoProvider implements ModelProvider {
     resetIdleTimer: () => void,
     markEmitted: () => void,
   ): Promise<ProviderResponse> {
-    if (!response.body) throw new Error("MiMo returned an empty response body");
+    if (!response.body) throw new Error("StepFun returned an empty response body");
 
     let reasoning = "";
     let content = "";
     let finishReason: string | null = null;
-    let searchError: string | undefined;
     let citations: WebCitation[] = [];
     let usage: ProviderResponse["usage"] = emptyUsage();
     const calls = new Map<number, FunctionToolCall>();
@@ -185,14 +162,14 @@ export class MiMoProvider implements ModelProvider {
         sawDone = true;
         break;
       }
-      let chunk: WireChunk;
+      let chunk: StepFunWireChunk;
       try {
-        chunk = wireChunkSchema.parse(JSON.parse(data));
+        chunk = stepFunWireChunkSchema.parse(JSON.parse(data));
       } catch (error) {
         const detail = error instanceof z.ZodError ? z.prettifyError(error) : String(error);
-        throw new Error(`invalid MiMo stream chunk: ${detail}; data=${data.slice(0, 300)}`);
+        throw new Error(`invalid StepFun stream chunk: ${detail}; data=${data.slice(0, 300)}`);
       }
-      if (chunk.error?.message) throw new Error(`MiMo: ${chunk.error.message}`);
+      if (chunk.error?.message) throw new Error(`StepFun: ${chunk.error.message}`);
 
       const choice = chunk.choices?.[0];
       const delta = choice?.delta;
@@ -206,36 +183,32 @@ export class MiMoProvider implements ModelProvider {
         content += delta.content;
         await request.onTextDelta?.(delta.content);
       }
-      if (delta?.annotations?.length) {
-        markEmitted();
-        citations = delta.annotations.map(toCitation).filter((item): item is WebCitation => item !== undefined);
-        await request.onCitations?.(citations);
-      }
-      if (delta?.error_message) searchError = delta.error_message;
-      for (const part of delta?.tool_calls ?? []) {
-        markEmitted();
-        let call = calls.get(part.index);
-        if (!call) {
-          call = {
-            id: part.id ?? `call_${part.index}`,
-            type: "function",
-            function: { name: "", arguments: "" },
-          };
-          calls.set(part.index, call);
-        }
-        if (part.id) call.id = part.id;
-        if (part.function?.name) call.function.name += part.function.name;
-        if (part.function?.arguments) call.function.arguments += part.function.arguments;
-        if (!announcedCalls.has(part.index) && call.function.name) {
-          announcedCalls.add(part.index);
-          await request.onToolCallStart?.(call);
+      if (delta?.tool_calls?.length) {
+        for (const part of delta.tool_calls) {
+          markEmitted();
+          let call = calls.get(part.index);
+          if (!call) {
+            call = {
+              id: part.id ?? `call_${part.index}`,
+              type: "function",
+              function: { name: "", arguments: "" },
+            };
+            calls.set(part.index, call);
+          }
+          if (part.id) call.id = part.id;
+          if (part.function?.name) call.function.name += part.function.name;
+          if (part.function?.arguments) call.function.arguments += part.function.arguments;
+          if (!announcedCalls.has(part.index) && call.function.name) {
+            announcedCalls.add(part.index);
+            await request.onToolCallStart?.(call);
+          }
         }
       }
       if (choice?.finish_reason) finishReason = choice.finish_reason;
       if (chunk.usage) usage = normalizeUsage(chunk.usage);
     }
 
-    if (!sawDone) throw new Error(`MiMo stream ended before [DONE]`);
+    if (!sawDone) throw new Error(`StepFun stream ended before [DONE]`);
     const toolCalls = [...calls.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, call]) => call);
@@ -247,7 +220,6 @@ export class MiMoProvider implements ModelProvider {
       finishReason,
       usage,
       ...(citations.length ? { citations } : {}),
-      ...(searchError ? { searchError } : {}),
     };
   }
 
@@ -256,7 +228,7 @@ export class MiMoProvider implements ModelProvider {
     const response = await fetch(url, {
       method: "POST",
       headers: {
-        "api-key": this.#config.apiKey,
+        authorization: `Bearer ${this.#config.apiKey}`,
         "content-type": "application/json",
         accept: "text/event-stream",
       },
@@ -265,22 +237,21 @@ export class MiMoProvider implements ModelProvider {
     });
     if (response.ok) return response;
     const errorBody = (await response.text()).slice(0, 2_000);
-    const quotaExhausted = response.status === 429 && /(?:quota|credit|exhaust|套餐|额度)/i.test(errorBody);
-    throw new MiMoHttpError(
-      `MiMo HTTP ${response.status}: ${errorBody}`,
-      !quotaExhausted && ([408, 409, 429].includes(response.status) || response.status >= 500),
+    throw new StepFunHttpError(
+      `StepFun HTTP ${response.status}: ${errorBody}`,
+      [408, 409, 429].includes(response.status) || response.status >= 500,
       parseRetryAfter(response.headers.get("retry-after")),
     );
   }
 }
 
-class MiMoHttpError extends Error {
+class StepFunHttpError extends Error {
   readonly retryable: boolean;
   readonly retryAfterMs: number | undefined;
 
   constructor(message: string, retryable: boolean, retryAfterMs?: number) {
     super(message);
-    this.name = "MiMoHttpError";
+    this.name = "StepFunHttpError";
     this.retryable = retryable;
     this.retryAfterMs = retryAfterMs;
   }
@@ -297,7 +268,7 @@ function emptyUsage(): ProviderResponse["usage"] {
   };
 }
 
-function normalizeUsage(usage: NonNullable<WireChunk["usage"]>): ProviderResponse["usage"] {
+function normalizeUsage(usage: NonNullable<StepFunWireChunk["usage"]>): ProviderResponse["usage"] {
   const prompt = usage.prompt_tokens ?? 0;
   const hit = usage.prompt_tokens_details?.cached_tokens ?? 0;
   const miss = Math.max(0, prompt - hit);
@@ -308,18 +279,6 @@ function normalizeUsage(usage: NonNullable<WireChunk["usage"]>): ProviderRespons
     cacheHitTokens: hit,
     cacheMissTokens: miss,
     reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? 0,
-  };
-}
-
-function toCitation(value: WireCitation): WebCitation | undefined {
-  if (!value.url || !value.title) return undefined;
-  return {
-    url: value.url,
-    title: value.title,
-    ...(value.summary ? { summary: value.summary } : {}),
-    ...(value.site_name ? { siteName: value.site_name } : {}),
-    ...(value.publish_time ? { publishedAt: value.publish_time } : {}),
-    ...(value.logo_url ? { logoUrl: value.logo_url } : {}),
   };
 }
 
