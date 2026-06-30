@@ -7,11 +7,11 @@ import { z } from "zod";
 import type { AutonomyLevel } from "../core/types.js";
 
 export type MiMoBilling = "pay-as-you-go" | "token-plan";
-export type ModelVendor = "mimo" | "deepseek";
+export type ModelVendor = "mimo";
 export type SearchMode = "off" | "free";
 export type FreeSearchProvider = "auto" | "searxng" | "bing-rss";
 
-export type ModelId = "mimo-v2.5-pro" | "mimo-v2.5" | "deepseek-v4-pro" | "deepseek-v4-flash";
+export type ModelId = "mimo-v2.5-pro" | "mimo-v2.5";
 
 export interface ModelConfig {
   vendor: ModelVendor;
@@ -24,14 +24,13 @@ export interface ModelConfig {
   maxOutputTokens: number;
 }
 
-const knownModels: readonly ModelId[] = ["mimo-v2.5-pro", "mimo-v2.5", "deepseek-v4-pro", "deepseek-v4-flash"];
+const knownModels: readonly ModelId[] = ["mimo-v2.5-pro", "mimo-v2.5"];
 
-export function vendorForModel(model: ModelId): ModelVendor {
-  return model.startsWith("deepseek") ? "deepseek" : "mimo";
+export function vendorForModel(_model: ModelId): "mimo" {
+  return "mimo";
 }
 
-export function apiKeyEnvFor(vendor: ModelVendor, billing: MiMoBilling): string {
-  if (vendor === "deepseek") return "DEEPSEEK_API_KEY";
+export function apiKeyEnvFor(billing: MiMoBilling): string {
   return billing === "token-plan" ? "MIMO_TOKEN_PLAN_API_KEY" : "MIMO_API_KEY";
 }
 
@@ -106,26 +105,6 @@ const defaults: KulmiConfig = {
       contextWindow: 1_000_000,
       maxOutputTokens: 32_768,
     },
-    "deepseek-v4-pro": {
-      vendor: "deepseek",
-      model: "deepseek-v4-pro",
-      billing: "pay-as-you-go",
-      baseUrl: "https://api.deepseek.com",
-      apiKeyEnv: "DEEPSEEK_API_KEY",
-      thinking: true,
-      contextWindow: 128_000,
-      maxOutputTokens: 8_192,
-    },
-    "deepseek-v4-flash": {
-      vendor: "deepseek",
-      model: "deepseek-v4-flash",
-      billing: "pay-as-you-go",
-      baseUrl: "https://api.deepseek.com",
-      apiKeyEnv: "DEEPSEEK_API_KEY",
-      thinking: true,
-      contextWindow: 128_000,
-      maxOutputTokens: 8_192,
-    },
   },
   search: {
     mode: "free",
@@ -141,7 +120,7 @@ const httpUrlSchema = z.string().url().refine((value) => {
 }, "must use http or https");
 const positiveInt = z.number().int().positive();
 const modelFileSchema = z.object({
-  vendor: z.enum(["mimo", "deepseek"]).optional(),
+  vendor: z.literal("mimo").optional(),
   model: z.string().min(1).optional(),
   billing: z.enum(["pay-as-you-go", "token-plan"]).optional(),
   base_url: httpUrlSchema.optional(),
@@ -215,7 +194,7 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
       model,
       billing,
       baseUrl: raw.base_url ?? raw.baseUrl ?? previous.baseUrl,
-      apiKeyEnv: raw.api_key_env ?? raw.apiKeyEnv ?? apiKeyEnvFor(vendor, billing),
+      apiKeyEnv: raw.api_key_env ?? raw.apiKeyEnv ?? apiKeyEnvFor(billing),
       thinking: raw.thinking ?? previous.thinking,
       contextWindow: raw.context_window ?? raw.contextWindow ?? previous.contextWindow,
       maxOutputTokens: raw.max_output_tokens ?? raw.maxOutputTokens ?? previous.maxOutputTokens,
@@ -259,10 +238,10 @@ function validateMergedConfig(config: KulmiConfig): void {
     if (model.maxOutputTokens > model.contextWindow) {
       throw new Error(`model ${name} max_output_tokens exceeds context_window`);
     }
-    if (model.vendor === "deepseek" && model.billing !== "pay-as-you-go") {
-      throw new Error(`model ${name}: DeepSeek models are pay-as-you-go only`);
+    if (model.vendor !== "mimo") {
+      throw new Error(`model ${name}: only MiMo is supported`);
     }
-    const expectedEnv = apiKeyEnvFor(model.vendor, model.billing);
+    const expectedEnv = apiKeyEnvFor(model.billing);
     if (model.apiKeyEnv !== expectedEnv) {
       throw new Error(`model ${name} (${model.vendor}/${model.billing}) must use ${expectedEnv}`);
     }
@@ -275,10 +254,8 @@ export function resolveModel(config: KulmiConfig, name?: string): ResolvedModel 
   if (!model) throw new Error(`unknown model ${modelName}`);
   const apiKey = process.env[model.apiKeyEnv];
   if (!apiKey) throw new Error(`missing ${model.apiKeyEnv} for model ${modelName}`);
-  if (model.vendor === "deepseek") {
-    if (!apiKey.startsWith("sk-")) {
-      throw new Error(`${model.apiKeyEnv} must be a DeepSeek key beginning with sk-`);
-    }
+  if (model.vendor !== "mimo") {
+    throw new Error(`unknown vendor ${model.vendor} for model ${modelName}`);
   } else if (model.billing === "token-plan" && !apiKey.startsWith("tp-")) {
     throw new Error(`${model.apiKeyEnv} must be a Token Plan key beginning with tp-`);
   } else if (model.billing === "pay-as-you-go" && apiKey.startsWith("tp-")) {
@@ -296,7 +273,7 @@ export function expandPath(path: string): string {
 }
 
 export function configTemplate(): string {
-  return `# Kulmi is MiMo V2.5 and DeepSeek V4 native. The default profile uses MiMo pay-as-you-go.
+  return `# Kulmi is MiMo V2.5 native. The default profile uses MiMo pay-as-you-go.
 default_model = "mimo-v2.5-pro"
 default_autonomy = "medium"
 max_steps = 80
@@ -345,25 +322,5 @@ api_key_env = "MIMO_TOKEN_PLAN_API_KEY"
 thinking = true
 context_window = 1000000
 max_output_tokens = 32768
-
-# DeepSeek V4 (set DEEPSEEK_API_KEY). thinking=true is on by default; if V4 rejects
-# tool calling while thinking, set thinking=false. Select with: kulmi -m deepseek-v4-pro
-[models.deepseek-v4-pro]
-vendor = "deepseek"
-model = "deepseek-v4-pro"
-base_url = "https://api.deepseek.com"
-api_key_env = "DEEPSEEK_API_KEY"
-thinking = true
-context_window = 128000
-max_output_tokens = 8192
-
-[models.deepseek-v4-flash]
-vendor = "deepseek"
-model = "deepseek-v4-flash"
-base_url = "https://api.deepseek.com"
-api_key_env = "DEEPSEEK_API_KEY"
-thinking = true
-context_window = 128000
-max_output_tokens = 8192
 `;
 }

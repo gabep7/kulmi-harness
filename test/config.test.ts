@@ -16,14 +16,11 @@ describe("MiMo configuration", () => {
     expect(() => resolveModel(config(tokenPlan()), "plan")).toThrow("must be a Token Plan key");
   });
 
-  it("documents MiMo V2.5 (with regional Token Plan) and DeepSeek V4 profiles", () => {
+  it("documents MiMo V2.5 (with regional Token Plan) profiles", () => {
     const template = configTemplate();
     expect(template).toContain('model = "mimo-v2.5-pro"');
     expect(template).toContain('model = "mimo-v2.5"');
     expect(template).toContain("token-plan-ams.xiaomimimo.com/v1");
-    expect(template).toContain('model = "deepseek-v4-pro"');
-    expect(template).toContain("api.deepseek.com");
-    expect(template).toContain("DEEPSEEK_API_KEY");
   });
 
   it("rejects invalid limits, endpoints, billing environments, and removed MCP config", () => {

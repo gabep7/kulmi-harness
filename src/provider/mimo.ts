@@ -71,8 +71,6 @@ export class MiMoProvider implements ModelProvider {
   readonly #config: ResolvedModel;
   readonly #idleTimeoutMs: number;
   readonly #cachePrefixes = new Map<string, string>();
-  readonly #vendor: ModelVendor;
-  readonly #label: string;
 
   constructor(
     config: ResolvedModel,
@@ -82,8 +80,6 @@ export class MiMoProvider implements ModelProvider {
     this.name = config.name;
     this.model = config.model;
     this.#idleTimeoutMs = options.idleTimeoutMs ?? 300_000;
-    this.#vendor = config.vendor;
-    this.#label = config.vendor === "deepseek" ? "DeepSeek" : "MiMo";
   }
 
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
@@ -93,17 +89,13 @@ export class MiMoProvider implements ModelProvider {
       Math.max(1, Math.trunc(request.maxCompletionTokens ?? this.#config.maxOutputTokens)),
     );
     const tools: Array<(typeof request.tools)[number] | Record<string, unknown>> = [...request.tools];
-    // DeepSeek returns 400 if reasoning_content is present in input history; MiMo
-    // requires it. Strip it for DeepSeek only.
-    const messages = this.#vendor === "deepseek" ? request.messages.map(stripReasoning) : request.messages;
+    const messages = request.messages;
     const body = JSON.stringify({
       model: this.model,
       messages,
       ...(tools.length ? { tools } : {}),
       stream: true,
-      ...(this.#vendor === "deepseek"
-        ? { max_tokens: maxCompletionTokens }
-        : { max_completion_tokens: maxCompletionTokens }),
+      max_completion_tokens: maxCompletionTokens,
       thinking: { type: thinking ? "enabled" : "disabled" },
     });
     if (request.cacheScope) {
@@ -115,7 +107,7 @@ export class MiMoProvider implements ModelProvider {
       })).digest("hex");
       const previous = this.#cachePrefixes.get(request.cacheScope);
       if (previous && previous !== fingerprint) {
-        throw new Error(`${this.#label} cache prefix changed inside scope ${request.cacheScope}`);
+        throw new Error(`MiMo cache prefix changed inside scope ${request.cacheScope}`);
       }
       this.#cachePrefixes.set(request.cacheScope, fingerprint);
     }
@@ -241,10 +233,10 @@ export class MiMoProvider implements ModelProvider {
         }
       }
       if (choice?.finish_reason) finishReason = choice.finish_reason;
-      if (chunk.usage) usage = normalizeUsage(chunk.usage, this.#vendor);
+      if (chunk.usage) usage = normalizeUsage(chunk.usage);
     }
 
-    if (!sawDone) throw new Error(`${this.#label} stream ended before [DONE]`);
+    if (!sawDone) throw new Error(`MiMo stream ended before [DONE]`);
     const toolCalls = [...calls.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, call]) => call);
@@ -265,10 +257,7 @@ export class MiMoProvider implements ModelProvider {
     const response = await fetch(url, {
       method: "POST",
       headers: {
-        // DeepSeek uses OpenAI-style bearer auth; MiMo uses the api-key header.
-        ...(this.#vendor === "deepseek"
-          ? { authorization: `Bearer ${this.#config.apiKey}` }
-          : { "api-key": this.#config.apiKey }),
+        "api-key": this.#config.apiKey,
         "content-type": "application/json",
         accept: "text/event-stream",
       },
@@ -279,7 +268,7 @@ export class MiMoProvider implements ModelProvider {
     const errorBody = (await response.text()).slice(0, 2_000);
     const quotaExhausted = response.status === 429 && /(?:quota|credit|exhaust|套餐|额度)/i.test(errorBody);
     throw new MiMoHttpError(
-      `${this.#label} HTTP ${response.status}: ${errorBody}`,
+      `MiMo HTTP ${response.status}: ${errorBody}`,
       !quotaExhausted && ([408, 409, 429].includes(response.status) || response.status >= 500),
       parseRetryAfter(response.headers.get("retry-after")),
     );
@@ -309,15 +298,10 @@ function emptyUsage(): ProviderResponse["usage"] {
   };
 }
 
-function normalizeUsage(usage: NonNullable<WireChunk["usage"]>, vendor: ModelVendor): ProviderResponse["usage"] {
+function normalizeUsage(usage: NonNullable<WireChunk["usage"]>): ProviderResponse["usage"] {
   const prompt = usage.prompt_tokens ?? 0;
-  // DeepSeek reports cache hits/misses as top-level fields; MiMo nests cached_tokens.
-  const hit = vendor === "deepseek"
-    ? usage.prompt_cache_hit_tokens ?? 0
-    : usage.prompt_tokens_details?.cached_tokens ?? 0;
-  const miss = vendor === "deepseek"
-    ? usage.prompt_cache_miss_tokens ?? Math.max(0, prompt - hit)
-    : Math.max(0, prompt - hit);
+  const hit = usage.prompt_tokens_details?.cached_tokens ?? 0;
+  const miss = Math.max(0, prompt - hit);
   return {
     promptTokens: prompt,
     completionTokens: usage.completion_tokens ?? 0,
@@ -326,14 +310,6 @@ function normalizeUsage(usage: NonNullable<WireChunk["usage"]>, vendor: ModelVen
     cacheMissTokens: miss,
     reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? 0,
   };
-}
-
-function stripReasoning(message: ProviderMessage): ProviderMessage {
-  if (message.role === "assistant" && message.reasoning_content !== undefined) {
-    const { reasoning_content: _reasoning, ...rest } = message;
-    return rest;
-  }
-  return message;
 }
 
 function toCitation(value: WireCitation): WebCitation | undefined {
