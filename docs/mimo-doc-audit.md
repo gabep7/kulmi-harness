@@ -1,6 +1,6 @@
 # MiMo documentation audit
 
-Audit date: 2026-06-18
+Audit date: 2026-07-02
 
 This is the implementation ledger for the English MiMo documentation surface. The client-rendered navigation was enumerated from every top-level section. API, model, thinking, search, pricing, Token Plan, integration, FAQ, release, and deprecation pages were checked. Product news and legal pages were classified for runtime impact.
 
@@ -9,14 +9,15 @@ This is the implementation ledger for the English MiMo documentation surface. Th
 | Concern | MiMo contract | Kulmi implementation |
 | --- | --- | --- |
 | Primary model | `mimo-v2.5-pro`, 1M context, 131,072 default maximum completion tokens | Default model and full output allowance |
-| Secondary model | `mimo-v2.5`, 1M context, 32,768 default maximum completion tokens | Secondary API and Token Plan profiles |
+| Secondary model | `mimo-v2.5`, 1,048,576 context, 32,768 API default and 131,072 supported maximum completion tokens | Secondary API and Token Plan profiles use the full supported allowance |
 | API endpoint | `https://api.xiaomimimo.com/v1/chat/completions` | Direct fetch and SSE adapter |
 | Authentication | `api-key` or Bearer; Kulmi uses `api-key` | `MIMO_API_KEY`, never forwarded to tools |
 | Token Plan | Separate `tp-` key and cluster-specific URL | Separate key env, profile validation, AMS default; SGP and CN configurable |
 | Thinking | `thinking: {"type":"enabled"}`; enabled by default on V2.5 | Explicitly enabled by default and independently configurable |
 | Thinking sampling | Thinking mode forces temperature 1.0 and top_p 0.95 | Neither field is sent, keeping the request stable |
 | Thinking output | Streaming `reasoning_content` precedes visible `content` | Separate typed reasoning events |
-| Tool continuation | Complete reasoning must be returned on every assistant tool-call message or MiMo can return HTTP 400 | Stored immediately and replayed verbatim with the tool calls |
+| Tool continuation | Complete reasoning must be returned on every assistant tool-call message or MiMo can return HTTP 400 | Stored immediately and replayed verbatim with the tool calls; tool results use only native `role`, `tool_call_id`, and `content` fields |
+| Tool arguments | Function tools support strict JSON Schema adherence | Canonical Zod schemas are sent with `strict: true`; completed calls require unique IDs and non-empty names |
 | Output budget | `max_completion_tokens` covers thinking plus visible output | Native field, model-specific limits |
 | Cache accounting | `prompt_tokens_details.cached_tokens` | Normalized cached and fresh token counters |
 | Prompt cache | Automatic prefix cache; cached prefix billed at cache-hit price; writes currently free | Stable system prompt, canonical tools and schemas, append-only history, safe compaction |
@@ -33,11 +34,14 @@ MiMo does not document a cache creation endpoint or a cache key request field. I
 1. The system message is created once and never mutated during a session.
 2. Tool definitions are sorted by name.
 3. Tool JSON schemas are recursively key-sorted once.
-4. Model history is append-only between compaction epochs.
+4. Model history is append-only between compaction epochs, enforced by the MiMo adapter for every cache scope.
 5. Assistant tool calls, full reasoning, and tool results retain their original order.
 6. Plans, worker progress, timestamps, usage, and UI state are not injected into the system prefix.
 7. Compaction happens only when estimated context reaches 78 percent and only at a complete assistant/tool boundary.
-8. Every request exposes cached, fresh, completion, and reasoning tokens to the CLI and JSON stream.
+8. Every request exposes cached, fresh, completion, reasoning, web-search usage, and cache-hit percentage to clients.
+9. Large tool results move to retrievable artifacts after 16 KB and leave at most a bounded head-and-tail preview in the conversation.
+10. Plan and completion tools return compact acknowledgements instead of duplicating state already present in their arguments and durable run state.
+11. Undo that truncates active history starts a new cache epoch, so a shortened transcript is never reused under an append-only MiMo cache scope.
 
 MiMo V2.5 Pro overseas prices observed on the audit date were $0.0036 per million cache-hit input tokens, $0.435 per million cache-miss input tokens, and $0.87 per million output tokens. This makes deterministic prefix reuse materially more important than small prompt reductions that rewrite earlier bytes.
 
@@ -49,7 +53,6 @@ Kulmi exposes two modes:
 
 | Mode | Behavior | Cost property |
 | --- | --- | --- |
-| `off` | No web search surface | No search charges |
 | `off` | No search or page-fetch tools | No search cost |
 | `free` | Self-hosted SearXNG when configured, otherwise keyless Bing RSS, plus protected page fetching | No search API key or paid search API |
 
@@ -74,8 +77,8 @@ The selected model profile, not only the model ID, is persisted in every session
 - [Welcome](https://mimo.mi.com/docs/en-US/quick-start/summary/welcome): product entry points and current notices.
 - [First API Call](https://mimo.mi.com/docs/en-US/quick-start/summary/first-api-call): key, endpoint, request, and response setup.
 - [Models](https://mimo.mi.com/docs/en-US/quick-start/summary/model): model IDs, modality, context, and output limits.
-- [Web Search](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/tool-calling/web-search): native search schema, activation, billing, citations, and propagation behavior.
-- [Deep Thinking](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/deep-thinking): thinking defaults, streaming, sampling, and mandatory reasoning replay.
+- [Web Search](https://mimo.mi.com/docs/en-US/usage-guide/tool-calling/web-search): native search schema, activation, billing, citations, and propagation behavior.
+- [Deep Thinking](https://mimo.mi.com/docs/en-US/usage-guide/other/deep-thinking): thinking defaults, streaming, sampling, and mandatory reasoning replay.
 - [Image Understanding](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/multimodal-understanding/image-understanding): relevant only to `mimo-v2.5`; Pro remains text-focused in Kulmi.
 - [Audio Understanding](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/multimodal-understanding/audio-understanding): multimodal input reference, not currently exposed by coding tools.
 - [Video Understanding](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/multimodal-understanding/video-understanding): multimodal input and token calculation, not currently exposed.
@@ -158,9 +161,8 @@ Legacy V2 and Flash announcements were checked only for migration and compatibil
 
 ## Harness research applied
 
-- Reasonix: stable, append-only provider prefixes; cache hit and miss telemetry; safe compaction boundaries; cache-sensitive contract tests.
 - Pi: a frontend-neutral session object, event subscription, durable message trees, compaction, and explicit SDK boundary.
-- Oh My Pi: separate CLI, print, and RPC modes; tool factories; search provider chains; durable agent sessions; richer task orchestration.
+- Oh My Pi: hash-anchored edits, separate CLI and RPC modes, isolated subagents, structured worker completion, and durable agent sessions.
 - OpenCode: headless server boundary and event-driven clients.
 - Subagent implementations: bounded concurrency, isolated sessions, persisted jobs, explicit wait/inspect/cancel operations, and worktree isolation for writers.
 

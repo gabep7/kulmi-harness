@@ -150,10 +150,24 @@ function analyzeArgv(input: string[]): {
   if (["bash", "sh", "zsh"].includes(program) && argv.slice(1).some((arg) => arg === "-c" || arg === "--command")) {
     return { risk: "read", blocked: "nested shells are blocked", verification: false };
   }
-  if (
-    ["node", "deno", "bun"].includes(program) ||
-    (["python", "python3"].includes(program) && !(argv[1] === "-m" && argv[2] === "pytest"))
-  ) {
+  if (["deno", "bun"].includes(program)) {
+    return { risk: "read", blocked: `direct ${program} execution is blocked; use a declared project script`, verification: false };
+  }
+  if (program === "node") {
+    if (argv.slice(1).some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg))) {
+      return { risk: "read", blocked: "direct node -e/--eval execution is blocked; use a declared project script", verification: false };
+    }
+    const firstPositional = argv.slice(1).find((arg) => !arg.startsWith("-"));
+    if (firstPositional) return { risk: "medium", verification: false };
+    return { risk: "read", blocked: "direct node execution is blocked; use a declared project script", verification: false };
+  }
+  if (["python", "python3"].includes(program)) {
+    if (argv[1] === "-m" && argv[2] === "pytest") return { risk: "medium", verification: true };
+    if (argv.slice(1).some((arg) => arg === "-c" || arg === "-m")) {
+      return { risk: "read", blocked: `direct ${program} execution is blocked; use a declared project script`, verification: false };
+    }
+    const firstPositional = argv.slice(1).find((arg) => !arg.startsWith("-"));
+    if (firstPositional) return { risk: "medium", verification: false };
     return { risk: "read", blocked: `direct ${program} execution is blocked; use a declared project script`, verification: false };
   }
   if (program === "find" && argv.some((arg) => ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(arg))) {
@@ -178,7 +192,7 @@ function analyzeArgv(input: string[]): {
     return { risk: "read", blocked: `${program} run is blocked`, verification: false };
   }
   if (["docker", "podman", "kubectl", "terraform", "pulumi", "vercel", "flyctl"].includes(program)) {
-    return { risk: "high", blocked: `${program} requires a future sandbox and approval flow`, verification: false };
+    return { risk: "high", blocked: `${program} is blocked because it can control external or privileged infrastructure`, verification: false };
   }
 
   const verification = isValidator(argv);
@@ -280,7 +294,6 @@ function isValidator(argv: string[]): boolean {
   }
   if (program === "cargo") return ["test", "check", "clippy", "build"].includes(args[0] ?? "");
   if (program === "go") return args[0] === "test";
-  if (["python", "python3"].includes(program)) return args[0] === "-m" && args[1] === "pytest";
   if (program === "make") return args.some((arg) => /^(?:test|check|lint|build)$/.test(arg));
   return false;
 }

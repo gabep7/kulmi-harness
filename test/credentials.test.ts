@@ -1,3 +1,6 @@
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acceptCredential,
@@ -34,6 +37,30 @@ describe("MiMo credential onboarding", () => {
     });
     expect(result).toMatchObject({ kind: "token-plan", model: "mimo-v2.5-pro-token-plan", source: "keychain" });
     expect(process.env.MIMO_TOKEN_PLAN_API_KEY).toBe("tp-123456789");
+  });
+
+  it("keeps a configured non-Pro default when its credential is available", async () => {
+    const cwd = await configuredWorkspace('default_model = "mimo-v2.5"\n');
+    process.env.MIMO_API_KEY = "sk-123456789";
+    delete process.env.MIMO_TOKEN_PLAN_API_KEY;
+
+    await expect(resolveExistingCredential({ cwd, keychain: new FakeKeychain() })).resolves.toMatchObject({
+      kind: "api",
+      model: "mimo-v2.5",
+      source: "environment",
+    });
+  });
+
+  it("prefers the configured billing type when both credentials are available", async () => {
+    const cwd = await configuredWorkspace('default_model = "mimo-v2.5-pro-token-plan"\n');
+    process.env.MIMO_API_KEY = "sk-123456789";
+    process.env.MIMO_TOKEN_PLAN_API_KEY = "tp-123456789";
+
+    await expect(resolveExistingCredential({ cwd, keychain: new FakeKeychain() })).resolves.toMatchObject({
+      kind: "token-plan",
+      model: "mimo-v2.5-pro-token-plan",
+      source: "environment",
+    });
   });
 
   it("switches away from an incompatible requested profile", async () => {
@@ -92,4 +119,11 @@ class FakeKeychain implements Keychain {
 function restore(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+async function configuredWorkspace(config: string): Promise<string> {
+  const cwd = await mkdtemp(join(tmpdir(), "kulmi-credentials-"));
+  await mkdir(join(cwd, ".kulmi"));
+  await writeFile(join(cwd, ".kulmi", "config.toml"), config, "utf8");
+  return cwd;
 }

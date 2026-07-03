@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { discoverSkills, readSkill, skillsPromptInventory } from "../src/config/skills.js";
+import { skillTools } from "../src/tools/skills.js";
 
 describe("local skills", () => {
   it("discovers stable metadata and loads content on demand", async () => {
@@ -26,5 +27,9 @@ describe("local skills", () => {
     const { symlink } = await import("node:fs/promises");
     await symlink(outside, join(root, ".kulmi", "skills", "linked", "SKILL.md"));
     expect(discoverSkills(root).filter((skill) => skill.path.startsWith(root))).toEqual([]);
+  });
+
+  it("does not expose a read tool when no skills exist", () => {
+    expect(skillTools([])).toEqual([]);
   });
 });

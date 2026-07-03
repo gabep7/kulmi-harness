@@ -4,7 +4,7 @@
   "description": "MiMo V2.5-native autonomous coding harness",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gabriele/kulmi-harness.git"
+    "url": "git+https://github.com/gabep7/kulmi-harness.git"
   },
   "type": "module",
   "bin": {
@@ -15,19 +15,24 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/source-fingerprint.mjs --write",
     "prepare": "npm run build",
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:live:mimo": "tsx scripts/mimo-smoke.ts",
     "test:tui": "vitest run test/tui.test.tsx",
+    "check:version": "node scripts/check-version.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run check:version && npm run typecheck && npm test && npm run build"
   },
   "engines": {
     "node": ">=22"
   },
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "dependencies": {
     "commander": "^15.0.0",
     "fast-glob": "^3.3.3",

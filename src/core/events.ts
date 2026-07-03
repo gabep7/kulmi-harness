@@ -4,8 +4,9 @@ import type { PermissionRequest } from "../tools/types.js";
 import { redactKnownSecrets } from "./redact.js";
 
 export type RuntimeEvent =
-  | { type: "session.started"; sessionId: string; model: string; cwd: string }
+  | { type: "session.started"; sessionId: string; model: string; modelProfile: string; cwd: string }
   | { type: "session.finished"; sessionId: string; status: AgentStatus }
+  | { type: "session.undone"; sessionId: string; checkpointId: string; files: string[]; messageHistory: "truncate" | "keep" }
   | { type: "agent.started"; agentId: string; parentAgentId?: string; prompt: string }
   | { type: "agent.finished"; agentId: string; status: AgentStatus; result?: string }
   | { type: "assistant.reasoning.delta"; agentId: string; text: string }
@@ -21,6 +22,7 @@ export type RuntimeEvent =
       callId: string;
       tool: string;
       output: string;
+      diff?: string;
       isError: boolean;
       durationMs: number;
     }

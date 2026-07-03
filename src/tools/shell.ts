@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { combineDiffs } from "../core/diff.js";
 import { decideCommand } from "../security/policy.js";
 import { runShell } from "../runtime/process.js";
 import { WorkspaceSnapshot } from "../runtime/workspace-tracker.js";
@@ -34,17 +35,24 @@ export const shellTool = defineTool({
       ? undefined
       : await WorkspaceSnapshot.capture(context.workspaceRoot);
     let result: Awaited<ReturnType<typeof runShell>> | undefined;
+    let diff: string | undefined;
+    let changedFiles: string[] = [];
     try {
       result = await runShell({
         command: input.command,
         cwd: context.cwd,
+        workspaceRoot: context.workspaceRoot,
+        sandbox: context.sandbox ?? { mode: "required", network: false },
         signal: context.signal,
         timeoutMs: (input.timeout_seconds ?? context.commandTimeoutMs / 1_000) * 1_000,
         maxOutputBytes: context.maxOutputBytes,
       });
     } finally {
       if (snapshot) {
-        const changed = await snapshot.reconcile(context.checkpoint);
+        const changes = await snapshot.reconcileChanges(context.checkpoint);
+        const changed = changes.map((change) => change.path);
+        changedFiles = changed;
+        diff = combineDiffs(changes.flatMap((change) => change.diff ? [change.diff] : []));
         if (changed.length > 0) {
           for (const path of changed) context.state.modifiedFiles.add(path);
           context.state.revision += 1;
@@ -53,7 +61,8 @@ export const shellTool = defineTool({
       }
     }
     if (!result) throw new Error("command did not produce a result");
-    if (decision.verification) {
+    const verificationRecorded = decision.verification && changedFiles.length === 0;
+    if (verificationRecorded) {
       context.state.verifications.push({
         command: input.command,
         exitCode: result.exitCode,
@@ -67,12 +76,20 @@ export const shellTool = defineTool({
     const content = [
       `exit_code: ${result.exitCode}`,
       `duration_ms: ${result.durationMs}`,
+      `sandbox: ${result.sandbox}`,
       `timed_out: ${result.timedOut}`,
       `truncated: ${result.truncated}`,
+      `changed_files: ${JSON.stringify(changedFiles)}`,
+      `verification: ${decision.verification ? verificationRecorded ? "recorded" : "not_recorded_changes_detected" : "not_applicable"}`,
       result.stdout ? `stdout:\n${result.stdout}` : "",
       result.stderr ? `stderr:\n${result.stderr}` : "",
     ].filter(Boolean).join("\n");
-    return { content, isError: result.exitCode !== 0 };
+    return {
+      content,
+      isError: result.exitCode !== 0,
+      mutated: changedFiles.length > 0,
+      ...(diff ? { diff } : {}),
+    };
   },
 });
 

@@ -6,7 +6,7 @@ const execFileAsync = promisify(execFile);
 const keychainService = "dev.kulmi.mimo";
 const selectionService = "dev.kulmi.mimo.selection";
 
-export type CredentialKind = "api" | "token-plan" | "stepfun";
+export type CredentialKind = "api" | "token-plan";
 
 export interface CredentialChoice {
   kind: CredentialKind;
@@ -66,7 +66,7 @@ export class MacKeychain implements Keychain {
         "-w",
       ], { encoding: "utf8", timeout: 5_000 });
       const value = stdout.trim();
-      return value === "api" || value === "token-plan" || value === "stepfun" ? value : undefined;
+      return value === "api" || value === "token-plan" ? value : undefined;
     } catch {
       return undefined;
     }
@@ -104,20 +104,14 @@ export async function resolveExistingCredential(options: {
   const config = loadConfig(options.cwd);
   const requested = options.requestedModel ? config.models[options.requestedModel] : undefined;
   if (options.requestedModel && !requested) throw new Error(`unknown model ${options.requestedModel}`);
-  if (requested?.vendor === "stepfun") {
-    const key = process.env.STEPFUN_API_KEY;
-    if (key && validateCredential("stepfun", key)) {
-      return { model: options.requestedModel!, kind: "stepfun", source: "environment" };
-    }
-    throw new Error("set STEPFUN_API_KEY to use a StepFun model");
-  }
-  const requestedKind = requested ? kindForBilling(requested.billing, requested.vendor) : undefined;
-  const environmentKind = requestedKind ?? detectEnvironmentKind();
+  const requestedKind = requested ? kindForBilling(requested.billing) : undefined;
+  const configuredKind = kindForBilling(config.models[config.defaultModel]!.billing);
+  const environmentKind = requestedKind ?? detectEnvironmentKind(configuredKind);
   if (environmentKind) {
     const key = process.env[envName(environmentKind)];
     if (key && validateCredential(environmentKind, key)) {
       return {
-        model: options.requestedModel ?? defaultModelFor(environmentKind),
+        model: options.requestedModel ?? configuredModelFor(config, environmentKind),
         kind: environmentKind,
         source: "environment",
       };
@@ -125,12 +119,12 @@ export async function resolveExistingCredential(options: {
   }
 
   const keychain = options.keychain ?? new MacKeychain();
-  const selected = requestedKind ?? await keychain.readSelection() ?? kindForBilling(config.models[config.defaultModel]?.billing ?? "pay-as-you-go", config.models[config.defaultModel]?.vendor ?? "mimo");
+  const selected = requestedKind ?? await keychain.readSelection() ?? kindForBilling(config.models[config.defaultModel]?.billing ?? "pay-as-you-go");
   const key = await keychain.read(selected);
   if (!key) return undefined;
   process.env[envName(selected)] = key;
   return {
-    model: options.requestedModel ?? defaultModelFor(selected),
+    model: options.requestedModel ?? configuredModelFor(config, selected),
     kind: selected,
     source: "keychain",
   };
@@ -149,9 +143,9 @@ export async function acceptCredential(options: {
   const stored = await (options.keychain ?? new MacKeychain()).save(options.choice);
   const config = loadConfig(options.cwd);
   const requested = options.requestedModel ? config.models[options.requestedModel] : undefined;
-  const model = requested && kindForBilling(requested.billing, requested.vendor) === options.choice.kind
+  const model = requested && kindForBilling(requested.billing) === options.choice.kind
     ? options.requestedModel!
-    : defaultModelFor(options.choice.kind);
+    : configuredModelFor(config, options.choice.kind);
   return {
     model,
     kind: options.choice.kind,
@@ -167,28 +161,36 @@ export function validateCredential(kind: CredentialKind, key: string): boolean {
 
 export function credentialHint(kind: CredentialKind): string {
   if (kind === "token-plan") return "Token Plan keys begin with tp-.";
-  if (kind === "stepfun") return "StepFun keys begin with sk-.";
   return "Pay-as-you-go API keys begin with sk-.";
 }
 
 export function defaultModelFor(kind: CredentialKind): string {
-  if (kind === "stepfun") return "step-3.7-flash";
   return kind === "api" ? "mimo-v2.5-pro" : "mimo-v2.5-pro-token-plan";
 }
 
-function detectEnvironmentKind(): CredentialKind | undefined {
-  if (validateCredential("api", process.env.MIMO_API_KEY ?? "")) return "api";
-  if (validateCredential("token-plan", process.env.MIMO_TOKEN_PLAN_API_KEY ?? "")) return "token-plan";
-  if (validateCredential("stepfun", process.env.STEPFUN_API_KEY ?? "")) return "stepfun";
+function detectEnvironmentKind(preferred: CredentialKind): CredentialKind | undefined {
+  const fallback = preferred === "api" ? "token-plan" : "api";
+  if (validateCredential(preferred, process.env[envName(preferred)] ?? "")) return preferred;
+  if (validateCredential(fallback, process.env[envName(fallback)] ?? "")) return fallback;
   return undefined;
 }
 
-function envName(kind: CredentialKind): "MIMO_API_KEY" | "MIMO_TOKEN_PLAN_API_KEY" | "STEPFUN_API_KEY" {
-  if (kind === "stepfun") return "STEPFUN_API_KEY";
+function configuredModelFor(config: ReturnType<typeof loadConfig>, kind: CredentialKind): string {
+  const selected = config.models[config.defaultModel];
+  if (selected && kindForBilling(selected.billing) === kind) return config.defaultModel;
+  const conventional = defaultModelFor(kind);
+  if (config.models[conventional] && kindForBilling(config.models[conventional].billing) === kind) {
+    return conventional;
+  }
+  const match = Object.entries(config.models).find(([, profile]) => kindForBilling(profile.billing) === kind);
+  if (!match) throw new Error(`no ${kind === "api" ? "pay-as-you-go" : "Token Plan"} model profile is configured`);
+  return match[0];
+}
+
+function envName(kind: CredentialKind): "MIMO_API_KEY" | "MIMO_TOKEN_PLAN_API_KEY" {
   return kind === "api" ? "MIMO_API_KEY" : "MIMO_TOKEN_PLAN_API_KEY";
 }
 
-function kindForBilling(billing: MiMoBilling, vendor: "mimo" | "stepfun"): CredentialKind {
-  if (vendor === "stepfun") return "stepfun";
+function kindForBilling(billing: MiMoBilling): CredentialKind {
   return billing === "token-plan" ? "token-plan" : "api";
 }

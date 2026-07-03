@@ -12,6 +12,10 @@ describe("command policy", () => {
     expect(decideCommand("npm test", "low").allowed).toBe(false);
     expect(decideCommand("npm test", "medium").allowed).toBe(true);
     expect(decideCommand("npm install", "medium").allowed).toBe(true);
+    expect(decideCommand("node scripts/delete-files.js", "low").allowed).toBe(false);
+    expect(decideCommand("node scripts/delete-files.js", "medium").allowed).toBe(true);
+    expect(decideCommand("python3 test_suite.py", "low").allowed).toBe(false);
+    expect(decideCommand("python3 test_suite.py", "medium").allowed).toBe(true);
   });
 
   it.each([
@@ -31,7 +35,10 @@ describe("command policy", () => {
     "sed -i.bak 's/a/b/' file.ts",
     "env git -C . clean -fd",
     "awk 'BEGIN { system(\"rm -rf src\") }'",
-    "node scripts/delete-files.js",
+    "node -e 'require(\"child_process\").exec(\"rm -rf src\")'",
+    "node --eval 'process.exit(1)'",
+    "python3 -c 'import os; os.system(\"rm -rf src\")'",
+    "python3 -m http.server",
     "git -c alias.x='!rm -rf src' x",
     "npm exec sh",
     "DANGER=1 git status",
@@ -51,5 +58,9 @@ describe("command policy", () => {
   it("only recognizes actual validator commands", () => {
     expect(decideCommand("echo test", "medium").verification).toBe(false);
     expect(decideCommand("npm run typecheck", "medium").verification).toBe(true);
+    expect(decideCommand("npm run check", "medium").verification).toBe(true);
+    expect(decideCommand("grep -q 'pattern' file.py", "medium").verification).toBe(false);
+    expect(decideCommand("python3 run_tests.py", "medium").verification).toBe(false);
+    expect(decideCommand("node dist/test.js", "medium").verification).toBe(false);
   });
 });

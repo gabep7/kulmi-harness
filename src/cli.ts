@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline/promises";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Command } from "commander";
 import pc from "picocolors";
-import { configTemplate, findWorkspaceRoot, loadConfig } from "./config/config.js";
+import { configTemplate, findWorkspaceRoot, loadConfig, type SearchMode } from "./config/config.js";
 import { EventBus } from "./core/events.js";
 import { VERSION } from "./core/version.js";
 import type { AutonomyLevel, OutputFormat } from "./core/types.js";
-import type { SearchMode } from "./config/config.js";
 import { SessionController } from "./runtime/controller.js";
 import { forkSession, listSessions, SessionStore } from "./runtime/session-store.js";
 import { attachRenderer } from "./cli/render.js";
@@ -19,6 +19,7 @@ import type { PermissionRequest } from "./tools/types.js";
 import { runTui } from "./tui/index.js";
 import { acceptCredential, resolveExistingCredential, type CredentialKind } from "./auth/credentials.js";
 import { CredentialSetupCancelledError, runCredentialOnboarding } from "./tui/onboarding.js";
+import { sandboxAvailability } from "./runtime/process.js";
 
 type ApprovalMode = "never" | "on-request";
 
@@ -37,14 +38,14 @@ program
   .option("--approval-mode <mode>", "approvals: never or on-request", "on-request")
   .option("-s, --session-id <id>", "resume a session")
   .action(async (options: { model?: string; auto: string; webSearch?: string; approvalMode: string; sessionId?: string }) => {
-    const credentialModel = await credentialModelFor(options.model, options.sessionId);
+    const credentialModel = await credentialModelFor(options.model, options.sessionId, process.cwd());
     const existing = await resolveExistingCredential({
       cwd: process.cwd(),
       ...(credentialModel ? { requestedModel: credentialModel } : {}),
     });
     let model = existing?.model;
     if (!existing) {
-      const initial = credentialKindForModel(credentialModel);
+      const initial = credentialKindForModel(credentialModel, process.cwd());
       const choice = await runCredentialOnboarding(initial);
       const accepted = await acceptCredential({
         choice,
@@ -141,24 +142,56 @@ program
   });
 
 program
+  .command("undo")
+  .description("revert the latest completed turn in a durable session")
+  .argument("<session-id>")
+  .action(async (sessionId: string) => {
+    const requestedModel = await credentialModelFor(undefined, sessionId, process.cwd());
+    await resolveExistingCredential({
+      cwd: process.cwd(),
+      ...(requestedModel ? { requestedModel } : {}),
+    });
+    const controller = await SessionController.create({
+      cwd: process.cwd(),
+      mode: "chat",
+      resumeSessionId: sessionId,
+    });
+    try {
+      const undone = await controller.undo();
+      process.stdout.write(
+        `${undone.checkpointId}\t${undone.files.length} files\tmessage history ${undone.messageHistory}\n`,
+      );
+    } finally {
+      await controller.close();
+    }
+  });
+
+program
   .command("doctor")
   .description("check local harness prerequisites and configuration")
   .action(async () => {
-    await resolveExistingCredential({ cwd: process.cwd() });
+    const credential = await resolveExistingCredential({ cwd: process.cwd() });
     const config = loadConfig(process.cwd());
     const root = findWorkspaceRoot(process.cwd());
+    const gitVersion = commandOutput("git", ["--version"]);
+    const gitWorkspace = commandOutput("git", ["-C", process.cwd(), "rev-parse", "--show-toplevel"]);
+    const profile = credential?.model ?? config.defaultModel;
+    const selected = config.models[profile];
+    const selectedKey = selected ? process.env[selected.apiKeyEnv] : undefined;
+    const sandbox = sandboxAvailability();
     const checks = [
       ["node", Number.parseInt(process.versions.node, 10) >= 22, process.versions.node],
-      ["workspace", existsSync(root), root],
-      ["model", Boolean(config.models[config.defaultModel]), config.defaultModel],
-      ["paygo key", Boolean(process.env.MIMO_API_KEY), process.env.MIMO_API_KEY ? "set" : "missing"],
-      ["token plan key", Boolean(process.env.MIMO_TOKEN_PLAN_API_KEY), process.env.MIMO_TOKEN_PLAN_API_KEY ? "set" : "optional"],
+      ["git", Boolean(gitVersion), gitVersion || "missing"],
+      ["workspace", Boolean(gitWorkspace), gitWorkspace || `${root} is not a git worktree`],
+      ["model", Boolean(selected), profile],
+      ["credential", Boolean(selectedKey), selected ? `${selected.apiKeyEnv} ${selectedKey ? "set" : "missing"}` : "unknown profile"],
+      ["sandbox", config.sandbox.mode === "off" || sandbox.available, config.sandbox.mode === "off" ? "disabled by configuration" : `${sandbox.backend} ${sandbox.detail}`],
       ["search", true, config.search.mode === "free" ? config.search.provider : "off"],
     ] as const;
     for (const [name, ok, detail] of checks) {
       process.stdout.write(`${ok ? "ok" : "warn"}\t${name}\t${detail}\n`);
     }
-    if (!checks[0]![1] || !checks[2]![1]) process.exitCode = 1;
+    if (checks.slice(0, 6).some(([, ok]) => !ok)) process.exitCode = 1;
   });
 
 program
@@ -193,7 +226,7 @@ async function execute(options: {
   webSearch?: SearchMode;
   approvalMode: ApprovalMode;
 }): Promise<void> {
-  const credentialModel = await credentialModelFor(options.model, options.resumeSessionId);
+  const credentialModel = await credentialModelFor(options.model, options.resumeSessionId, process.cwd());
   const credential = await resolveExistingCredential({
     cwd: process.cwd(),
     ...(credentialModel ? { requestedModel: credentialModel } : {}),
@@ -255,14 +288,21 @@ function parseApprovalMode(value: string): ApprovalMode {
   throw new Error(`invalid approval mode ${value}`);
 }
 
-function credentialKindForModel(model: string | undefined): CredentialKind {
-  return model?.includes("token-plan") ? "token-plan" : "api";
+function credentialKindForModel(model: string | undefined, cwd: string): CredentialKind {
+  const profile = model ? loadConfig(cwd).models[model] : undefined;
+  return profile?.billing === "token-plan" ? "token-plan" : "api";
 }
 
-async function credentialModelFor(model: string | undefined, sessionId: string | undefined): Promise<string | undefined> {
+async function credentialModelFor(
+  model: string | undefined,
+  sessionId: string | undefined,
+  cwd: string,
+): Promise<string | undefined> {
   if (model || !sessionId) return model;
   const { session } = await SessionStore.open(sessionId);
-  return session.metadata.modelProfile;
+  if (session.metadata.modelProfile) return session.metadata.modelProfile;
+  return Object.entries(loadConfig(cwd).models)
+    .find(([, profile]) => profile.model === session.metadata.model)?.[0];
 }
 
 async function askPermission(
@@ -282,4 +322,15 @@ async function readStdin(): Promise<string> {
   process.stdin.setEncoding("utf8");
   for await (const chunk of process.stdin) content += chunk;
   return content;
+}
+
+function commandOutput(command: string, args: string[]): string {
+  try {
+    return execFileSync(command, args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
 }

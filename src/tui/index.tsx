@@ -23,6 +23,7 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
   let events = new EventBus();
   let controller = await createController(options, store, events, options.resumeSessionId, options.model);
   store.seedMessages(controller.messages);
+  store.seedRunState(controller.state);
   store.attach(events);
   let activeAbort: AbortController | undefined;
   let closing = false;
@@ -55,10 +56,18 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
         return { sessions };
       }
       case "/status":
-        return `${controller.model}  ·  ${controller.autonomy}  ·  ${controller.sessionId}\n${controller.workspaceRoot}`;
+        return `${controller.modelProfile}  ·  ${controller.autonomy}  ·  ${controller.sessionId}\nsandbox ${controller.sandbox.mode}, network ${controller.sandbox.network ? "on" : "off"}  ·  undo history ${controller.undoMessageHistory}\n${controller.workspaceRoot}`;
       case "/fork": {
         const forked = await forkSession(args || controller.sessionId);
         return `Forked as ${forked.id}. Resume with kulmi --session-id ${forked.id}`;
+      }
+      case "/undo": {
+        const undone = await controller.undo();
+        store.replaceSession(undone.messages, undone.state);
+        return {
+          notice: `Undid ${undone.checkpointId}: ${undone.files.length} file${undone.files.length === 1 ? "" : "s"} restored, message history ${undone.messageHistory === "truncate" ? "removed" : "kept"}`,
+          mode: undone.state.mode,
+        };
       }
       case "/auth":
         return "Exit Kulmi and run `kulmi auth` to change credentials safely.";
@@ -87,7 +96,7 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
         await controller.integrateWorker(args);
         return `Integrated ${args}`;
       case "/goal": {
-        controller.setMode("task");
+        await controller.setMode("task");
         return args
           ? { submit: args, mode: "task" }
           : { notice: "Entered goal mode. Send your goal as a prompt.", mode: "task" };
@@ -105,7 +114,7 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
     events = nextEvents;
     store.attach(events);
     instance?.clear();
-    store.replaceSession(controller.messages);
+    store.replaceSession(controller.messages, controller.state);
     await previous.close();
     return runtimeInfo(controller);
   };
@@ -115,7 +124,7 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
   instance = render(
     <TuiApp
       store={store}
-      model={controller.model}
+      model={controller.modelProfile}
       sessionId={controller.sessionId}
       cwd={controller.workspaceRoot}
       autonomy={controller.autonomy}
@@ -160,7 +169,7 @@ async function createController(
 
 function runtimeInfo(controller: SessionController): TuiRuntimeInfo {
   return {
-    model: controller.model,
+    model: controller.modelProfile,
     sessionId: controller.sessionId,
     cwd: controller.workspaceRoot,
     autonomy: controller.autonomy,

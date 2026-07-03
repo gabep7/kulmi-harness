@@ -102,6 +102,7 @@ export class SubagentScheduler implements SubagentApi {
     }
     const result = await promise;
     job.collectedAt = new Date().toISOString();
+    await this.persist();
     return result;
   }
 
@@ -138,6 +139,7 @@ export class SubagentScheduler implements SubagentApi {
     if (!this.#integrateWorker) throw new Error("worker integration is unavailable");
     job.integratedFiles = await this.#integrateWorker(job);
     job.integratedAt = new Date().toISOString();
+    job.collectedAt ??= new Date().toISOString();
     await this.persist();
     return this.inspect(jobId);
   }
@@ -153,6 +155,7 @@ export class SubagentScheduler implements SubagentApi {
     } catch {
       // State is recorded by #execute.
     }
+    job.collectedAt ??= new Date().toISOString();
     await this.persist();
     return this.inspect(jobId);
   }
@@ -163,6 +166,8 @@ export class SubagentScheduler implements SubagentApi {
     if (job.status !== "failed" && job.status !== "cancelled") {
       throw new Error(`worker ${jobId} is ${job.status}; only failed or cancelled workers can be retried`);
     }
+    job.collectedAt ??= new Date().toISOString();
+    await this.persist();
     return this.spawn({
       prompt: job.prompt,
       description: `retry: ${job.description}`.slice(0, 120),
@@ -218,11 +223,12 @@ export class SubagentScheduler implements SubagentApi {
   }
 
   async #execute(job: WorkerJob, signal: AbortSignal): Promise<string> {
-    const release = await this.#semaphore.acquire(signal);
-    job.status = "running";
-    job.startedAt = new Date().toISOString();
-    await this.persist();
+    let release: (() => void) | undefined;
     try {
+      release = await this.#semaphore.acquire(signal);
+      job.status = "running";
+      job.startedAt = new Date().toISOString();
+      await this.persist();
       const result = await this.#runWorker(job, signal);
       job.status = "completed";
       job.result = result;
@@ -236,7 +242,7 @@ export class SubagentScheduler implements SubagentApi {
       await this.persist();
       throw error;
     } finally {
-      release();
+      release?.();
     }
   }
 }

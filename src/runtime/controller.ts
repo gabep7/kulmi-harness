@@ -2,11 +2,13 @@ import { Agent, type AgentResult } from "../agent/agent.js";
 import { buildSystemPrompt, subagentReportContract } from "../agent/prompt.js";
 import { SubagentScheduler, type WorkerJob } from "../agent/scheduler.js";
 import {
+  assertGitWorkTree,
   findWorkspaceRoot,
   loadConfig,
   resolveModel,
-  type KulmiConfig,
   type SearchMode,
+  type SandboxConfig,
+  type UndoMessageHistory,
 } from "../config/config.js";
 import { loadInstructions } from "../config/instructions.js";
 import { discoverSkills, skillsPromptInventory } from "../config/skills.js";
@@ -14,9 +16,8 @@ import { EventBus } from "../core/events.js";
 import { createId } from "../core/ids.js";
 import type { AgentMode, AutonomyLevel, RunState } from "../core/types.js";
 import { MiMoProvider } from "../provider/mimo.js";
-import { StepFunProvider } from "../provider/stepfun.js";
 import type { ModelProvider, ProviderMessage } from "../provider/types.js";
-import { progressTools } from "../tools/progress.js";
+import { progressTools, workerProgressTools } from "../tools/progress.js";
 import { fileTools } from "../tools/files.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { shellTool } from "../tools/shell.js";
@@ -42,24 +43,37 @@ export interface ControllerOptions {
   requestPermission?: (request: PermissionRequest) => Promise<boolean>;
 }
 
+export interface UndoResult {
+  checkpointId: string;
+  files: string[];
+  messageHistory: UndoMessageHistory;
+  removedMessageCount: number;
+  messages: readonly ProviderMessage[];
+  state: RunState;
+}
+
 export class SessionController {
   readonly events: EventBus;
   readonly sessionId: string;
   readonly model: string;
+  readonly modelProfile: string;
   readonly workspaceRoot: string;
   readonly autonomy: AutonomyLevel;
   readonly searchMode: SearchMode;
-  readonly #config: KulmiConfig;
+  readonly sandbox: SandboxConfig;
+  readonly undoMessageHistory: UndoMessageHistory;
   readonly #provider: ModelProvider;
   readonly #session: SessionStore;
+  readonly #checkpoint: CheckpointStore;
   readonly #state: RunState;
   readonly #agent: Agent;
   readonly #scheduler: SubagentScheduler;
+  #running: Promise<AgentResult> | undefined;
+  #runAbort: AbortController | undefined;
   #closed = false;
 
   private constructor(options: {
     events: EventBus;
-    config: KulmiConfig;
     provider: ModelProvider;
     session: SessionStore;
     state: RunState;
@@ -68,16 +82,22 @@ export class SessionController {
     autonomy: AutonomyLevel;
     scheduler: SubagentScheduler;
     searchMode: SearchMode;
+    checkpoint: CheckpointStore;
+    undoMessageHistory: UndoMessageHistory;
+    sandbox: SandboxConfig;
   }) {
     this.events = options.events;
-    this.#config = options.config;
     this.#provider = options.provider;
     this.#session = options.session;
+    this.#checkpoint = options.checkpoint;
+    this.undoMessageHistory = options.undoMessageHistory;
+    this.sandbox = { ...options.sandbox };
     this.#state = options.state;
     this.#agent = options.agent;
     this.#scheduler = options.scheduler;
     this.sessionId = options.session.id;
     this.model = options.provider.model;
+    this.modelProfile = options.provider.name;
     this.workspaceRoot = options.workspaceRoot;
     this.autonomy = options.autonomy;
     this.searchMode = options.searchMode;
@@ -91,12 +111,17 @@ export class SessionController {
     return this.#state.mode;
   }
 
+  get state(): RunState {
+    return structuredClone(this.#state);
+  }
+
   static async create(options: ControllerOptions): Promise<SessionController> {
     const loaded = options.resumeSessionId
       ? await SessionStore.open(options.resumeSessionId)
       : undefined;
     const cwd = loaded?.session.metadata.cwd ?? options.cwd;
     const workspaceRoot = findWorkspaceRoot(cwd);
+    if (options.mode === "task") assertGitWorkTree(cwd);
     if (loaded) {
       const requestedRoot = findWorkspaceRoot(options.cwd);
       if (requestedRoot !== workspaceRoot) {
@@ -115,7 +140,7 @@ export class SessionController {
       );
     }
     const search = { ...config.search, mode: options.webSearch ?? config.search.mode };
-    const provider = resolved.vendor === "stepfun" ? new StepFunProvider(resolved) : new MiMoProvider(resolved);
+    const provider = new MiMoProvider(resolved);
     const events = options.events ?? new EventBus();
     const permissions: PermissionApi = {
       request: async (request) => {
@@ -150,7 +175,12 @@ export class SessionController {
       verifications: [],
       revision: 0,
     };
+    if (loaded?.session.state?.mode === "subagent") {
+      throw new Error(`session ${loaded.session.metadata.id} is a child-agent transcript and cannot be resumed directly`);
+    }
+    const previousMode = state.mode;
     if (!loaded || options.mode === "task") state.mode = options.mode;
+    if (state.mode === "task") assertGitWorkTree(cwd);
 
     const rootCheckpoint = new CheckpointStore(session.path, workspaceRoot);
     const worktrees = new WorktreeManager(workspaceRoot);
@@ -187,8 +217,8 @@ export class SessionController {
       const readOnly = job.mode !== "implement";
       const searchTools = search.mode === "free" ? [freeWebSearchTool(search), fetchUrlTool()] : [];
       const childTools = readOnly
-        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills)])
-        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills)]);
+        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...workerProgressTools()])
+        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...workerProgressTools()]);
       const childAgent = new Agent({
         provider,
         tools: childTools,
@@ -210,6 +240,7 @@ export class SessionController {
         commandTimeoutMs: config.commandTimeoutSeconds * 1_000,
         maxOutputBytes: config.maxOutputBytes,
         contextWindow: resolved.contextWindow,
+        sandbox: config.sandbox,
         ...(!readOnly && permissions ? { permissions } : {}),
       });
       activeWorkers.set(job.id, childAgent);
@@ -254,7 +285,7 @@ export class SessionController {
     await scheduler.persist();
 
     const rootTools: AnyTool[] = [
-      ...fileTools(),
+      ...(autonomy === "read" ? fileTools().filter((tool) => tool.readOnly) : fileTools()),
       readArtifactTool,
       shellTool,
       ...(search.mode === "free" ? [freeWebSearchTool(search), fetchUrlTool()] : []),
@@ -271,7 +302,7 @@ export class SessionController {
       artifacts: new ArtifactStore(session.path),
       state,
       systemPrompt: buildSystemPrompt({
-        mode: options.mode,
+        mode: state.mode,
         projectInstructions: instructions.content,
         readOnly: autonomy === "read",
         skillsInventory,
@@ -283,32 +314,53 @@ export class SessionController {
       commandTimeoutMs: config.commandTimeoutSeconds * 1_000,
       maxOutputBytes: config.maxOutputBytes,
       contextWindow: resolved.contextWindow,
+      sandbox: config.sandbox,
       ...(loaded?.session.messages ? { messages: loaded.session.messages as ProviderMessage[] } : {}),
       subagents: scheduler,
       permissions,
     });
+    if (loaded && previousMode === "chat" && state.mode === "task") {
+      await agent.appendRuntimeContext("Task mode is now active. Use the task tools directly; do not call start_task.");
+    }
     await session.saveRunState(state);
     return new SessionController({
       events,
-      config,
       provider,
       session,
       state,
       agent,
       scheduler,
       searchMode: search.mode,
+      checkpoint: rootCheckpoint,
+      undoMessageHistory: config.undo.messageHistory,
+      sandbox: config.sandbox,
       workspaceRoot,
       autonomy,
     });
   }
 
-  async run(prompt: string, signal: AbortSignal): Promise<AgentResult> {
+  run(prompt: string, signal: AbortSignal): Promise<AgentResult> {
     if (this.#closed) throw new Error("session is closed");
+    if (this.#running) throw new Error("session is already running");
+    const abort = new AbortController();
+    this.#runAbort = abort;
+    const operation = this.#runOnce(prompt, AbortSignal.any([signal, abort.signal]));
+    let tracked: Promise<AgentResult>;
+    tracked = operation.finally(() => {
+      if (this.#running === tracked) this.#running = undefined;
+      if (this.#runAbort === abort) this.#runAbort = undefined;
+    });
+    this.#running = tracked;
+    return tracked;
+  }
+
+  async #runOnce(prompt: string, signal: AbortSignal): Promise<AgentResult> {
     await this.#session.setStatus("running");
     await this.events.emit({
       type: "session.started",
       sessionId: this.sessionId,
       model: this.model,
+      modelProfile: this.modelProfile,
       cwd: this.workspaceRoot,
     });
     try {
@@ -325,6 +377,8 @@ export class SessionController {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    this.#runAbort?.abort(new Error("session closed"));
+    await this.#running?.catch(() => undefined);
     await this.#scheduler.cancelAll();
     await this.events.emit({
       type: "session.finished",
@@ -350,8 +404,88 @@ export class SessionController {
     return this.#scheduler.retry(jobId, signal);
   }
 
-  setMode(mode: AgentMode): void {
+  async setMode(mode: AgentMode): Promise<void> {
+    if (mode === "subagent") throw new Error("a root session cannot enter child-agent mode");
+    if (mode === "task") assertGitWorkTree(this.workspaceRoot);
+    const previous = this.#state.mode;
     this.#state.mode = mode;
+    try {
+      if (previous === "chat" && mode === "task") {
+        await this.#agent.appendRuntimeContext("Task mode is now active. Use the task tools directly; do not call start_task.");
+      }
+      await this.#session.saveRunState(this.#state);
+    } catch (error) {
+      this.#state.mode = previous;
+      throw error;
+    }
+  }
+
+  async undo(): Promise<UndoResult> {
+    if (this.#closed) throw new Error("session is closed");
+    if (this.#running) throw new Error("cannot undo while the session is running");
+    const pendingWorkers = this.#scheduler.pending();
+    if (pendingWorkers.length > 0) {
+      throw new Error(`cannot undo while child-agent work is pending: ${pendingWorkers.join(", ")}`);
+    }
+    const prepared = await this.#checkpoint.prepareUndo(this.#state.agentId, this.#agent.messages.length);
+    const messageHistory = prepared.messageHistory ?? this.undoMessageHistory;
+    const originalStatus = this.#state.status;
+    let agentTransaction: Awaited<ReturnType<Agent["applyUndo"]>> | undefined;
+    let began = false;
+    try {
+      await prepared.begin(messageHistory);
+      began = true;
+      await prepared.apply();
+      agentTransaction = await this.#agent.applyUndo({
+        messageCount: prepared.messageCount,
+        state: prepared.state,
+        history: messageHistory,
+        checkpointId: prepared.checkpointId,
+      });
+      await this.#session.setStatus(this.#state.status);
+      await prepared.commit();
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      if (agentTransaction) {
+        try {
+          await agentTransaction.rollback();
+          await this.#session.setStatus(originalStatus);
+        } catch (rollbackError) {
+          rollbackErrors.push(`session: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+        }
+      }
+      try {
+        await prepared.rollback();
+      } catch (rollbackError) {
+        rollbackErrors.push(`files: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
+      if (began && rollbackErrors.length === 0) {
+        try {
+          await prepared.cancel();
+        } catch (rollbackError) {
+          rollbackErrors.push(`journal: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+        }
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(rollbackErrors.length
+        ? `undo failed: ${detail}; rollback failed for ${rollbackErrors.join("; ")}`
+        : `undo failed: ${detail}`);
+    }
+    await this.events.emit({
+      type: "session.undone",
+      sessionId: this.sessionId,
+      checkpointId: prepared.checkpointId,
+      files: prepared.files,
+      messageHistory,
+    }).catch(() => undefined);
+    return {
+      checkpointId: prepared.checkpointId,
+      files: prepared.files,
+      messageHistory,
+      removedMessageCount: agentTransaction.removedMessages.length,
+      messages: this.#agent.messages,
+      state: this.state,
+    };
   }
 
   integrateWorker(jobId: string): Promise<string> {

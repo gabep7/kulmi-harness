@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rename, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -38,22 +38,25 @@ describe("WorktreeManager", () => {
     await exec("git", ["-C", root, "config", "user.email", "test@example.test"]);
     await exec("git", ["-C", root, "config", "user.name", "Test"]);
     await writeFile(join(root, "main.ts"), "export const value = 1;\n");
-    await exec("git", ["-C", root, "add", "main.ts"]);
+    await writeFile(join(root, "remove.ts"), "remove me\n");
+    await exec("git", ["-C", root, "add", "."]);
     await exec("git", ["-C", root, "commit", "-m", "initial"]);
 
     const manager = new WorktreeManager(root);
     const worktree = await manager.create("worker_test");
     await writeFile(join(worktree.path, "main.ts"), "export const value = 2;\n");
     await writeFile(join(worktree.path, "extra.ts"), "export const extra = true;\n");
+    await unlink(join(worktree.path, "remove.ts"));
     expect(await readFile(join(root, "main.ts"), "utf8")).toContain("value = 1");
 
     const checkpoint = new CheckpointStore(join(data, "session"), root);
     await checkpoint.beginTurn(1, "parent");
     const changed = await manager.integrate(worktree, checkpoint);
 
-    expect(changed).toEqual(["extra.ts", "main.ts"]);
+    expect(changed).toEqual(["extra.ts", "main.ts", "remove.ts"]);
     expect(await readFile(join(root, "main.ts"), "utf8")).toContain("value = 2");
     expect(await readFile(join(root, "extra.ts"), "utf8")).toContain("extra = true");
+    await expect(access(join(root, "remove.ts"))).rejects.toThrow();
   });
 
   it("integrates non-overlapping workers and rejects overlapping edits", async () => {
@@ -105,5 +108,49 @@ describe("WorktreeManager", () => {
     await expect(manager.integrate(worker, checkpoint)).rejects.toThrow("integration conflict for z.ts");
     expect(await readFile(join(root, "a.ts"), "utf8")).toBe("a1\n");
     expect(await readFile(join(root, "z.ts"), "utf8")).toBe("z-parent\n");
+  });
+
+  it("integrates renames as a deletion and addition", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-repo-rename-"));
+    process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-worktrees-"));
+    await exec("git", ["init", root]);
+    await exec("git", ["-C", root, "config", "user.email", "test@example.test"]);
+    await exec("git", ["-C", root, "config", "user.name", "Test"]);
+    await writeFile(join(root, "old.ts"), "content\n");
+    await exec("git", ["-C", root, "add", "."]);
+    await exec("git", ["-C", root, "commit", "-m", "initial"]);
+    const manager = new WorktreeManager(root);
+    const worker = await manager.create("worker_rename");
+    await rename(join(worker.path, "old.ts"), join(worker.path, "new.ts"));
+    const checkpoint = new CheckpointStore(join(process.env.XDG_DATA_HOME!, "session"), root);
+    await checkpoint.beginTurn(1, "parent");
+
+    expect(await manager.integrate(worker, checkpoint)).toEqual(["new.ts", "old.ts"]);
+    expect(await readFile(join(root, "new.ts"), "utf8")).toBe("content\n");
+    await expect(access(join(root, "old.ts"))).rejects.toThrow();
+  });
+
+  it("rejects integration through a parent symlink", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-repo-symlink-"));
+    const outside = await mkdtemp(join(tmpdir(), "kulmi-outside-"));
+    process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-worktrees-"));
+    await exec("git", ["init", root]);
+    await exec("git", ["-C", root, "config", "user.email", "test@example.test"]);
+    await exec("git", ["-C", root, "config", "user.name", "Test"]);
+    await mkdir(join(root, "nested"));
+    await writeFile(join(root, "nested", "file.ts"), "base\n");
+    await exec("git", ["-C", root, "add", "."]);
+    await exec("git", ["-C", root, "commit", "-m", "initial"]);
+    const manager = new WorktreeManager(root);
+    const worker = await manager.create("worker_symlink");
+    await writeFile(join(worker.path, "nested", "file.ts"), "worker\n");
+    await unlink(join(root, "nested", "file.ts"));
+    await import("node:fs/promises").then(({ rmdir }) => rmdir(join(root, "nested")));
+    await symlink(outside, join(root, "nested"));
+    const checkpoint = new CheckpointStore(join(process.env.XDG_DATA_HOME!, "session"), root);
+    await checkpoint.beginTurn(1, "parent");
+
+    await expect(manager.integrate(worker, checkpoint)).rejects.toThrow("outside workspace");
+    await expect(access(join(outside, "file.ts"))).rejects.toThrow();
   });
 });

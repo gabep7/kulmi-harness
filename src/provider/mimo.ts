@@ -59,17 +59,27 @@ const wireChunkSchema = z.object({
     }).passthrough().nullable().optional(),
     prompt_cache_hit_tokens: z.number().int().nonnegative().optional(),
     prompt_cache_miss_tokens: z.number().int().nonnegative().optional(),
+    web_search_usage: z.object({
+      tool_usage: z.number().int().nonnegative().optional(),
+      page_usage: z.number().int().nonnegative().optional(),
+    }).passthrough().optional(),
   }).passthrough().nullable().optional(),
   error: z.object({ message: z.string().optional() }).passthrough().optional(),
 }).passthrough();
 type WireChunk = z.infer<typeof wireChunkSchema>;
+type WireUsage = NonNullable<WireChunk["usage"]>;
+
+interface CacheState {
+  anchor: string;
+  messages: string[];
+}
 
 export class MiMoProvider implements ModelProvider {
   readonly name: string;
   readonly model: string;
   readonly #config: ResolvedModel;
   readonly #idleTimeoutMs: number;
-  readonly #cachePrefixes = new Map<string, string>();
+  readonly #cacheStates = new Map<string, CacheState>();
 
   constructor(
     config: ResolvedModel,
@@ -87,8 +97,12 @@ export class MiMoProvider implements ModelProvider {
       this.#config.maxOutputTokens,
       Math.max(1, Math.trunc(request.maxCompletionTokens ?? this.#config.maxOutputTokens)),
     );
-    const tools: Array<(typeof request.tools)[number] | Record<string, unknown>> = [...request.tools];
-    const messages = request.messages;
+    const tools = request.tools.map((tool) => ({
+      ...tool,
+      function: { ...tool.function, strict: true },
+    }));
+    const messages = request.messages.map(toWireMessage);
+    validateConversation(messages, thinking);
     const body = JSON.stringify({
       model: this.model,
       messages,
@@ -98,17 +112,23 @@ export class MiMoProvider implements ModelProvider {
       thinking: { type: thinking ? "enabled" : "disabled" },
     });
     if (request.cacheScope) {
-      const fingerprint = createHash("sha256").update(JSON.stringify({
+      const anchor = createHash("sha256").update(JSON.stringify({
         model: this.model,
         thinking,
-        system: request.messages.filter((message) => message.role === "system"),
+        system: messages.filter((message) => message.role === "system"),
         tools,
       })).digest("hex");
-      const previous = this.#cachePrefixes.get(request.cacheScope);
-      if (previous && previous !== fingerprint) {
+      const messageHashes = messages.map((message) =>
+        createHash("sha256").update(JSON.stringify(message)).digest("hex")
+      );
+      const previous = this.#cacheStates.get(request.cacheScope);
+      if (previous && previous.anchor !== anchor) {
         throw new Error(`MiMo cache prefix changed inside scope ${request.cacheScope}`);
       }
-      this.#cachePrefixes.set(request.cacheScope, fingerprint);
+      if (previous && !isPrefix(previous.messages, messageHashes)) {
+        throw new Error(`MiMo message history was rewritten inside cache scope ${request.cacheScope}`);
+      }
+      this.#cacheStates.set(request.cacheScope, { anchor, messages: messageHashes });
     }
 
     const controller = new AbortController();
@@ -131,6 +151,7 @@ export class MiMoProvider implements ModelProvider {
       for (let attempt = 0; attempt < 3; attempt++) {
         let emitted = false;
         try {
+          resetIdleTimer();
           const response = await this.#fetch(body, controller.signal);
           return await this.#readResponse(
             response,
@@ -173,8 +194,9 @@ export class MiMoProvider implements ModelProvider {
     let content = "";
     let finishReason: string | null = null;
     let searchError: string | undefined;
-    let citations: WebCitation[] = [];
+    const citations: WebCitation[] = [];
     let usage: ProviderResponse["usage"] = emptyUsage();
+    let wireUsage: WireUsage = {};
     const calls = new Map<number, FunctionToolCall>();
     const announcedCalls = new Set<number>();
     let sawDone = false;
@@ -197,23 +219,37 @@ export class MiMoProvider implements ModelProvider {
       const choice = chunk.choices?.[0];
       const delta = choice?.delta;
       if (delta?.reasoning_content) {
-        markEmitted();
         reasoning += delta.reasoning_content;
-        await request.onReasoningDelta?.(delta.reasoning_content);
+        if (request.onReasoningDelta) {
+          markEmitted();
+          await request.onReasoningDelta(delta.reasoning_content);
+        }
       }
       if (delta?.content) {
-        markEmitted();
         content += delta.content;
-        await request.onTextDelta?.(delta.content);
+        if (request.onTextDelta) {
+          markEmitted();
+          await request.onTextDelta(delta.content);
+        }
       }
       if (delta?.annotations?.length) {
-        markEmitted();
-        citations = delta.annotations.map(toCitation).filter((item): item is WebCitation => item !== undefined);
-        await request.onCitations?.(citations);
+        const knownUrls = new Set(citations.map((citation) => citation.url));
+        const additions = delta.annotations
+          .map(toCitation)
+          .filter((item): item is WebCitation => item !== undefined)
+          .filter((item) => {
+            if (knownUrls.has(item.url)) return false;
+            knownUrls.add(item.url);
+            return true;
+          });
+        citations.push(...additions);
+        if (additions.length > 0 && request.onCitations) {
+          markEmitted();
+          await request.onCitations(additions);
+        }
       }
       if (delta?.error_message) searchError = delta.error_message;
       for (const part of delta?.tool_calls ?? []) {
-        markEmitted();
         let call = calls.get(part.index);
         if (!call) {
           call = {
@@ -226,19 +262,24 @@ export class MiMoProvider implements ModelProvider {
         if (part.id) call.id = part.id;
         if (part.function?.name) call.function.name += part.function.name;
         if (part.function?.arguments) call.function.arguments += part.function.arguments;
-        if (!announcedCalls.has(part.index) && call.function.name) {
+        if (!announcedCalls.has(part.index) && call.function.name && request.onToolCallStart) {
           announcedCalls.add(part.index);
-          await request.onToolCallStart?.(call);
+          markEmitted();
+          await request.onToolCallStart(call);
         }
       }
       if (choice?.finish_reason) finishReason = choice.finish_reason;
-      if (chunk.usage) usage = normalizeUsage(chunk.usage);
+      if (chunk.usage) {
+        wireUsage = mergeWireUsage(wireUsage, chunk.usage);
+        usage = normalizeUsage(wireUsage);
+      }
     }
 
     if (!sawDone) throw new Error(`MiMo stream ended before [DONE]`);
     const toolCalls = [...calls.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, call]) => call);
+    validateToolCalls(toolCalls);
     const message: ProviderResponse["message"] = { role: "assistant", content: content || null };
     if ((request.thinking ?? this.#config.thinking) && toolCalls.length > 0) message.reasoning_content = reasoning;
     if (toolCalls.length > 0) message.tool_calls = toolCalls;
@@ -274,6 +315,49 @@ export class MiMoProvider implements ModelProvider {
   }
 }
 
+function toWireMessage(message: ProviderMessage): ProviderMessage {
+  if (message.role !== "tool") return message;
+  return {
+    role: "tool",
+    content: message.content,
+    tool_call_id: message.tool_call_id,
+  };
+}
+
+function isPrefix(previous: readonly string[], current: readonly string[]): boolean {
+  return previous.length <= current.length && previous.every((message, index) => current[index] === message);
+}
+
+function validateConversation(messages: readonly ProviderMessage[], thinking: boolean): void {
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (!message) continue;
+    if (message.role === "tool") {
+      throw new Error(`MiMo tool result ${message.tool_call_id} has no preceding assistant tool call`);
+    }
+    if (message.role !== "assistant" || !message.tool_calls?.length) continue;
+    if (thinking && !("reasoning_content" in message)) {
+      throw new Error(`MiMo assistant tool-call history is missing reasoning_content`);
+    }
+    for (const [offset, call] of message.tool_calls.entries()) {
+      const result = messages[index + offset + 1];
+      if (result?.role !== "tool" || result.tool_call_id !== call.id) {
+        throw new Error(`MiMo tool call ${call.id} is missing its ordered tool result`);
+      }
+    }
+    index += message.tool_calls.length;
+  }
+}
+
+function validateToolCalls(calls: FunctionToolCall[]): void {
+  const ids = new Set<string>();
+  for (const call of calls) {
+    if (!call.function.name.trim()) throw new Error(`MiMo returned a tool call without a function name`);
+    if (ids.has(call.id)) throw new Error(`MiMo returned duplicate tool call id ${call.id}`);
+    ids.add(call.id);
+  }
+}
+
 class MiMoHttpError extends Error {
   readonly retryable: boolean;
   readonly retryAfterMs: number | undefined;
@@ -294,21 +378,91 @@ function emptyUsage(): ProviderResponse["usage"] {
     cacheHitTokens: 0,
     cacheMissTokens: 0,
     reasoningTokens: 0,
+    webSearchCalls: 0,
+    webSearchPages: 0,
   };
 }
 
 function normalizeUsage(usage: NonNullable<WireChunk["usage"]>): ProviderResponse["usage"] {
-  const prompt = usage.prompt_tokens ?? 0;
-  const hit = usage.prompt_tokens_details?.cached_tokens ?? 0;
-  const miss = Math.max(0, prompt - hit);
+  const reportedHit = usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens ?? 0;
+  const reportedMiss = usage.prompt_cache_miss_tokens;
+  const prompt = Math.max(usage.prompt_tokens ?? 0, reportedHit + (reportedMiss ?? 0));
+  const hit = Math.min(prompt, reportedHit);
+  const miss = reportedMiss === undefined
+    ? Math.max(0, prompt - hit)
+    : Math.min(Math.max(0, prompt - hit), reportedMiss);
+  const completion = usage.completion_tokens ?? 0;
   return {
     promptTokens: prompt,
-    completionTokens: usage.completion_tokens ?? 0,
-    totalTokens: usage.total_tokens ?? 0,
+    completionTokens: completion,
+    totalTokens: Math.max(usage.total_tokens ?? 0, prompt + completion),
     cacheHitTokens: hit,
     cacheMissTokens: miss,
     reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? 0,
+    webSearchCalls: usage.web_search_usage?.tool_usage ?? 0,
+    webSearchPages: usage.web_search_usage?.page_usage ?? 0,
   };
+}
+
+function mergeWireUsage(previous: WireUsage, next: WireUsage): WireUsage {
+  const merged: WireUsage = { ...previous, ...next };
+  mergeMaximum(merged, previous, next, [
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "prompt_cache_hit_tokens",
+    "prompt_cache_miss_tokens",
+  ]);
+  if (previous.prompt_tokens_details || next.prompt_tokens_details) {
+    merged.prompt_tokens_details = {
+      ...previous.prompt_tokens_details,
+      ...next.prompt_tokens_details,
+    };
+    mergeMaximum(merged.prompt_tokens_details, previous.prompt_tokens_details ?? {}, next.prompt_tokens_details ?? {}, ["cached_tokens"]);
+  }
+  if (previous.completion_tokens_details || next.completion_tokens_details) {
+    merged.completion_tokens_details = {
+      ...previous.completion_tokens_details,
+      ...next.completion_tokens_details,
+    };
+    mergeMaximum(
+      merged.completion_tokens_details,
+      previous.completion_tokens_details ?? {},
+      next.completion_tokens_details ?? {},
+      ["reasoning_tokens"],
+    );
+  }
+  if (previous.web_search_usage || next.web_search_usage) {
+    merged.web_search_usage = {
+      ...previous.web_search_usage,
+      ...next.web_search_usage,
+    };
+    mergeMaximum(
+      merged.web_search_usage,
+      previous.web_search_usage ?? {},
+      next.web_search_usage ?? {},
+      ["tool_usage", "page_usage"],
+    );
+  }
+  return merged;
+}
+
+function mergeMaximum<T extends object, K extends keyof T>(
+  target: T,
+  previous: T,
+  next: T,
+  keys: readonly K[],
+): void {
+  for (const key of keys) {
+    const left = previous[key];
+    const right = next[key];
+    if (typeof left === "number" || typeof right === "number") {
+      target[key] = Math.max(
+        typeof left === "number" ? left : 0,
+        typeof right === "number" ? right : 0,
+      ) as T[K];
+    }
+  }
 }
 
 function toCitation(value: WireCitation): WebCitation | undefined {

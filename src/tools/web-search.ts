@@ -102,7 +102,8 @@ async function searchSearxng(
     endpoint.searchParams.set("time_range", recencyDays <= 1 ? "day" : recencyDays <= 31 ? "month" : "year");
   }
   const response = await fetch(endpoint, { signal, headers: { accept: "application/json" } });
-  if (!response.ok) throw new Error(`SearXNG HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
+  if (!response.ok) throw new Error(`SearXNG HTTP ${response.status}: ${await responseSnippet(response, signal)}`);
+  const body = await readBounded(response, 1_000_000, signal);
   const payload = z.object({
     results: z.array(z.object({
       title: z.string().catch("Untitled"),
@@ -110,7 +111,7 @@ async function searchSearxng(
       content: z.string().catch(""),
       publishedDate: z.string().optional(),
     }).passthrough()).catch([]),
-  }).passthrough().parse(await response.json());
+  }).passthrough().parse(JSON.parse(new TextDecoder().decode(body.data)));
   return payload.results
     .map((item) => normalizeResult(item.title, item.url, item.content, item.publishedDate))
     .filter((item): item is SearchResult => item !== undefined)
@@ -133,8 +134,8 @@ async function searchBingRss(
     signal,
     headers: { accept: "application/rss+xml,application/xml,text/xml", "user-agent": `Kulmi/${VERSION}` },
   });
-  if (!response.ok) throw new Error(`Bing RSS HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
-  const xml = await response.text();
+  if (!response.ok) throw new Error(`Bing RSS HTTP ${response.status}: ${await responseSnippet(response, signal)}`);
+  const xml = new TextDecoder().decode((await readBounded(response, 1_000_000, signal)).data);
   if (!/<rss\b/i.test(xml)) throw new Error("Bing did not return an RSS feed");
   const results: SearchResult[] = [];
   for (const match of xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
@@ -178,7 +179,7 @@ async function fetchPublicText(rawUrl: string, maxChars: number, signal: AbortSi
       url = new URL(location, url);
       continue;
     }
-    if (!response.ok) throw new Error(`fetch HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    if (!response.ok) throw new Error(`fetch HTTP ${response.status}: ${await responseSnippet(response, signal)}`);
     const contentType = (response.headers.get("content-type") ?? "text/plain").split(";", 1)[0]!.trim().toLowerCase();
     if (!isTextContentType(contentType)) throw new Error(`blocked non-text content type ${contentType}`);
     const bytes = await readBounded(response, Math.min(1_000_000, maxChars * 4), signal);
@@ -283,6 +284,10 @@ async function readBounded(
     offset += chunk.length;
   }
   return { data: output, truncated };
+}
+
+async function responseSnippet(response: Response, signal: AbortSignal): Promise<string> {
+  return new TextDecoder().decode((await readBounded(response, 2_000, signal)).data).slice(0, 500);
 }
 
 function isTextContentType(contentType: string): boolean {

@@ -1,8 +1,9 @@
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { SessionStore } from "../src/runtime/session-store.js";
+import { EventBus } from "../src/core/events.js";
 
 describe("SessionStore", () => {
   beforeEach(async () => {
@@ -26,6 +27,21 @@ describe("SessionStore", () => {
     expect(loaded.session.metadata.modelProfile).toBe("mimo-v2.5-pro-token-plan");
   });
 
+  it("persists durable events without serializing streaming deltas", async () => {
+    const store = await SessionStore.create({ cwd: process.cwd(), model: "mimo-v2.5-pro" });
+    const events = new EventBus();
+    store.attach(events);
+    await events.emit({ type: "assistant.reasoning.delta", agentId: "agent", text: "private stream" });
+    await events.emit({ type: "assistant.text.delta", agentId: "agent", text: "visible stream" });
+    await events.emit({ type: "assistant.message", agentId: "agent", text: "final text" });
+    await store.close("completed");
+
+    const log = await readFile(join(store.path, "events.jsonl"), "utf8");
+    expect(log).toContain("final text");
+    expect(log).not.toContain("private stream");
+    expect(log).not.toContain("visible stream");
+  });
+
   it("writes versioned session files", async () => {
     const store = await SessionStore.create({ cwd: process.cwd(), model: "mimo-v2.5-pro" });
     await store.saveRunState({
@@ -43,6 +59,10 @@ describe("SessionStore", () => {
     expect(metadata.schemaVersion).toBe(1);
     expect(messages).toMatchObject({ schemaVersion: 1, messages: [] });
     expect(state).toMatchObject({ schemaVersion: 1, state: { modifiedFiles: ["src/a.ts"] } });
+    if (process.platform !== "win32") {
+      expect((await stat(store.path)).mode & 0o777).toBe(0o700);
+      expect((await stat(join(store.path, "messages.json"))).mode & 0o777).toBe(0o600);
+    }
   });
 
   it("migrates valid unversioned sessions on open", async () => {

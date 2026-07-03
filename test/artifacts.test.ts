@@ -14,4 +14,12 @@ describe("ArtifactStore", () => {
     expect(result.content).toContain("tool output truncated");
     expect(await store.read(result.artifactId!, 140, 30)).toBe(full.slice(140, 170));
   });
+
+  it("bounds multibyte previews by bytes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-artifacts-"));
+    const store = new ArtifactStore(root);
+    const result = await store.materialize("shell", "call_unicode", "😀".repeat(12_000));
+    expect(result.artifactId).toMatch(/^artifact_/);
+    expect(Buffer.byteLength(result.content, "utf8")).toBeLessThan(15_000);
+  });
 });

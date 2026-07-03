@@ -82,4 +82,68 @@ describe("SubagentScheduler", () => {
     release();
     await scheduler.wait([spawned.job_id], signal);
   });
+
+  it("records cancellation while a worker is still queued", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const scheduler = new SubagentScheduler(1, async (job) => {
+      if (job.prompt === "first") await gate;
+      return "done";
+    });
+    const signal = new AbortController().signal;
+    const first = JSON.parse(await scheduler.spawn({
+      prompt: "first",
+      mode: "explore",
+      background: true,
+      parentAgentId: "parent",
+      signal,
+    })) as { job_id: string };
+    const second = JSON.parse(await scheduler.spawn({
+      prompt: "second",
+      mode: "explore",
+      background: true,
+      parentAgentId: "parent",
+      signal,
+    })) as { job_id: string };
+
+    const cancelled = JSON.parse(await scheduler.cancel(second.job_id)) as { status: string; collectedAt?: string };
+    expect(cancelled).toMatchObject({ status: "cancelled", collectedAt: expect.any(String) });
+    expect(scheduler.pending()).not.toContain(second.job_id);
+    release();
+    await scheduler.wait([first.job_id], signal);
+  });
+
+  it("persists foreground collection and treats integration as collection", async () => {
+    const snapshots: Array<Array<{ collectedAt?: string; integratedAt?: string }>> = [];
+    const scheduler = new SubagentScheduler(
+      1,
+      async () => "done",
+      async () => ["src/a.ts"],
+      async (jobs) => { snapshots.push(jobs); },
+    );
+    const signal = new AbortController().signal;
+    await scheduler.spawn({
+      prompt: "foreground",
+      mode: "explore",
+      background: false,
+      parentAgentId: "parent",
+      signal,
+    });
+    expect(snapshots.at(-1)?.[0]?.collectedAt).toEqual(expect.any(String));
+
+    const background = JSON.parse(await scheduler.spawn({
+      prompt: "implement",
+      mode: "implement",
+      background: true,
+      parentAgentId: "parent",
+      signal,
+    })) as { job_id: string };
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await scheduler.integrate(background.job_id);
+    expect(scheduler.pending()).not.toContain(background.job_id);
+    expect(snapshots.at(-1)?.[1]).toMatchObject({
+      collectedAt: expect.any(String),
+      integratedAt: expect.any(String),
+    });
+  });
 });

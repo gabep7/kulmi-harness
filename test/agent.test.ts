@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import type { ProviderMessage } from "../src/provider/types.js";
 import { CheckpointStore } from "../src/runtime/checkpoints.js";
 import { SessionStore } from "../src/runtime/session-store.js";
 import { ArtifactStore } from "../src/runtime/artifacts.js";
-import { progressTools } from "../src/tools/progress.js";
+import { progressTools, workerProgressTools } from "../src/tools/progress.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { defineTool } from "../src/tools/types.js";
 import { z } from "zod";
@@ -20,7 +21,43 @@ describe("Agent", () => {
     process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-data-"));
   });
 
-  it("round-trips reasoning and enforces explicit completion", async () => {
+  it("restores the system contract for legacy history without a system message", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
+    const session = await SessionStore.create({ cwd: workspace, model: "mimo-v2.5-pro" });
+    const state: RunState = {
+      agentId: "agent_legacy",
+      mode: "chat",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const agent = new Agent({
+      provider: new ScriptedProvider([]),
+      tools: new ToolRegistry([]),
+      events: new EventBus(),
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "restored contract",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "read",
+      maxSteps: 1,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 1_000_000,
+      messages: [{ role: "user", content: "legacy message" }],
+    });
+    expect(agent.messages.slice(0, 2)).toEqual([
+      { role: "system", content: "restored contract" },
+      { role: "user", content: "legacy message" },
+    ]);
+  });
+
+  it("round-trips reasoning and returns the accepted completion summary", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
     const provider = new ScriptedProvider([
       toolResponse("call_plan", "update_plan", JSON.stringify({
@@ -71,7 +108,7 @@ describe("Agent", () => {
     });
 
     const result = await agent.run("do it", new AbortController().signal);
-    expect(result).toMatchObject({ status: "completed", text: "Task completed." });
+    expect(result).toMatchObject({ status: "completed", text: "done" });
     expect(provider.requests[1]?.messages).toContainEqual(expect.objectContaining({
       role: "assistant",
       reasoning_content: "reason about plan",
@@ -144,6 +181,7 @@ describe("Agent", () => {
 
   it("defers task tools in chat and changes cache scope after promotion", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
+    execFileSync("git", ["init", workspace], { stdio: "ignore" });
     const provider = new ScriptedProvider([
       toolResponse("call_start", "start_task", JSON.stringify({ goal: "inspect it" }), "promote"),
       toolResponse("call_plan", "update_plan", JSON.stringify({
@@ -187,8 +225,8 @@ describe("Agent", () => {
     for (const request of provider.requests.slice(1)) {
       expect(request.tools.map((tool) => tool.function.name)).toEqual(["complete_task", "inspect_plan", "update_plan"]);
     }
-    expect(provider.requests[0]?.cacheScope).toBe("agent_deferred:chat");
-    expect(provider.requests[1]?.cacheScope).toBe("agent_deferred:task");
+    expect(provider.requests[0]?.cacheScope).toBe("agent_deferred:chat:0");
+    expect(provider.requests[1]?.cacheScope).toBe("agent_deferred:task:0");
   });
 
   it("commits mid-turn narration to the transcript before its tool rows", async () => {
@@ -308,6 +346,8 @@ describe("Agent", () => {
     expect((await agent.run("continue", new AbortController().signal)).text).toBe("continued");
     expect(provider.requests).toHaveLength(2);
     expect(provider.requests[0]?.tools).toEqual([]);
+    expect(provider.requests[0]?.cacheScope).toBeUndefined();
+    expect(provider.requests[1]?.cacheScope).toBe("agent_compact:chat:1");
     expect((await readdir(join(session.path, "archives"))).length).toBe(1);
     expect(agent.messages.some((message) =>
       message.role === "user" && message.content.includes("<compaction-summary>"))).toBe(true);
@@ -374,6 +414,175 @@ describe("Agent", () => {
 
     expect((await agent.run("do it", new AbortController().signal)).text).toBe("done");
     expect(provider.requests).toHaveLength(6);
+  });
+
+  it("requires an evidence-backed report before a worker can finish", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-worker-"));
+    const provider = new ScriptedProvider([
+      textResponse("premature report"),
+      toolResponse("report", "report_worker", JSON.stringify({
+        status: "completed",
+        summary: "inspection complete",
+        evidence: ["reviewed the assigned scope"],
+      }), "report evidence"),
+      textResponse("Completed the inspection with evidence."),
+    ]);
+    const session = await SessionStore.create({ cwd: workspace, model: provider.model });
+    const state: RunState = {
+      agentId: "worker_test",
+      parentAgentId: "agent_parent",
+      mode: "subagent",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry(workerProgressTools()),
+      events: new EventBus(),
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "worker",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "read",
+      maxSteps: 5,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 1_000_000,
+    });
+
+    await expect(agent.run("inspect", new AbortController().signal)).resolves.toMatchObject({
+      status: "completed",
+      text: "inspection complete",
+    });
+    expect(provider.requests[1]?.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: expect.stringContaining("report_worker"),
+    });
+    expect(state.completion).toMatchObject({ summary: "inspection complete" });
+  });
+
+  it("stops identical tool-call loops after one corrective warning", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-tool-loop-"));
+    const provider = new ScriptedProvider([
+      toolResponse("one", "noop", "{}", "first"),
+      toolResponse("two", "noop", "{}", "again"),
+      toolResponse("three", "noop", "{}", "again"),
+      toolResponse("four", "noop", "{}", "again"),
+    ]);
+    const session = await SessionStore.create({ cwd: workspace, model: provider.model });
+    let executions = 0;
+    const noop = defineTool({
+      name: "noop",
+      description: "noop",
+      schema: z.object({}),
+      readOnly: true,
+      async execute() {
+        executions += 1;
+        return { content: "ok" };
+      },
+    });
+    const state: RunState = {
+      agentId: "agent_loop",
+      mode: "task",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([noop]),
+      events: new EventBus(),
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "stable",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "medium",
+      maxSteps: 10,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 1_000_000,
+    });
+
+    await expect(agent.run("loop", new AbortController().signal)).rejects.toThrow(
+      "repeated an identical tool call after being told to change approach",
+    );
+    expect(provider.requests).toHaveLength(4);
+    expect(executions).toBe(2);
+    expect(agent.messages.at(-1)).toMatchObject({
+      role: "tool",
+      content: "repeated identical tool call blocked; change the arguments or approach",
+    });
+  });
+
+  it("restores an undo boundary and starts a new MiMo cache epoch", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-agent-undo-"));
+    const provider = new ScriptedProvider([textResponse("continued")]);
+    const session = await SessionStore.create({ cwd: workspace, model: provider.model });
+    const state: RunState = {
+      agentId: "agent_undo",
+      mode: "task",
+      status: "completed",
+      plan: [{ id: "done", title: "done", status: "completed", evidence: "old", dependsOn: [], acceptanceCriteria: [] }],
+      modifiedFiles: new Set(["old.txt"]),
+      verifications: [],
+      revision: 1,
+    };
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([]),
+      events: new EventBus(),
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "stable",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "read",
+      maxSteps: 3,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 1_000_000,
+      messages: [
+        { role: "system", content: "stable" },
+        { role: "user", content: "old turn" },
+        { role: "assistant", content: "old answer" },
+      ],
+    });
+    const before: RunState = {
+      agentId: "agent_undo",
+      mode: "chat",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+
+    const transaction = await agent.applyUndo({
+      messageCount: 1,
+      state: before,
+      history: "truncate",
+      checkpointId: "0001-agent_undo",
+    });
+    expect(transaction.removedMessages).toHaveLength(2);
+    expect(agent.messages).toEqual([{ role: "system", content: "stable" }]);
+    expect(state).toMatchObject({ mode: "chat", status: "idle", revision: 0 });
+    expect([...state.modifiedFiles]).toEqual([]);
+
+    await expect(agent.run("continue", new AbortController().signal)).resolves.toMatchObject({ text: "continued" });
+    expect(provider.requests[0]?.cacheScope).toBe("agent_undo:chat:1");
   });
 });
 

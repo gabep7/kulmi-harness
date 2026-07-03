@@ -62,6 +62,7 @@ describe("Kulmi TUI", () => {
     expect(frame).toContain("1.1k processed");
     expect(frame).toContain("200 fresh");
     expect(frame).toContain("800 cached");
+    expect(frame).toContain("80%");
     expect(frame).toContain("100 out");
     expect(frame).toContain("1 changed file");
     expect(frame).toContain("src/cache.ts");
@@ -141,6 +142,8 @@ describe("Kulmi TUI", () => {
     view.stdin.write("\r");
     await pause();
     expect(view.lastFrame()).toContain("Kulmi is working. Esc to stop.");
+    expect(view.lastFrame()).toContain("pirating MATLAB");
+    expect(view.lastFrame()).toContain("⠋");
     view.stdin.write("\u001b");
     await pause();
     expect(cancel).toHaveBeenCalledOnce();
@@ -168,6 +171,7 @@ describe("Kulmi TUI", () => {
     const frame = view.lastFrame() ?? "";
     expect(frame).toContain("/help");
     expect(frame).toContain("/sessions");
+    expect(frame).toContain("/undo");
     expect(frame).toContain("/steer");
     expect(frame).toContain("/integrate");
     expect(frame).toContain("› /");
@@ -359,6 +363,7 @@ describe("Kulmi TUI", () => {
         callId: `call-${index}`,
         tool: "read_file",
         output: index === 11 ? "ENOENT\nmissing final file" : "ok",
+        ...(index === 10 ? { diff: "--- a/src/10.ts\n+++ b/src/10.ts\n@@ -1,1 +1,1 @@\n-old\n+new" } : {}),
         isError: index === 11,
         durationMs: 2,
       });
@@ -383,6 +388,8 @@ describe("Kulmi TUI", () => {
     const frame = view.frames.join("\n");
     expect(frame).toContain("Keep this request visible");
     expect(frame).toContain("ENOENT missing final file");
+    expect(frame).toContain("--- a/src/10.ts");
+    expect(frame).toContain("+new");
   });
 });
 

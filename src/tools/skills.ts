@@ -3,6 +3,7 @@ import { readSkill, type SkillDefinition } from "../config/skills.js";
 import { defineTool, type AnyTool } from "./types.js";
 
 export function skillTools(skills: SkillDefinition[]): AnyTool[] {
+  if (skills.length === 0) return [];
   const byName = new Map(skills.map((skill) => [skill.name, skill]));
   return [
     defineTool({

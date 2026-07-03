@@ -7,14 +7,14 @@ import { z } from "zod";
 import type { AutonomyLevel } from "../core/types.js";
 
 export type MiMoBilling = "pay-as-you-go" | "token-plan";
-export type ModelVendor = "mimo" | "stepfun";
 export type SearchMode = "off" | "free";
 export type FreeSearchProvider = "auto" | "searxng" | "bing-rss";
+export type SandboxMode = "required" | "off";
+export type UndoMessageHistory = "truncate" | "keep";
 
-export type ModelId = "mimo-v2.5-pro" | "mimo-v2.5" | "step-3.7-flash";
+export type ModelId = "mimo-v2.5-pro" | "mimo-v2.5";
 
 export interface ModelConfig {
-  vendor: ModelVendor;
   model: ModelId;
   billing: MiMoBilling;
   baseUrl: string;
@@ -24,14 +24,11 @@ export interface ModelConfig {
   maxOutputTokens: number;
 }
 
-const knownModels: readonly ModelId[] = ["mimo-v2.5-pro", "mimo-v2.5", "step-3.7-flash"];
+const knownModels = ["mimo-v2.5-pro", "mimo-v2.5"] as const;
+const payAsYouGoBaseUrl = "https://api.xiaomimimo.com/v1";
+const tokenPlanBaseUrl = "https://token-plan-ams.xiaomimimo.com/v1";
 
-export function vendorForModel(model: ModelId): "mimo" | "stepfun" {
-  return model.startsWith("step-") ? "stepfun" : "mimo";
-}
-
-export function apiKeyEnvFor(vendor: "mimo" | "stepfun", billing: MiMoBilling): string {
-  if (vendor === "stepfun") return "STEPFUN_API_KEY";
+export function apiKeyEnvFor(billing: MiMoBilling): string {
   return billing === "token-plan" ? "MIMO_TOKEN_PLAN_API_KEY" : "MIMO_API_KEY";
 }
 
@@ -40,6 +37,15 @@ export interface SearchConfig {
   resultLimit: number;
   provider: FreeSearchProvider;
   searxngUrl: string;
+}
+
+export interface SandboxConfig {
+  mode: SandboxMode;
+  network: boolean;
+}
+
+export interface UndoConfig {
+  messageHistory: UndoMessageHistory;
 }
 
 export interface KulmiConfig {
@@ -51,6 +57,8 @@ export interface KulmiConfig {
   maxOutputBytes: number;
   models: Record<string, ModelConfig>;
   search: SearchConfig;
+  sandbox: SandboxConfig;
+  undo: UndoConfig;
 }
 
 export interface ResolvedModel extends ModelConfig {
@@ -67,54 +75,40 @@ const defaults: KulmiConfig = {
   maxOutputBytes: 200_000,
   models: {
     "mimo-v2.5-pro": {
-      vendor: "mimo",
       model: "mimo-v2.5-pro",
       billing: "pay-as-you-go",
-      baseUrl: "https://api.xiaomimimo.com/v1",
+      baseUrl: payAsYouGoBaseUrl,
       apiKeyEnv: "MIMO_API_KEY",
       thinking: true,
-      contextWindow: 1_000_000,
+      contextWindow: 1_048_576,
       maxOutputTokens: 131_072,
     },
     "mimo-v2.5": {
-      vendor: "mimo",
       model: "mimo-v2.5",
       billing: "pay-as-you-go",
-      baseUrl: "https://api.xiaomimimo.com/v1",
+      baseUrl: payAsYouGoBaseUrl,
       apiKeyEnv: "MIMO_API_KEY",
       thinking: true,
-      contextWindow: 1_000_000,
-      maxOutputTokens: 32_768,
+      contextWindow: 1_048_576,
+      maxOutputTokens: 131_072,
     },
     "mimo-v2.5-pro-token-plan": {
-      vendor: "mimo",
       model: "mimo-v2.5-pro",
       billing: "token-plan",
-      baseUrl: "https://token-plan-ams.xiaomimimo.com/v1",
+      baseUrl: tokenPlanBaseUrl,
       apiKeyEnv: "MIMO_TOKEN_PLAN_API_KEY",
       thinking: true,
-      contextWindow: 1_000_000,
+      contextWindow: 1_048_576,
       maxOutputTokens: 131_072,
     },
     "mimo-v2.5-token-plan": {
-      vendor: "mimo",
       model: "mimo-v2.5",
       billing: "token-plan",
-      baseUrl: "https://token-plan-ams.xiaomimimo.com/v1",
+      baseUrl: tokenPlanBaseUrl,
       apiKeyEnv: "MIMO_TOKEN_PLAN_API_KEY",
       thinking: true,
-      contextWindow: 1_000_000,
-      maxOutputTokens: 32_768,
-    },
-    "step-3.7-flash": {
-      vendor: "stepfun",
-      model: "step-3.7-flash",
-      billing: "pay-as-you-go",
-      baseUrl: "https://api.stepfun.ai/step_plan/v1",
-      apiKeyEnv: "STEPFUN_API_KEY",
-      thinking: true,
-      contextWindow: 128_000,
-      maxOutputTokens: 8_192,
+      contextWindow: 1_048_576,
+      maxOutputTokens: 131_072,
     },
   },
   search: {
@@ -122,6 +116,13 @@ const defaults: KulmiConfig = {
     resultLimit: 5,
     provider: "auto",
     searxngUrl: "",
+  },
+  sandbox: {
+    mode: "required",
+    network: false,
+  },
+  undo: {
+    messageHistory: "truncate",
   },
 };
 
@@ -131,7 +132,7 @@ const httpUrlSchema = z.string().url().refine((value) => {
 }, "must use http or https");
 const positiveInt = z.number().int().positive();
 const modelFileSchema = z.object({
-  vendor: z.enum(["mimo", "stepfun"]).optional(),
+  vendor: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   billing: z.enum(["pay-as-you-go", "token-plan"]).optional(),
   base_url: httpUrlSchema.optional(),
@@ -152,6 +153,14 @@ const searchFileSchema = z.object({
   searxng_url: z.union([z.literal(""), httpUrlSchema]).optional(),
   searxngUrl: z.union([z.literal(""), httpUrlSchema]).optional(),
 }).strict();
+const sandboxFileSchema = z.object({
+  mode: z.enum(["required", "off"]).optional(),
+  network: z.boolean().optional(),
+}).strict();
+const undoFileSchema = z.object({
+  message_history: z.enum(["truncate", "keep"]).optional(),
+  messageHistory: z.enum(["truncate", "keep"]).optional(),
+}).strict();
 const fileConfigSchema = z.object({
   default_model: z.string().min(1).optional(),
   default_autonomy: z.enum(["read", "low", "medium", "high"]).optional(),
@@ -160,6 +169,8 @@ const fileConfigSchema = z.object({
   command_timeout_seconds: z.number().int().min(1).max(1_800).optional(),
   max_output_bytes: z.number().int().min(1_024).max(100_000_000).optional(),
   search: searchFileSchema.optional(),
+  sandbox: sandboxFileSchema.optional(),
+  undo: undoFileSchema.optional(),
   models: z.record(z.string().min(1), modelFileSchema).optional(),
 }).passthrough();
 type FileConfig = z.infer<typeof fileConfigSchema>;
@@ -173,6 +184,25 @@ export function findWorkspaceRoot(cwd: string): string {
   } catch {
     return resolve(cwd);
   }
+}
+
+export function isGitWorkTree(cwd: string): boolean {
+  try {
+    return execFileSync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim() === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function assertGitWorkTree(cwd: string): void {
+  if (isGitWorkTree(cwd)) return;
+  throw new Error(
+    "Kulmi task mode requires a git worktree for workspace tracking. " +
+      "Run `git init` in this workspace, or start Kulmi from an existing git repository.",
+  );
 }
 
 export function loadConfig(cwd: string): KulmiConfig {
@@ -195,23 +225,31 @@ export function applyFileConfig(base: KulmiConfig, raw: unknown, source = "confi
 function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
   const models = { ...base.models };
   for (const [name, raw] of Object.entries(file.models ?? {})) {
-    const previous = models[name] ?? defaults.models["mimo-v2.5-pro"]!;
-    const model = (raw.model ?? previous.model) as ModelId;
-    if (!knownModels.includes(model)) continue;
-    const vendor = raw.vendor ?? previous.vendor ?? vendorForModel(model);
+    const existing = models[name];
+    const previous = existing ?? defaults.models["mimo-v2.5-pro"]!;
+    const model = raw.model ?? previous.model;
+    if (!knownModels.includes(model as ModelId)) continue;
+    if (raw.vendor && raw.vendor !== "mimo") {
+      throw new Error(`model ${name}: vendor must be mimo`);
+    }
     const billing = raw.billing ?? previous.billing;
     models[name] = {
-      vendor,
-      model,
+      model: model as ModelId,
       billing,
-      baseUrl: raw.base_url ?? raw.baseUrl ?? previous.baseUrl,
-      apiKeyEnv: raw.api_key_env ?? raw.apiKeyEnv ?? apiKeyEnvFor(vendor, billing),
+      baseUrl: raw.base_url ?? raw.baseUrl ?? (
+        existing && billing === previous.billing
+          ? previous.baseUrl
+          : billing === "token-plan" ? tokenPlanBaseUrl : payAsYouGoBaseUrl
+      ),
+      apiKeyEnv: raw.api_key_env ?? raw.apiKeyEnv ?? apiKeyEnvFor(billing),
       thinking: raw.thinking ?? previous.thinking,
       contextWindow: raw.context_window ?? raw.contextWindow ?? previous.contextWindow,
       maxOutputTokens: raw.max_output_tokens ?? raw.maxOutputTokens ?? previous.maxOutputTokens,
     };
   }
   const search = file.search;
+  const sandbox = file.sandbox;
+  const undo = file.undo;
   const merged: KulmiConfig = {
     defaultModel: file.default_model ?? base.defaultModel,
     defaultAutonomy: file.default_autonomy ?? base.defaultAutonomy,
@@ -225,6 +263,13 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
       resultLimit: search?.result_limit ?? search?.resultLimit ?? base.search.resultLimit,
       provider: search?.provider ?? base.search.provider,
       searxngUrl: search?.searxng_url ?? search?.searxngUrl ?? base.search.searxngUrl,
+    },
+    sandbox: {
+      mode: sandbox?.mode ?? base.sandbox.mode,
+      network: sandbox?.network ?? base.sandbox.network,
+    },
+    undo: {
+      messageHistory: undo?.message_history ?? undo?.messageHistory ?? base.undo.messageHistory,
     },
   };
   validateMergedConfig(merged);
@@ -249,12 +294,12 @@ function validateMergedConfig(config: KulmiConfig): void {
     if (model.maxOutputTokens > model.contextWindow) {
       throw new Error(`model ${name} max_output_tokens exceeds context_window`);
     }
-    if (model.vendor !== "mimo" && model.vendor !== "stepfun") {
-      throw new Error(`model ${name}: only MiMo and StepFun are supported`);
+    if (!knownModels.includes(model.model)) {
+      throw new Error(`model ${name}: only mimo-v2.5-pro and mimo-v2.5 are supported`);
     }
-    const expectedEnv = apiKeyEnvFor(model.vendor, model.billing);
+    const expectedEnv = apiKeyEnvFor(model.billing);
     if (model.apiKeyEnv !== expectedEnv) {
-      throw new Error(`model ${name} (${model.vendor}/${model.billing}) must use ${expectedEnv}`);
+      throw new Error(`model ${name} (${model.billing}) must use ${expectedEnv}`);
     }
   }
 }
@@ -265,15 +310,11 @@ export function resolveModel(config: KulmiConfig, name?: string): ResolvedModel 
   if (!model) throw new Error(`unknown model ${modelName}`);
   const apiKey = process.env[model.apiKeyEnv];
   if (!apiKey) throw new Error(`missing ${model.apiKeyEnv} for model ${modelName}`);
-  if (model.vendor === "stepfun") {
-    if (!apiKey.startsWith("sk-")) {
-      throw new Error(`${model.apiKeyEnv} must be a StepFun key beginning with sk-`);
-    }
-  } else if (model.billing === "token-plan" && !apiKey.startsWith("tp-")) {
+  if (model.billing === "token-plan" && !/^tp-\S{7,}$/.test(apiKey)) {
     throw new Error(`${model.apiKeyEnv} must be a Token Plan key beginning with tp-`);
   } else if (model.billing === "pay-as-you-go" && apiKey.startsWith("tp-")) {
     throw new Error(`${model.apiKeyEnv} is a Token Plan key but ${modelName} uses pay-as-you-go`);
-  } else if (model.billing === "pay-as-you-go" && !apiKey.startsWith("sk-")) {
+  } else if (model.billing === "pay-as-you-go" && !/^sk-\S{7,}$/.test(apiKey)) {
     throw new Error(`${model.apiKeyEnv} must be a pay-as-you-go key beginning with sk-`);
   }
   return { ...model, name: modelName, apiKey };
@@ -286,7 +327,7 @@ export function expandPath(path: string): string {
 }
 
 export function configTemplate(): string {
-  return `# Kulmi is MiMo V2.5 and StepFun Step Plan native. The default profile uses MiMo pay-as-you-go.
+  return `# Kulmi is MiMo V2.5 native. The default profile uses pay-as-you-go.
 default_model = "mimo-v2.5-pro"
 default_autonomy = "medium"
 max_steps = 80
@@ -299,13 +340,20 @@ result_limit = 5
 provider = "auto" # auto, searxng, or bing-rss
 # searxng_url = "http://127.0.0.1:8080" # optional self-hosted instance
 
+[sandbox]
+mode = "required" # required or off
+network = false # allow sandboxed project commands to use the network
+
+[undo]
+message_history = "truncate" # truncate or keep
+
 [models.mimo-v2.5-pro]
 model = "mimo-v2.5-pro"
 billing = "pay-as-you-go"
 base_url = "https://api.xiaomimimo.com/v1"
 api_key_env = "MIMO_API_KEY"
 thinking = true
-context_window = 1000000
+context_window = 1048576
 max_output_tokens = 131072
 
 [models.mimo-v2.5]
@@ -314,8 +362,8 @@ billing = "pay-as-you-go"
 base_url = "https://api.xiaomimimo.com/v1"
 api_key_env = "MIMO_API_KEY"
 thinking = true
-context_window = 1000000
-max_output_tokens = 32768
+context_window = 1048576
+max_output_tokens = 131072
 
 # Europe Token Plan. Use -sgp or -cn in base_url for another cluster.
 [models.mimo-v2.5-pro-token-plan]
@@ -324,7 +372,7 @@ billing = "token-plan"
 base_url = "https://token-plan-ams.xiaomimimo.com/v1"
 api_key_env = "MIMO_TOKEN_PLAN_API_KEY"
 thinking = true
-context_window = 1000000
+context_window = 1048576
 max_output_tokens = 131072
 
 [models.mimo-v2.5-token-plan]
@@ -333,17 +381,7 @@ billing = "token-plan"
 base_url = "https://token-plan-ams.xiaomimimo.com/v1"
 api_key_env = "MIMO_TOKEN_PLAN_API_KEY"
 thinking = true
-context_window = 1000000
-max_output_tokens = 32768
-
-# StepFun Step Plan (set STEPFUN_API_KEY). reasoning_effort is set automatically from thinking.
-[models.step-3.7-flash]
-vendor = "stepfun"
-model = "step-3.7-flash"
-base_url = "https://api.stepfun.ai/step_plan/v1"
-api_key_env = "STEPFUN_API_KEY"
-thinking = true
-context_window = 128000
-max_output_tokens = 8192
+context_window = 1048576
+max_output_tokens = 131072
 `;
 }

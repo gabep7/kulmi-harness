@@ -3,10 +3,13 @@ import type { EventBus } from "../core/events.js";
 import type { AutonomyLevel, RunState } from "../core/types.js";
 import type { CheckpointStore } from "../runtime/checkpoints.js";
 import type { ArtifactStore } from "../runtime/artifacts.js";
+import type { SandboxConfig } from "../config/config.js";
 
 export interface ToolResult {
   content: string;
   isError?: boolean;
+  diff?: string;
+  mutated?: boolean;
 }
 
 export interface SubagentApi {
@@ -50,6 +53,7 @@ export interface ToolContext {
   artifacts: ArtifactStore;
   commandTimeoutMs: number;
   maxOutputBytes: number;
+  sandbox?: SandboxConfig;
   subagents?: SubagentApi;
   permissions?: PermissionApi;
 }

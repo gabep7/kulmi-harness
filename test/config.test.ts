@@ -14,6 +14,9 @@ describe("MiMo configuration", () => {
 
     process.env.MIMO_TOKEN_PLAN_API_KEY = "sk-wrong-profile";
     expect(() => resolveModel(config(tokenPlan()), "plan")).toThrow("must be a Token Plan key");
+
+    process.env.MIMO_API_KEY = "sk-short";
+    expect(() => resolveModel(config(payg()), "api")).toThrow("pay-as-you-go key");
   });
 
   it("documents MiMo V2.5 (with regional Token Plan) profiles", () => {
@@ -21,6 +24,20 @@ describe("MiMo configuration", () => {
     expect(template).toContain('model = "mimo-v2.5-pro"');
     expect(template).toContain('model = "mimo-v2.5"');
     expect(template).toContain("token-plan-ams.xiaomimimo.com/v1");
+    expect(template).toContain('[sandbox]\nmode = "required"');
+    expect(template).toContain('[undo]\nmessage_history = "truncate"');
+  });
+
+  it("configures command isolation and undo transcript retention explicitly", () => {
+    const changed = applyFileConfig(config(payg()), {
+      sandbox: { mode: "off", network: true },
+      undo: { message_history: "keep" },
+    });
+    expect(changed.sandbox).toEqual({ mode: "off", network: true });
+    expect(changed.undo).toEqual({ messageHistory: "keep" });
+    expect(() => applyFileConfig(config(payg()), {
+      undo: { message_history: "delete" },
+    })).toThrow("message_history");
   });
 
   it("rejects invalid limits, endpoints, billing environments, and removed MCP config", () => {
@@ -31,6 +48,29 @@ describe("MiMo configuration", () => {
       models: { api: { billing: "token-plan", api_key_env: "MIMO_API_KEY" } },
     })).toThrow("MIMO_TOKEN_PLAN_API_KEY");
     expect(() => applyFileConfig(base, { mcp: { servers: {} } })).toThrow("MCP configuration is no longer supported");
+  });
+
+  it("switches to the matching endpoint when a profile changes billing type", () => {
+    const changed = applyFileConfig(config(payg()), {
+      models: { api: { billing: "token-plan" } },
+    });
+    expect(changed.models.api).toMatchObject({
+      billing: "token-plan",
+      baseUrl: "https://token-plan-ams.xiaomimimo.com/v1",
+      apiKeyEnv: "MIMO_TOKEN_PLAN_API_KEY",
+    });
+  });
+
+  it("ignores unselected legacy profiles but never activates unsupported models", () => {
+    const base = config(payg());
+    const migrated = applyFileConfig(base, {
+      models: { legacy: { vendor: "removed-provider", model: "unsupported-model" } },
+    });
+    expect(migrated.models.legacy).toBeUndefined();
+    expect(() => applyFileConfig(base, {
+      default_model: "legacy",
+      models: { legacy: { vendor: "removed-provider", model: "unsupported-model" } },
+    })).toThrow("unknown default model legacy");
   });
 });
 
@@ -50,12 +90,13 @@ function config(...models: ModelConfig[]): KulmiConfig {
       provider: "auto",
       searxngUrl: "",
     },
+    sandbox: { mode: "required", network: false },
+    undo: { messageHistory: "truncate" },
   };
 }
 
 function payg(): ModelConfig {
   return {
-    vendor: "mimo",
     model: "mimo-v2.5-pro",
     billing: "pay-as-you-go",
     baseUrl: "https://api.xiaomimimo.com/v1",

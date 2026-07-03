@@ -2,10 +2,11 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, lstat, mkdir, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { CheckpointStore } from "./checkpoints.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
+import { resolveWorkspacePath } from "../security/paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -16,6 +17,11 @@ export interface WorktreeInfo {
   baseCommit: string;
   parentHead?: string;
   parentUnborn?: boolean;
+}
+
+interface WorktreeChange {
+  path: string;
+  deleted: boolean;
 }
 
 export class WorktreeManager {
@@ -56,31 +62,50 @@ export class WorktreeManager {
       if (parentHead !== expectedParentHead) {
         throw new Error(`parent HEAD changed while ${info.id} was running; worktree kept at ${info.path}`);
       }
-      const changed = await this.#changedFiles(info);
-      const copies: Array<{ source: string; destination: string }> = [];
-      for (const path of changed) {
+      const changed = await this.#changes(info);
+      const operations: Array<{ source?: string; destination: string; deleted: boolean }> = [];
+      for (const change of changed) {
+        const { path } = change;
         if (isSensitiveSnapshotPath(path)) throw new Error(`refusing to integrate sensitive path ${path}`);
         const source = resolve(info.path, path);
-        const destination = resolve(this.#root, path);
-        if (
-          relative(info.path, source).startsWith("..") ||
-          relative(this.#root, destination).startsWith("..")
-        ) {
-          throw new Error(`unsafe worktree path ${path}`);
+        if (!change.deleted) {
+          await resolveWorkspacePath({
+            workspaceRoot: info.path,
+            cwd: info.path,
+            input: path,
+            mustExist: true,
+          });
         }
-        const sourceInfo = await lstat(source);
-        if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) {
-          throw new Error(`worktree integration only supports regular files: ${path}`);
+        const destination = await resolveWorkspacePath({
+          workspaceRoot: this.#root,
+          cwd: this.#root,
+          input: path,
+        });
+        if (!change.deleted) {
+          const sourceInfo = await lstat(source);
+          if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) {
+            throw new Error(`worktree integration only supports regular files: ${path}`);
+          }
         }
-        await this.#assertPathUnchanged(info, path, destination, source);
+        await this.#assertPathUnchanged(info, path, destination, change.deleted ? undefined : source);
         await checkpoint.capture(destination);
-        copies.push({ source, destination });
+        operations.push({
+          ...(change.deleted ? {} : { source }),
+          destination,
+          deleted: change.deleted,
+        });
       }
-      for (const { source, destination } of copies) {
-        await mkdir(dirname(destination), { recursive: true });
-        await copyFile(source, destination);
+      for (const operation of operations) {
+        if (operation.deleted) {
+          await unlink(operation.destination).catch((error: unknown) => {
+            if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+          });
+        } else {
+          await mkdir(dirname(operation.destination), { recursive: true });
+          await copyFile(operation.source!, operation.destination);
+        }
       }
-      return changed;
+      return changed.map((change) => change.path);
     });
   }
 
@@ -88,35 +113,53 @@ export class WorktreeManager {
     info: WorktreeInfo,
     path: string,
     destination: string,
-    source: string,
+    source: string | undefined,
   ): Promise<void> {
-    const baseHash = await this.#gitOptional(this.#root, ["rev-parse", `${info.baseCommit}:${path}`]);
-    const parentHash = await this.#gitOptional(this.#root, ["hash-object", destination]);
-    const sourceHash = await this.#gitOptional(info.path, ["hash-object", source]);
+    const baseEntry = await this.#git(this.#root, ["ls-tree", info.baseCommit, "--", path]);
+    const baseHash = baseEntry.match(/^\d+\s+blob\s+([a-f0-9]+)\t/)?.[1] ?? "";
+    const parentHash = await this.#hashFile(this.#root, destination);
+    if (!source) {
+      if (baseHash === parentHash || !parentHash) return;
+      throw new Error(`integration conflict for ${path}; parent and worker both changed it. Worktree kept at ${info.path}`);
+    }
+    const sourceHash = await this.#hashFile(info.path, source);
     if (parentHash === sourceHash) return;
     if (baseHash === parentHash) return;
     if (!baseHash && !parentHash) return;
     throw new Error(`integration conflict for ${path}; parent and worker both changed it. Worktree kept at ${info.path}`);
   }
 
-  async #changedFiles(info: WorktreeInfo): Promise<string[]> {
-    const tracked = await this.#git(info.path, ["diff", "--name-status", "-z", info.baseCommit]);
+  async #hashFile(cwd: string, path: string): Promise<string> {
+    try {
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink()) {
+        throw new Error(`worktree integration only supports regular files: ${path}`);
+      }
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return "";
+      throw error;
+    }
+    return (await this.#git(cwd, ["hash-object", path])).trim();
+  }
+
+  async #changes(info: WorktreeInfo): Promise<WorktreeChange[]> {
+    const tracked = await this.#git(info.path, ["diff", "--no-renames", "--name-status", "-z", info.baseCommit]);
     const tokens = tracked.split("\0");
-    const paths = new Set<string>();
+    const changes = new Map<string, WorktreeChange>();
     for (let index = 0; index < tokens.length - 1;) {
       const status = tokens[index++] ?? "";
       if (!status) continue;
-      if (/^[DRCU]/.test(status)) {
+      if (/^[RCU]/.test(status)) {
         throw new Error(`worktree integration does not yet support ${status} changes; worktree kept at ${info.path}`);
       }
       const path = tokens[index++];
-      if (path) paths.add(path);
+      if (path) changes.set(path, { path, deleted: status.startsWith("D") });
     }
     const untracked = await this.#git(info.path, ["ls-files", "--others", "--exclude-standard", "-z"]);
     for (const path of untracked.split("\0")) {
-      if (path) paths.add(path);
+      if (path) changes.set(path, { path, deleted: false });
     }
-    return [...paths].sort();
+    return [...changes.values()].sort((left, right) => left.path.localeCompare(right.path));
   }
 
   async #snapshotCommit(id: string, parentHead: string): Promise<string> {
@@ -189,6 +232,8 @@ function isSensitiveSnapshotPath(path: string): boolean {
   const name = normalized.split("/").at(-1) ?? normalized;
   return name === ".env" || name.startsWith(".env.") ||
     name === ".npmrc" || name === ".pypirc" || name === "credentials" ||
+    name === "credentials.json" || name === "service-account.json" ||
+    name === "id_rsa" || name === "id_ed25519" || /^secrets?\./.test(name) ||
     name.endsWith(".pem") || name.endsWith(".key") || name.endsWith(".p12") ||
     normalized.includes("/.ssh/") || normalized.startsWith(".ssh/");
 }

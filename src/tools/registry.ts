@@ -82,8 +82,6 @@ export class ToolRegistry {
       );
     }
 
-    if (!tool.readOnly && tool.name !== "complete_task") delete options.context.state.completion;
-
     await options.context.events.emit({
       type: "tool.started",
       agentId: options.context.state.agentId,
@@ -98,6 +96,14 @@ export class ToolRegistry {
     } catch (error) {
       result = { content: error instanceof Error ? error.message : String(error), isError: true };
     }
+    if (
+      !tool.readOnly &&
+      tool.name !== "complete_task" &&
+      !result.isError &&
+      result.mutated !== false
+    ) {
+      delete options.context.state.completion;
+    }
     const materialized = await options.context.artifacts.materialize(
       tool.name,
       options.callId,
@@ -110,6 +116,7 @@ export class ToolRegistry {
       callId: options.callId,
       tool: tool.name,
       output: execution.content,
+      ...(result.diff ? { diff: result.diff } : {}),
       isError: execution.isError,
       durationMs: Math.round(performance.now() - started),
     });

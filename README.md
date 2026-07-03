@@ -6,7 +6,11 @@ The provider adapter talks directly to MiMo. It preserves streamed `reasoning_co
 
 ## Requirements
 
+- macOS or Linux
 - Node.js 22+
+- npm
+- Git
+- Linux only: `bubblewrap`, providing the `bwrap` command
 - A pay-as-you-go MiMo key beginning with `sk-`, or a Token Plan key beginning with `tp-`. The first-run terminal setup can store it in the system keychain.
 
 ## Install
@@ -25,6 +29,20 @@ For a clean, independent production-style copy instead:
 ./install.sh --copy
 ```
 
+After the first tagged release, an authenticated GitHub CLI can install from the private repository:
+
+```sh
+gh api --hostname github.com repos/gabep7/kulmi-harness/contents/install.sh \
+  -H "Accept: application/vnd.github.raw+json" \
+  | KULMI_INSTALL_REMOTE=1 sh
+```
+
+If the repository becomes public later, the unauthenticated install command is:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gabep7/kulmi-harness/master/install.sh | KULMI_INSTALL_REMOTE=1 sh
+```
+
 Copy mode installs from the lockfile, builds in a temporary directory, prunes development dependencies, and atomically replaces the previous installation. It is intentionally slower. Use it for a durable release installation rather than the edit-build-run loop.
 
 To install a different local checkout explicitly:
@@ -33,7 +51,7 @@ To install a different local checkout explicitly:
 KULMI_INSTALL_SOURCE="$PWD" ./install.sh
 ```
 
-The repository is not published at the package URL yet, so the installer intentionally uses the checkout when invoked as `./install.sh`. Tagged releases will include a prebuilt `kulmi-node.tar.gz` containing `dist` and production dependencies. Remote installs download and extract that bundle without npm installation or local compilation, then fall back to a source build only when a prebuilt release is unavailable. Select releases through `KULMI_REPOSITORY` and `KULMI_INSTALL_VERSION`.
+The repository is not published at the package URL yet, so the installer intentionally uses the checkout when invoked as `./install.sh`. Tagged releases include a prebuilt `kulmi-node.tar.gz` containing `dist` and production dependencies. Remote installs use an authenticated `gh` session for private repositories, download the bundle without npm installation or local compilation, then fall back to an authenticated source archive when a prebuilt release is unavailable. Public repositories can use plain `curl`. Select releases through `KULMI_REPOSITORY` and `KULMI_INSTALL_VERSION`.
 
 Then start Kulmi:
 
@@ -79,6 +97,19 @@ kulmi exec --web-search free "research the current API before editing"
 kulmi doctor
 ```
 
+Project or user configuration can control the command sandbox and undo transcript behavior:
+
+```toml
+[sandbox]
+mode = "required" # required or off
+network = false
+
+[undo]
+message_history = "truncate" # truncate or keep
+```
+
+The safe defaults require an available OS sandbox, deny command network access, and remove the undone turn from the active model and UI transcript. `keep` preserves the undone messages and appends an explicit marker telling MiMo that their file changes were reverted. `off` runs project commands without OS containment and should only be used deliberately.
+
 Running `kulmi` opens the responsive TUI. Running `kulmi exec` keeps the stable headless interface for scripts and CI.
 
 Chat starts with only the task-promotion schema, so greetings and direct questions do not pay for the full coding-tool catalog. A normal request that needs files, commands, edits, or research promotes itself and receives the full tools on the next model turn. `/goal` performs the same promotion explicitly.
@@ -95,6 +126,7 @@ Controls:
 - `?` opens the compact command and shortcut guide.
 - `/sessions` opens a keyboard picker for durable sessions in the current workspace.
 - `/fork` creates an independent continuation.
+- `/undo` restores the workspace, run state, and transcript boundary from before the previous completed turn.
 - `/workers` shows child agents.
 - `/steer`, `/cancel`, `/retry`, and `/integrate` control workers without leaving the TUI.
 - `/status` shows the model, autonomy, session, and workspace.
@@ -105,7 +137,9 @@ Resume directly into the TUI with:
 kulmi --session-id session_0123456789abcdef
 ```
 
-The footer shows autonomy, free-search state, cumulative tokens, and MiMo cache-hit rate. Risky commands replace the composer with an explicit allow-once or deny prompt. Pressing Enter without choosing defaults to denial.
+The footer shows autonomy, free-search state, cumulative tokens, and MiMo cache-hit rate. While a run is active, the composer rotates a small buffered spinner through intentionally ridiculous tech status lines such as `pirating MATLAB` and `selling your data`. Risky commands replace the composer with an explicit allow-once or deny prompt. Pressing Enter without choosing defaults to denial.
+
+Headless sessions can be undone with `kulmi undo <session-id>`. JSON-RPC clients use `session.undo` and receive the restored messages and run state in the response.
 
 Search modes:
 
@@ -117,17 +151,14 @@ Kulmi has no paid search provider, no search API key setting, and does not expos
 ## Runtime architecture
 
 ```text
-TUI / headless CLI
- |
- |
- +-------------+
-               |
-        SessionController
-               |
-     Agent loop and durable state
-       /          |           \
- MiMo adapter   Tool gate   Subagent scheduler
-                             and worktrees
+TUI / CLI / JSON-RPC
+          |
+  SessionController
+          |
+ Agent loop + durable state
+    /          |          \
+MiMo       Tool gate    Subagent scheduler
+adapter                 + isolated worktrees
 ```
 
 The runtime is headless. The TUI and CLI only send commands and render events. They do not own sessions, permissions, tools, prompts, worker state, or provider credentials.
@@ -140,15 +171,21 @@ Running workers can be redirected with `steer_agent`. Failed or interrupted work
 
 ## Cache contract
 
-MiMo prompt caching is automatic and prefix-based. Kulmi optimizes it by keeping the system message byte-stable, sorting tools canonically, canonicalizing every JSON schema, preserving message and tool-result order, and appending volatile state only at the conversation tail. Chat and task mode use separate cache scopes so the one deliberate tool-catalog expansion cannot invalidate either stable prefix. Compaction happens only near the 1M context boundary and only at a complete message boundary.
+MiMo prompt caching is automatic and prefix-based. Kulmi optimizes it by keeping the system message byte-stable, sorting tools canonically, canonicalizing every JSON schema, preserving message and tool-result order, and appending volatile state only at the conversation tail. Chat and task mode use separate cache scopes so the one deliberate tool-catalog expansion cannot invalidate either stable prefix. Compaction happens only near the 1M context boundary and only at a complete message boundary. Large tool output is stored as a retrievable artifact with a bounded preview, and state-changing tools return compact acknowledgements instead of duplicating state into the next fresh prompt tail.
 
 MiMo reports cache reads through `usage.prompt_tokens_details.cached_tokens`. Kulmi reports cached and fresh tokens independently for every request. Cache writes are currently free according to MiMo's pricing documentation, while cache-hit input for `mimo-v2.5-pro` is priced far below uncached input.
 
 ## Safety and persistence
 
-Autonomy levels are `read`, `low`, `medium`, and `high`. The shell policy blocks deletion, privilege escalation, remote publication, unsafe redirects, nested shells, dynamic interpreters, and credential exposure. Model-controlled processes receive a minimal environment, isolated home, closed stdin, timeout, bounded output, process-group cancellation, and secret redaction.
+Autonomy levels are `read`, `low`, `medium`, and `high`. The shell policy blocks deletion, privilege escalation, remote publication, unsafe redirects, nested shells, dynamic interpreters, and credential exposure. Model-controlled processes receive a minimal environment, isolated home and temporary directory, closed stdin, timeout, bounded output, process-group cancellation, and secret redaction.
+
+OS containment is required by default. On macOS, Kulmi uses the built-in Seatbelt runner through `sandbox-exec` with a deny-by-default profile. On Linux, it uses Bubblewrap with an empty mount namespace and user, IPC, PID, UTS, cgroup, and network namespaces. Both expose system and selected toolchain paths read-only, expose the workspace and private sandbox temporary directory as writable, deny writes to `.git`, and deny network access unless `sandbox.network=true`. Kulmi fails closed when the required backend is unavailable. Apple marks `sandbox-exec` as deprecated, but it remains the only built-in process-level profile runner on supported macOS releases; `kulmi doctor` reports backend availability.
 
 Sessions persist versioned, validated messages, events, run state, checkpoints, artifacts, worker jobs, model profile, and completion evidence. Existing unversioned sessions migrate on open. Interrupted assistant tool-call turns are repaired with an explicit uncertain result instead of replaying a potentially non-idempotent action. Task completion requires an evidence-backed plan and, for modified work, an explicit successful current-revision verification command covering the changed files.
+
+Every root turn records its pre-turn run state and before-and-after file snapshots. Undo validates that no file changed externally after the turn, restores contents and permissions atomically per file, removes files created by the turn, restores plan and verification state, and advances the MiMo cache epoch if the active transcript changes. A durable undo journal lets an interrupted undo resume safely. Undo is blocked while child-agent work remains pending.
+
+File edits, replacements, and deletions require a current read hash. `edit_files` preflights multiple exact replacements across already-read files, then applies them as one revision and rolls back completed writes if a later write fails. File edits, writes, deletions, and shell-created changes emit bounded redacted unified diffs to clients. Shell tracking also records permission-only changes. No-op writes do not advance the workspace revision or invalidate accepted completion evidence.
 
 ## Development
 
@@ -159,15 +196,17 @@ npm run check
 With a real key, `npm run test:live:mimo` performs a low-output two-request smoke test covering thinking, tool-call reasoning replay, tool-result pairing, streaming, and cache telemetry. It is not part of `npm run check` because it incurs provider usage.
 
 The detailed MiMo documentation inventory and implementation mapping is in [docs/mimo-doc-audit.md](docs/mimo-doc-audit.md).
+The release gate and tag procedure are in [docs/releasing.md](docs/releasing.md).
 
 ## Design references
 
 - [MiMo documentation](https://mimo.mi.com/docs/en-US/)
 - [MiMo OpenAI-compatible API](https://mimo.mi.com/docs/en-US/api/chat/openai-api)
-- [MiMo deep thinking](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/deep-thinking)
-- [MiMo web search](https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/tool-calling/web-search)
-- [MiMo Token Plan quick access](https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/quick-access)
-- [Reasonix](https://github.com/esengine/deepseek-reasonix)
+- [MiMo deep thinking](https://mimo.mi.com/docs/en-US/usage-guide/other/deep-thinking)
+- [MiMo web search](https://mimo.mi.com/docs/en-US/usage-guide/tool-calling/web-search)
+- [MiMo Token Plan](https://mimo.mi.com/docs/en-US/price/token-plan)
+- [Bubblewrap](https://github.com/containers/bubblewrap)
+- [macOS sandbox-exec manual](https://keith.github.io/xcode-man-pages/sandbox-exec.1.html)
 - [Pi](https://github.com/badlogic/pi-mono)
 - [Oh My Pi](https://github.com/can1357/oh-my-pi)
 - [OpenCode](https://github.com/anomalyco/opencode)

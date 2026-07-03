@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
+import { createTextDiff } from "../core/diff.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
 import { assertWithin } from "../security/paths.js";
 import type { CheckpointStore } from "./checkpoints.js";
@@ -13,7 +14,15 @@ interface FileState {
   existed: boolean;
   hash: string;
   content?: Buffer;
+  mode?: number;
 }
+
+export interface WorkspaceChange {
+  path: string;
+  diff?: string;
+}
+
+const textDecoder = new TextDecoder("utf-8", { fatal: true });
 
 export class WorkspaceSnapshot {
   readonly #root: string;
@@ -34,28 +43,81 @@ export class WorkspaceSnapshot {
   }
 
   async reconcile(checkpoint: CheckpointStore): Promise<string[]> {
+    return (await this.reconcileChanges(checkpoint)).map((change) => change.path);
+  }
+
+  async reconcileChanges(checkpoint: CheckpointStore): Promise<WorkspaceChange[]> {
     const after = await dirtyFileStates(this.#root);
     const paths = new Set([...this.#files.keys(), ...after.keys()]);
-    const changed: string[] = [];
+    const changed: WorkspaceChange[] = [];
 
     for (const path of paths) {
-      const beforeState = this.#files.get(path);
-      const afterState = after.get(path);
+      const recordedBefore = this.#files.get(path);
+      const recordedAfter = after.get(path);
+      const base = recordedBefore ? undefined : await gitFile(this.#root, `HEAD:${path}`);
+      const baseMode = recordedBefore || !base ? undefined : await gitMode(this.#root, path);
+      const beforeState = recordedBefore ?? bufferState(base, baseMode);
+      const afterState = recordedAfter ?? await currentFileState(this.#root, path);
       if (sameState(beforeState, afterState)) continue;
       const absolute = resolve(this.#root, path);
       assertWithin(this.#root, absolute);
-      if (beforeState) {
-        await checkpoint.captureSnapshot(absolute, beforeState);
+      let beforeContent = beforeState?.existed ? beforeState.content : undefined;
+      if (recordedBefore) {
+        await checkpoint.captureSnapshot(absolute, recordedBefore);
       } else {
-        const base = await gitFile(this.#root, `HEAD:${path}`);
+        beforeContent = base;
         await checkpoint.captureSnapshot(absolute, {
           existed: base !== undefined,
           ...(base ? { content: base } : {}),
+          ...(baseMode !== undefined ? { mode: baseMode } : {}),
         });
       }
-      changed.push(path);
+      const diff = textDiff(path, beforeContent, afterState?.existed ? afterState.content : undefined);
+      changed.push({ path, ...(diff ? { diff } : {}) });
     }
-    return changed.sort();
+    return changed.sort((left, right) => left.path.localeCompare(right.path));
+  }
+}
+
+function bufferState(content: Buffer | undefined, mode?: number): FileState | undefined {
+  if (!content) return undefined;
+  return {
+    existed: true,
+    hash: createHash("sha256").update(content).digest("hex"),
+    content,
+    ...(mode !== undefined ? { mode } : {}),
+  };
+}
+
+async function currentFileState(root: string, path: string): Promise<FileState | undefined> {
+  const absolute = resolve(root, path);
+  assertWithin(root, absolute);
+  try {
+    const info = await lstat(absolute);
+    if (!info.isFile() || info.isSymbolicLink()) return { existed: false, hash: "non-file" };
+    const content = await readFile(absolute);
+    return {
+      existed: true,
+      hash: createHash("sha256").update(content).digest("hex"),
+      content,
+      mode: info.mode & 0o7777,
+    };
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function textDiff(path: string, before: Buffer | undefined, after: Buffer | undefined): string | undefined {
+  try {
+    return createTextDiff(
+      path,
+      before ? textDecoder.decode(before) : "",
+      after ? textDecoder.decode(after) : "",
+      80,
+    )?.text;
+  } catch {
+    return undefined;
   }
 }
 
@@ -82,9 +144,14 @@ async function dirtyFileStates(root: string): Promise<Map<string, FileState>> {
         existed: true,
         hash: createHash("sha256").update(content).digest("hex"),
         content,
+        mode: info.mode & 0o7777,
       });
-    } catch {
-      states.set(path, { existed: false, hash: "missing" });
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+        states.set(path, { existed: false, hash: "missing" });
+        continue;
+      }
+      throw error;
     }
   }
   return states;
@@ -109,7 +176,7 @@ function parseStatusPaths(status: string): string[] {
 
 function sameState(left: FileState | undefined, right: FileState | undefined): boolean {
   if (!left && !right) return true;
-  return left?.existed === right?.existed && left?.hash === right?.hash;
+  return left?.existed === right?.existed && left?.hash === right?.hash && left?.mode === right?.mode;
 }
 
 async function git(root: string, args: string[]): Promise<string> {
@@ -138,6 +205,23 @@ async function gitFile(root: string, spec: string): Promise<Buffer | undefined> 
       env,
     });
     return Buffer.from(stdout);
+  } catch {
+    return undefined;
+  } finally {
+    disposeChildEnvironment(env);
+  }
+}
+
+async function gitMode(root: string, path: string): Promise<number | undefined> {
+  const env = safeChildEnvironment();
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", root, "ls-tree", "HEAD", "--", path], {
+      encoding: "utf8",
+      maxBuffer: 1_000_000,
+      env,
+    });
+    const raw = stdout.match(/^(\d{6})\s/)?.[1];
+    return raw ? Number.parseInt(raw, 8) & 0o7777 : undefined;
   } catch {
     return undefined;
   } finally {

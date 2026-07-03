@@ -48,7 +48,12 @@ describe("shell tool", () => {
       maxOutputBytes: 100_000,
     };
 
-    expect((await shellTool.execute(context, { command: "cp source.txt target.txt" })).isError).toBeFalsy();
+    const copy = await shellTool.execute(context, { command: "cp source.txt target.txt" });
+    expect(copy.isError).toBeFalsy();
+    expect(copy.diff).toContain("--- a/target.txt");
+    expect(copy.diff).toContain("-old");
+    expect(copy.diff).toContain("+new");
+    expect(copy.content).toContain('changed_files: ["target.txt"]');
     expect(state.modifiedFiles).toContain("target.txt");
     expect(state.revision).toBe(1);
     expect((await shellTool.execute(context, { command: "npm test" })).isError).toBeFalsy();
@@ -60,6 +65,7 @@ describe("shell tool", () => {
       truncated: false,
       changedFiles: ["target.txt"],
     });
+    expect((await shellTool.execute(context, { command: "npm test" })).content).toContain("verification: recorded");
 
     let requested = false;
     const deletion = await shellTool.execute({
@@ -74,6 +80,7 @@ describe("shell tool", () => {
     }, { command: "rm target.txt" });
     expect(requested).toBe(true);
     expect(deletion.isError).toBeFalsy();
+    expect(deletion.diff).toContain("-new");
     await expect(access(join(root, "target.txt"))).rejects.toThrow();
     expect(state.modifiedFiles).toContain("target.txt");
     expect(state.revision).toBe(2);

@@ -1,11 +1,12 @@
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import type { AgentMode, AutonomyLevel } from "../core/types.js";
-import type { SearchMode } from "../config/config.js";
+import { loadConfig, type SearchMode } from "../config/config.js";
 import { EventBus } from "../core/events.js";
 import { SessionController } from "../runtime/controller.js";
-import { listSessions } from "../runtime/session-store.js";
+import { listSessions, SessionStore } from "../runtime/session-store.js";
 import { VERSION } from "../core/version.js";
+import { resolveExistingCredential } from "../auth/credentials.js";
 
 const requestSchema = z.object({
   jsonrpc: z.literal("2.0"),
@@ -16,7 +17,7 @@ const requestSchema = z.object({
 
 const openSchema = z.object({
   cwd: z.string().min(1),
-  mode: z.enum(["chat", "task"]).default("task"),
+  mode: z.enum(["chat", "task"]).optional(),
   model: z.string().optional(),
   autonomy: z.enum(["read", "low", "medium", "high"]).default("medium"),
   sessionId: z.string().optional(),
@@ -46,13 +47,23 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
 
   const open = async (raw: unknown) => {
     const params = openSchema.parse({ cwd: defaultCwd, ...(isRecord(raw) ? raw : {}) });
+    const saved = params.sessionId ? (await SessionStore.open(params.sessionId)).session : undefined;
+    const savedProfile = saved?.metadata.modelProfile ?? (saved
+      ? Object.entries(loadConfig(params.cwd).models)
+        .find(([, profile]) => profile.model === saved.metadata.model)?.[0]
+      : undefined);
+    const requestedModel = params.model ?? savedProfile;
+    const credential = await resolveExistingCredential({
+      cwd: params.cwd,
+      ...(requestedModel ? { requestedModel } : {}),
+    });
     const events = new EventBus();
     const controller = await SessionController.create({
       cwd: params.cwd,
-      mode: params.mode as AgentMode,
+      mode: (params.mode ?? saved?.state?.mode ?? "task") as AgentMode,
       autonomy: params.autonomy as AutonomyLevel,
       events,
-      ...(params.model ? { model: params.model } : {}),
+      ...(params.model || credential?.model ? { model: params.model ?? credential!.model } : {}),
       ...(params.sessionId ? { resumeSessionId: params.sessionId } : {}),
       ...(params.webSearch ? { webSearch: params.webSearch as SearchMode } : {}),
     });
@@ -61,9 +72,19 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
     return {
       sessionId: controller.sessionId,
       model: controller.model,
+      modelProfile: controller.modelProfile,
       cwd: controller.workspaceRoot,
       autonomy: controller.autonomy,
       messages: controller.messages,
+      mode: controller.mode,
+      search: controller.searchMode,
+      sandbox: controller.sandbox,
+      undoMessageHistory: controller.undoMessageHistory,
+      state: {
+        ...controller.state,
+        modifiedFiles: [...controller.state.modifiedFiles],
+      },
+      workers: controller.workers(),
     };
   };
 
@@ -79,6 +100,7 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
               searchModes: ["off", "free"],
               streamingEvents: true,
               cancellation: true,
+              undo: true,
             },
           });
           return;
@@ -113,6 +135,21 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
           const managed = sessions.get(params.sessionId);
           managed?.running?.abort(new Error("cancelled by client"));
           await respond(request.id, { cancelled: managed?.running !== undefined });
+          return;
+        }
+        case "session.undo": {
+          const params = sessionIdSchema.parse(request.params);
+          const managed = sessions.get(params.sessionId);
+          if (!managed) throw new RpcError(-32001, `session ${params.sessionId} is not open`);
+          if (managed.running) throw new RpcError(-32002, "cannot undo while the session is running");
+          const undone = await managed.controller.undo();
+          await respond(request.id, {
+            ...undone,
+            state: {
+              ...undone.state,
+              modifiedFiles: [...undone.state.modifiedFiles],
+            },
+          });
           return;
         }
         case "session.close": {

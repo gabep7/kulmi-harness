@@ -1,11 +1,11 @@
 import type { EventBus, EventEnvelope } from "../core/events.js";
-import type { AgentStatus, PlanStep, TokenUsage } from "../core/types.js";
+import type { AgentStatus, PlanStep, RunState, TokenUsage } from "../core/types.js";
 import type { ProviderMessage } from "../provider/types.js";
 import type { PermissionRequest } from "../tools/types.js";
 
 export type FeedItem =
   | { id: string; kind: "user" | "assistant" | "notice" | "error"; text: string }
-  | { id: string; kind: "tool"; title: string; detail: string; status: "running" | "done" | "error"; durationMs?: number }
+  | { id: string; kind: "tool"; title: string; detail: string; diff?: string; status: "running" | "done" | "error"; durationMs?: number }
   | { id: string; kind: "worker"; title: string; status: AgentStatus };
 
 export interface PendingApproval {
@@ -14,8 +14,8 @@ export interface PendingApproval {
 }
 
 export interface TuiSnapshot {
-  // Finalized, append-only history. Rendered once into the terminal's native
-  // scrollback via Ink <Static>, so it is never truncated or repainted.
+  // Finalized history is bounded in memory and rendered once into the
+  // terminal's native scrollback via Ink <Static>.
   transcript: FeedItem[];
   // In-flight rows (running tools and workers) shown in the live bottom region
   // until they finalize and move into the transcript.
@@ -91,7 +91,11 @@ export class TuiStore {
     this.#update({ transcript: historyFeed(messages) }, true);
   }
 
-  replaceSession(messages: readonly ProviderMessage[]): void {
+  seedRunState(state: RunState): void {
+    this.#update(statePatch(state), true);
+  }
+
+  replaceSession(messages: readonly ProviderMessage[], state?: RunState): void {
     this.#rootAgentId = undefined;
     this.#snapshot.pendingApproval?.resolve(false);
     this.#snapshot = {
@@ -99,12 +103,12 @@ export class TuiStore {
       live: [],
       reasoning: "",
       streaming: "",
-      plan: [],
+      plan: state?.plan ?? [],
       usage: emptyUsage,
-      status: "idle",
+      status: state?.status ?? "idle",
       pendingApproval: undefined,
       expandedThinking: this.#snapshot.expandedThinking,
-      completion: undefined,
+      completion: state ? statePatch(state).completion : undefined,
     };
     this.#notify();
   }
@@ -196,6 +200,7 @@ export class TuiStore {
                 status: event.isError ? "error" : "done",
                 durationMs: event.durationMs,
                 detail: event.isError ? compactError(event.output) : item.detail,
+                ...(event.diff ? { diff: event.diff } : {}),
               }
             : item);
         } else {
@@ -204,6 +209,7 @@ export class TuiStore {
             kind: "tool",
             title: friendlyTool(event.tool),
             detail: event.isError ? compactError(event.output) : "",
+            ...(event.diff ? { diff: event.diff } : {}),
             status: event.isError ? "error" : "done",
             durationMs: event.durationMs,
           });
@@ -275,6 +281,25 @@ export class TuiStore {
   }
 }
 
+function statePatch(state: RunState): Pick<TuiSnapshot, "plan" | "status" | "completion"> {
+  return {
+    plan: structuredClone(state.plan),
+    status: state.status,
+    completion: state.completion ? {
+      status: state.completion.status,
+      modifiedFiles: [...state.modifiedFiles].sort(),
+      verificationCommands: state.verifications
+        .filter((verification) =>
+          verification.exitCode === 0 &&
+          !verification.timedOut &&
+          !verification.truncated &&
+          verification.revision === state.revision
+        )
+        .map((verification) => verification.command),
+    } : undefined,
+  };
+}
+
 function historyFeed(messages: readonly ProviderMessage[]): FeedItem[] {
   return messages.flatMap((message, index): FeedItem[] => {
     if (message.role === "user" && typeof message.content === "string") {
@@ -295,6 +320,8 @@ function addUsage(total: TokenUsage, next: TokenUsage): TokenUsage {
     cacheHitTokens: total.cacheHitTokens + next.cacheHitTokens,
     cacheMissTokens: total.cacheMissTokens + next.cacheMissTokens,
     reasoningTokens: (total.reasoningTokens ?? 0) + (next.reasoningTokens ?? 0),
+    webSearchCalls: (total.webSearchCalls ?? 0) + (next.webSearchCalls ?? 0),
+    webSearchPages: (total.webSearchPages ?? 0) + (next.webSearchPages ?? 0),
   };
 }
 
@@ -305,6 +332,8 @@ function friendlyTool(name: string): string {
     grep: "Search code",
     write_file: "Write file",
     edit_file: "Edit file",
+    edit_files: "Edit files",
+    delete_file: "Delete file",
     shell: "Run command",
     web_search: "Search web",
     fetch_url: "Fetch page",
@@ -318,6 +347,7 @@ function friendlyTool(name: string): string {
     update_plan: "Update plan",
     inspect_plan: "Inspect plan",
     complete_task: "Complete task",
+    report_worker: "Report worker",
     start_task: "Start task",
     read_skill: "Read skill",
     read_artifact: "Read artifact",

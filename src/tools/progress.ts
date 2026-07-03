@@ -1,9 +1,14 @@
 import { z } from "zod";
+import { assertGitWorkTree } from "../config/config.js";
 import type { PlanStep } from "../core/types.js";
 import { defineTool, type AnyTool } from "./types.js";
 
 export function progressTools(): AnyTool[] {
   return [inspectPlanTool, updatePlanTool, completeTaskTool, startTaskTool];
+}
+
+export function workerProgressTools(): AnyTool[] {
+  return [reportWorkerTool];
 }
 
 const inspectPlanTool = defineTool({
@@ -51,7 +56,12 @@ const updatePlanTool = defineTool({
     }
     context.state.plan = steps;
     await context.events.emit({ type: "plan.updated", agentId: context.state.agentId, steps: context.state.plan });
-    return { content: JSON.stringify({ accepted: true, steps: context.state.plan }) };
+    return { content: JSON.stringify({
+      accepted: true,
+      step_count: steps.length,
+      completed: steps.filter((step) => step.status === "completed").length,
+      in_progress: steps.find((step) => step.status === "in_progress")?.id ?? null,
+    }) };
   },
 });
 
@@ -63,12 +73,13 @@ const startTaskTool = defineTool({
     goal: z.string().min(1).max(2000).describe("Short description of what needs to be done"),
   }),
   readOnly: false,
-  async execute(context, input) {
+  async execute(context) {
     if (context.state.mode === "task") {
-      return { content: JSON.stringify({ accepted: true, already_task: true, goal: input.goal }) };
+      return { content: JSON.stringify({ accepted: true, already_task: true }) };
     }
+    assertGitWorkTree(context.cwd);
     context.state.mode = "task";
-    return { content: JSON.stringify({ accepted: true, mode: "task", goal: input.goal }) };
+    return { content: JSON.stringify({ accepted: true, mode: "task" }) };
   },
 });
 
@@ -119,6 +130,9 @@ const completeTaskTool = defineTool({
         }
       }
     }
+    if (input.status === "blocked" && input.evidence.length === 0) {
+      throw new Error("reporting a blocker requires explicit evidence");
+    }
     context.state.completion = {
       status: input.status,
       summary: input.summary,
@@ -129,9 +143,56 @@ const completeTaskTool = defineTool({
         accepted: true,
         status: input.status,
         modified_files: [...context.state.modifiedFiles],
-        verifications: context.state.verifications,
         verification_command: input.verification_command ?? null,
       }),
+    };
+  },
+});
+
+const reportWorkerTool = defineTool({
+  name: "report_worker",
+  description:
+    "Submit the worker's evidence-backed completion or blocker report. Modified work requires the exact successful current-revision verification_command.",
+  schema: z.object({
+    status: z.enum(["completed", "blocked"]),
+    summary: z.string().min(1).max(4_000),
+    evidence: z.array(z.string().min(1).max(1_000)).min(1).max(30),
+    verification_command: z.string().min(1).max(2_000).optional(),
+  }),
+  readOnly: false,
+  async execute(context, input) {
+    if (input.status === "completed" && context.state.modifiedFiles.size > 0) {
+      if (!input.verification_command) {
+        throw new Error("modified worker output requires an explicit verification_command");
+      }
+      const verification = context.state.verifications.find((candidate) =>
+        candidate.command === input.verification_command &&
+        candidate.exitCode === 0 &&
+        !candidate.timedOut &&
+        !candidate.truncated &&
+        candidate.revision === context.state.revision
+      );
+      if (!verification) {
+        throw new Error(`verification_command was not a successful current-revision check: ${input.verification_command}`);
+      }
+      const uncovered = [...context.state.modifiedFiles].filter((path) => !verification.changedFiles.includes(path));
+      if (uncovered.length > 0) {
+        throw new Error(`verification does not cover modified files: ${uncovered.join(", ")}`);
+      }
+    }
+    context.state.completion = {
+      status: input.status,
+      summary: input.summary,
+      evidence: input.evidence,
+    };
+    return {
+      content: JSON.stringify({
+        accepted: true,
+        status: input.status,
+        modified_files: [...context.state.modifiedFiles],
+        verification_command: input.verification_command ?? null,
+      }),
+      mutated: false,
     };
   },
 });
@@ -139,6 +200,9 @@ const completeTaskTool = defineTool({
 export function validatePlan(steps: PlanStep[]): void {
   const byId = new Map(steps.map((step) => [step.id, step]));
   if (byId.size !== steps.length) throw new Error("plan step IDs must be unique");
+  if (steps.filter((step) => step.status === "in_progress").length > 1) {
+    throw new Error("a plan can have at most one in-progress step");
+  }
   for (const step of steps) {
     if (step.status === "completed" && !step.evidence?.trim()) {
       throw new Error(`completed plan step ${step.id} requires evidence`);

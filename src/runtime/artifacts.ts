@@ -11,7 +11,7 @@ export class ArtifactStore {
   readonly #root: string;
   readonly #threshold: number;
 
-  constructor(sessionPath: string, threshold = 40_000) {
+  constructor(sessionPath: string, threshold = 16_000) {
     this.#root = join(sessionPath, "artifacts");
     this.#threshold = threshold;
   }
@@ -23,8 +23,9 @@ export class ArtifactStore {
     const artifactId = `artifact_${digest}`;
     await mkdir(this.#root, { recursive: true });
     await writeFile(join(this.#root, `${artifactId}.txt`), content, "utf8");
-    const head = content.slice(0, 24_000);
-    const tail = content.slice(-8_000);
+    const encoded = Buffer.from(content, "utf8");
+    const head = encoded.subarray(0, 10_000).toString("utf8");
+    const tail = encoded.subarray(Math.max(0, encoded.length - 4_000)).toString("utf8");
     return {
       artifactId,
       content:

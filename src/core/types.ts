@@ -55,6 +55,8 @@ export interface TokenUsage {
   cacheHitTokens: number;
   cacheMissTokens: number;
   reasoningTokens?: number;
+  webSearchCalls?: number;
+  webSearchPages?: number;
 }
 
 export type OutputFormat = "text" | "json" | "stream-json";

@@ -51,6 +51,7 @@ const commands = [
   ["/status", "show runtime details"],
   ["/thinking", "expand or collapse reasoning"],
   ["/fork", "fork this session"],
+  ["/undo", "revert the previous turn"],
   ["/auth", "change MiMo credentials"],
   ["/workers", "inspect child agents"],
   ["/steer", "redirect a running worker"],
@@ -259,13 +260,16 @@ function FeedRow({ item, width }: { item: FeedItem; width: number }) {
     </Box>
   );
   if (item.kind === "tool") return (
-    <Box paddingLeft={2}>
-      <Text color={item.status === "error" ? theme.rose : item.status === "done" ? theme.sage : theme.caramel}>
-        {item.status === "error" ? glyph.error : item.status === "done" ? glyph.success : glyph.active}
-        <Text color={theme.muted}> {item.title}</Text>
-      </Text>
-      {item.detail && <Text color={theme.faint}>  {clampLine(item.detail, Math.max(12, width - item.title.length - 8))}</Text>}
-      {item.durationMs !== undefined && <Text color={theme.faint}>  {formatDuration(item.durationMs)}</Text>}
+    <Box paddingLeft={2} flexDirection="column">
+      <Box>
+        <Text color={item.status === "error" ? theme.rose : item.status === "done" ? theme.sage : theme.caramel}>
+          {item.status === "error" ? glyph.error : item.status === "done" ? glyph.success : glyph.active}
+          <Text color={theme.muted}> {item.title}</Text>
+        </Text>
+        {item.detail && <Text color={theme.faint}>  {clampLine(item.detail, Math.max(12, width - item.title.length - 8))}</Text>}
+        {item.durationMs !== undefined && <Text color={theme.faint}>  {formatDuration(item.durationMs)}</Text>}
+      </Box>
+      {item.diff && <Text color={theme.faint}>{item.diff}</Text>}
     </Box>
   );
   if (item.kind === "worker") return (
@@ -316,12 +320,40 @@ function CompletionBlock({ completion }: { completion: CompletionSummary }) {
 }
 
 function Composer({ value, onChange, onSubmit, busy }: { value: string; onChange: (value: string) => void; onSubmit: (value: string) => void; busy: boolean }) {
+  const loading = useLoadingStatus(busy);
   return (
     <Box marginTop={1} borderStyle="round" borderColor={busy ? theme.faint : theme.cocoa} paddingX={1}>
-      <Text color={busy ? theme.faint : theme.caramel}>{busy ? "working" : glyph.user} </Text>
+      <Text color={busy ? theme.faint : theme.caramel}>{busy ? `${loading.icon} ${loading.message}` : glyph.user} </Text>
       <TextInput value={value} onChange={onChange} onSubmit={onSubmit} focus={!busy} placeholder={busy ? "Kulmi is working. Esc to stop." : "What should we build?"} />
     </Box>
   );
+}
+
+const loadingFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const loadingMessages = [
+  "pirating MATLAB",
+  "selling your data",
+  "blaming DNS",
+  "centering a div",
+  "downloading more RAM",
+  "warming the cache",
+  "asking Stack Overflow",
+  "turning it off and on",
+  "summoning a semicolon",
+  "compiling the compiler",
+] as const;
+
+function useLoadingStatus(active: boolean): { icon: string; message: string } {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => setTick((value) => value + 1), 140);
+    return () => clearInterval(timer);
+  }, [active]);
+  return {
+    icon: loadingFrames[tick % loadingFrames.length]!,
+    message: loadingMessages[Math.floor(tick / 14) % loadingMessages.length]!,
+  };
 }
 
 function Approval({ request }: { request: import("../tools/types.js").PermissionRequest }) {
@@ -416,6 +448,8 @@ function MarkdownBlock({ text, width }: { text: string; width: number }) {
 }
 
 function Footer({ runtime, status, usage, busy }: { runtime: TuiRuntimeInfo; status: string; usage: ReturnType<TuiStore["getSnapshot"]>["usage"]; busy: boolean }) {
+  const cacheInput = usage.cacheHitTokens + usage.cacheMissTokens;
+  const cacheRate = cacheInput > 0 ? Math.round(usage.cacheHitTokens / cacheInput * 100) : 0;
   return (
     <Box flexDirection="column">
       <Box justifyContent="space-between">
@@ -423,7 +457,7 @@ function Footer({ runtime, status, usage, busy }: { runtime: TuiRuntimeInfo; sta
       </Box>
       <Box justifyContent="space-between">
         <Text color={theme.faint} wrap="truncate-end">{runtime.model}  ·  {runtime.sessionId.replace("session_", "").slice(0, 8)}</Text>
-        <Text color={theme.faint}>{compactNumber(usage.totalTokens)} processed  ·  <Text color={theme.ink}>{compactNumber(usage.cacheMissTokens)} fresh</Text>  ·  <Text color={usage.cacheHitTokens > 0 ? theme.sage : theme.muted}>{compactNumber(usage.cacheHitTokens)} cached</Text>  ·  {compactNumber(usage.completionTokens)} out</Text>
+        <Text color={theme.faint}>{compactNumber(usage.totalTokens)} processed  ·  <Text color={theme.ink}>{compactNumber(usage.cacheMissTokens)} fresh</Text>  ·  <Text color={usage.cacheHitTokens > 0 ? theme.sage : theme.muted}>{compactNumber(usage.cacheHitTokens)} cached ({cacheRate}%)</Text>  ·  {compactNumber(usage.completionTokens)} out</Text>
       </Box>
     </Box>
   );

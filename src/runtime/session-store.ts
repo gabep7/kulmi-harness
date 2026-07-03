@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile, appendFile, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -82,7 +82,7 @@ export class SessionStore {
     if (options.prompt) metadata.prompt = options.prompt;
     if (options.modelProfile) metadata.modelProfile = options.modelProfile;
 
-    await mkdir(path, { recursive: true });
+    await mkdir(path, { recursive: true, mode: 0o700 });
     const store = new SessionStore(path, metadata);
     await store.#writeMetadata();
     await store.saveMessages([]);
@@ -127,11 +127,20 @@ export class SessionStore {
 
   attach(bus: EventBus): void {
     this.#unsubscribe?.();
-    this.#unsubscribe = bus.on((event) => this.appendEvent(event), { critical: true });
+    this.#unsubscribe = bus.on((event) => {
+      if (
+        event.event.type === "assistant.reasoning.delta" ||
+        event.event.type === "assistant.text.delta"
+      ) return;
+      return this.appendEvent(event);
+    }, { critical: true });
   }
 
   async appendEvent(event: EventEnvelope): Promise<void> {
-    await this.#enqueue(() => appendFile(this.#eventsPath, `${JSON.stringify(event)}\n`, "utf8"));
+    await this.#enqueue(() => appendFile(this.#eventsPath, `${JSON.stringify(event)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    }));
   }
 
   async saveMessages(messages: ProviderMessage[]): Promise<void> {
@@ -209,7 +218,14 @@ export async function forkSession(id: string): Promise<SessionMetadata> {
     ...(session.metadata.modelProfile ? { modelProfile: session.metadata.modelProfile } : {}),
     ...(session.metadata.prompt ? { prompt: session.metadata.prompt } : {}),
   });
-  await store.saveMessages(session.messages);
+  const messages = [...session.messages];
+  if (session.workers?.length) {
+    messages.push({
+      role: "user",
+      content: "<fork-context>Child-agent jobs and worktrees belong to the source session and were not inherited.</fork-context>",
+    });
+  }
+  await store.saveMessages(messages);
   if (session.state) {
     const { completion: _completion, ...state } = session.state;
     await store.saveRunState({
@@ -218,7 +234,6 @@ export async function forkSession(id: string): Promise<SessionMetadata> {
       agentId: createId("agent"),
     });
   }
-  if (session.workers) await store.saveWorkerJobs(session.workers);
   await store.close("idle");
   return (await SessionStore.open(store.id)).session.metadata;
 }
@@ -230,10 +245,17 @@ function dataRoot(): string {
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(temporary, path);
+  try {
+    await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await rename(temporary, path);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
 }
 
 async function readRequiredJson(path: string, label: string): Promise<unknown> {

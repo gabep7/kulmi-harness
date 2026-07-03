@@ -2,12 +2,12 @@ name: release
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ['v*']
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   check:
@@ -21,6 +21,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Install Linux sandbox
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - run: npm ci
       - run: npm run check
 
@@ -28,6 +30,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: check
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -35,12 +39,15 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Verify tag matches package version
+        run: test "${GITHUB_REF_NAME#v}" = "$(node -p 'require("./package.json").version')"
       - run: npm run check
       - run: npm pack
       - name: Build fast installer bundle
         run: |
           npm prune --omit=dev --ignore-scripts --no-audit --no-fund
           tar -czf kulmi-node.tar.gz dist node_modules package.json README.md
+          test "$(node dist/cli.js --version)" = "${GITHUB_REF_NAME#v}"
       - uses: softprops/action-gh-release@v2
         with:
           files: |

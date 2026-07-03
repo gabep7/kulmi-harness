@@ -1,9 +1,9 @@
 #!/bin/sh
 set -eu
 
-REPO="${KULMI_REPOSITORY:-gabriele/kulmi-harness}"
+REPO="${KULMI_REPOSITORY:-gabep7/kulmi-harness}"
 VERSION="${KULMI_INSTALL_VERSION:-latest}"
-SOURCE_REF="${KULMI_SOURCE_REF:-main}"
+SOURCE_REF="${KULMI_SOURCE_REF:-master}"
 RELEASE_URL="${KULMI_RELEASE_URL:-}"
 INSTALL_DIR="${KULMI_INSTALL_DIR:-$HOME/.local/lib/kulmi}"
 BIN_DIR="${KULMI_BIN_DIR:-$HOME/.local/bin}"
@@ -39,8 +39,44 @@ fail() {
   exit 1
 }
 
+has_authenticated_gh() {
+  command -v gh >/dev/null 2>&1 && gh auth status --hostname github.com >/dev/null 2>&1
+}
+
+download_release() {
+  destination="$1"
+  if [ -n "$RELEASE_URL" ]; then
+    curl --fail --location --silent --show-error "$RELEASE_URL" -o "$destination"
+  elif has_authenticated_gh; then
+    if [ "$VERSION" = "latest" ]; then
+      gh release download --repo "$REPO" --pattern kulmi-node.tar.gz --output "$destination"
+    else
+      gh release download "$VERSION" --repo "$REPO" --pattern kulmi-node.tar.gz --output "$destination"
+    fi
+  else
+    curl --fail --location --silent --show-error "$release_url" -o "$destination"
+  fi
+}
+
+download_source() {
+  destination="$1"
+  if has_authenticated_gh; then
+    gh api --hostname github.com "repos/$REPO/tarball/$SOURCE_REF" > "$destination"
+  else
+    curl --fail --location --silent --show-error \
+      "https://github.com/$REPO/archive/$SOURCE_REF.tar.gz" -o "$destination"
+  fi
+}
+
 command -v node >/dev/null 2>&1 || fail "Node.js 22 or newer is required"
 command -v npm >/dev/null 2>&1 || fail "npm is required"
+command -v git >/dev/null 2>&1 || fail "git is required"
+
+case "$(uname -s)" in
+  Darwin) [ -x /usr/bin/sandbox-exec ] || fail "macOS sandbox-exec is required" ;;
+  Linux) command -v bwrap >/dev/null 2>&1 || fail "bubblewrap is required on Linux; install the bubblewrap package" ;;
+  *) fail "only macOS and Linux are supported" ;;
+esac
 
 major="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$major" -ge 22 ] || fail "Node.js 22 or newer is required, found $(node --version)"
@@ -81,17 +117,16 @@ if [ "$MODE" = "link" ]; then
   SOURCE_DIR="$(CDPATH= cd "$SOURCE_DIR" && pwd)"
   [ "$SOURCE_DIR" != "$INSTALL_DIR" ] || fail "source and install directories must differ"
 
-  if [ ! -x "$SOURCE_DIR/node_modules/.bin/tsc" ]; then
+  if [ ! -x "$SOURCE_DIR/node_modules/.bin/tsc" ] || [ "$SOURCE_DIR/package-lock.json" -nt "$SOURCE_DIR/node_modules/.package-lock.json" ]; then
     printf 'Installing dependencies once...\n'
     (cd "$SOURCE_DIR" && npm ci --ignore-scripts --no-audit --no-fund)
   fi
 
+  source_fingerprint="$(cd "$SOURCE_DIR" && node scripts/source-fingerprint.mjs)"
+  built_fingerprint="$(cat "$SOURCE_DIR/dist/.source-fingerprint" 2>/dev/null || true)"
   needs_build=0
   [ -f "$SOURCE_DIR/dist/cli.js" ] || needs_build=1
-  if [ "$needs_build" -eq 0 ] && find "$SOURCE_DIR/src" "$SOURCE_DIR/package.json" "$SOURCE_DIR/tsconfig.build.json" \
-    -type f -newer "$SOURCE_DIR/dist/cli.js" -print -quit | grep -q .; then
-    needs_build=1
-  fi
+  [ "$source_fingerprint" = "$built_fingerprint" ] || needs_build=1
   if [ "$needs_build" -eq 1 ]; then
     printf 'Building changed sources...\n'
     (cd "$SOURCE_DIR" && npm run build)
@@ -109,7 +144,9 @@ else
     [ -f "$SOURCE_DIR/package.json" ] || fail "KULMI_INSTALL_SOURCE is not a Kulmi checkout"
     (cd "$SOURCE_DIR" && tar --exclude='./node_modules' --exclude='./dist' --exclude='./.git' -cf - .) | (cd "$package" && tar -xf -)
   else
-    command -v curl >/dev/null 2>&1 || fail "curl is required"
+    if [ -n "$RELEASE_URL" ] || ! has_authenticated_gh; then
+      command -v curl >/dev/null 2>&1 || fail "curl is required when authenticated GitHub CLI access is unavailable"
+    fi
     command -v tar >/dev/null 2>&1 || fail "tar is required"
     if [ -n "$RELEASE_URL" ]; then
       release_url="$RELEASE_URL"
@@ -119,16 +156,15 @@ else
       release_url="https://github.com/$REPO/releases/download/$VERSION/kulmi-node.tar.gz"
     fi
     printf 'Downloading prebuilt kulmi %s...\n' "$VERSION"
-    if curl --fail --location --silent --show-error "$release_url" -o "$work/kulmi-node.tar.gz"; then
+    if download_release "$work/kulmi-node.tar.gz"; then
       tar -xzf "$work/kulmi-node.tar.gz" -C "$package"
       [ -f "$package/dist/cli.js" ] || fail "release bundle is missing dist/cli.js"
       [ -d "$package/node_modules" ] || fail "release bundle is missing production dependencies"
       prebuilt=1
     else
       printf 'No prebuilt release found; falling back to source %s...\n' "$SOURCE_REF"
-      curl --fail --location --silent --show-error \
-        "https://github.com/$REPO/archive/$SOURCE_REF.tar.gz" \
-        | tar -xz --strip-components=1 -C "$package"
+      download_source "$work/kulmi-source.tar.gz"
+      tar -xzf "$work/kulmi-source.tar.gz" --strip-components=1 -C "$package"
     fi
   fi
   if [ "$prebuilt" -eq 0 ]; then

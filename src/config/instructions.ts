@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-const names = ["AGENTS.md", "KULMI.md", "REASONIX.md"];
+const names = ["AGENTS.md", "KULMI.md"];
 
 export interface LoadedInstructions {
   files: string[];

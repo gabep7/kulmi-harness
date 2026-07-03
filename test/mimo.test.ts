@@ -26,7 +26,19 @@ describe("MiMoProvider", () => {
     const provider = new MiMoProvider(model(url));
     const result = await provider.complete({
       messages: [{ role: "system", content: "stable" }, { role: "user", content: "read it" }],
-      tools: [],
+      tools: [{
+        type: "function",
+        function: {
+          name: "read_file",
+          description: "Read a file",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"],
+            additionalProperties: false,
+          },
+        },
+      }],
       signal: new AbortController().signal,
     });
 
@@ -36,6 +48,7 @@ describe("MiMoProvider", () => {
       thinking: { type: "enabled" },
       stream: true,
       max_completion_tokens: 131_072,
+      tools: [{ function: { name: "read_file", strict: true } }],
     });
     expect(requestBody).not.toHaveProperty("user_id");
     expect(requestBody).not.toHaveProperty("reasoning_effort");
@@ -59,13 +72,15 @@ describe("MiMoProvider", () => {
       cacheHitTokens: 80,
       cacheMissTokens: 20,
       reasoningTokens: 12,
+      webSearchCalls: 1,
+      webSearchPages: 3,
     });
   });
 
   it("returns native web citations and usage", async () => {
     const url = await serve(servers, (_request, response) => {
       response.writeHead(200, { "content-type": "text/event-stream" });
-      response.end('data: {"choices":[{"delta":{"annotations":[{"type":"url_citation","url":"https://example.com/a","title":"Example","summary":"Source"}],"content":"answer"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+      response.end('data: {"choices":[{"delta":{"annotations":[{"type":"url_citation","url":"https://example.com/a","title":"Example","summary":"Source"}],"content":"answer"}}]}\n\ndata: {"choices":[{"delta":{"annotations":[{"type":"url_citation","url":"https://example.com/a","title":"Duplicate"},{"type":"url_citation","url":"https://example.com/b","title":"Second"}]},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
     const seen: string[] = [];
     const result = await new MiMoProvider(model(url)).complete({
@@ -74,8 +89,57 @@ describe("MiMoProvider", () => {
       signal: new AbortController().signal,
       onCitations: (citations) => { seen.push(...citations.map((citation) => citation.url)); },
     });
-    expect(seen).toEqual(["https://example.com/a"]);
+    expect(seen).toEqual(["https://example.com/a", "https://example.com/b"]);
+    expect(result.citations?.map((citation) => citation.url)).toEqual([
+      "https://example.com/a",
+      "https://example.com/b",
+    ]);
     expect(result.citations?.[0]).toMatchObject({ title: "Example", url: "https://example.com/a" });
+  });
+
+  it("normalizes legacy cache telemetry when detailed usage is absent", async () => {
+    const url = await serve(servers, (_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_cache_hit_tokens":7,"prompt_cache_miss_tokens":3,"completion_tokens":2,"total_tokens":12}}\n\ndata: [DONE]\n\n');
+    });
+    const result = await new MiMoProvider(model(url)).complete(simpleRequest());
+    expect(result.usage).toMatchObject({
+      promptTokens: 10,
+      cacheHitTokens: 7,
+      cacheMissTokens: 3,
+    });
+  });
+
+  it("merges search and token telemetry delivered in separate chunks", async () => {
+    const url = await serve(servers, (_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end('data: {"choices":[],"usage":{"web_search_usage":{"tool_usage":2,"page_usage":6}}}\n\ndata: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":8}}}\n\ndata: [DONE]\n\n');
+    });
+    const result = await new MiMoProvider(model(url)).complete(simpleRequest());
+    expect(result.usage).toMatchObject({
+      promptTokens: 10,
+      completionTokens: 2,
+      totalTokens: 12,
+      cacheHitTokens: 8,
+      cacheMissTokens: 2,
+      webSearchCalls: 2,
+      webSearchPages: 6,
+    });
+  });
+
+  it("merges cache and completion counts delivered in separate usage chunks", async () => {
+    const url = await serve(servers, (_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end('data: {"choices":[],"usage":{"prompt_cache_hit_tokens":100}}\n\ndata: {"choices":[],"usage":{"prompt_cache_miss_tokens":50}}\n\ndata: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"completion_tokens":20,"total_tokens":120}}\n\ndata: [DONE]\n\n');
+    });
+    const result = await new MiMoProvider(model(url)).complete(simpleRequest());
+    expect(result.usage).toMatchObject({
+      promptTokens: 150,
+      completionTokens: 20,
+      totalTokens: 170,
+      cacheHitTokens: 100,
+      cacheMissTokens: 50,
+    });
   });
 
   it("retries a disconnected stream only before model output", async () => {
@@ -84,6 +148,20 @@ describe("MiMoProvider", () => {
       requests += 1;
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end(requests === 1 ? "" : 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+    const result = await new MiMoProvider(model(url)).complete(simpleRequest());
+    expect(result.message.content).toBe("ok");
+    expect(requests).toBe(2);
+  });
+
+  it("retries buffered output when no callback observed it", async () => {
+    let requests = 0;
+    const url = await serve(servers, (_request, response) => {
+      requests += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(requests === 1
+        ? 'data: {"choices":[{"delta":{"content":"discarded"}}]}\n\n'
+        : 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
     const result = await new MiMoProvider(model(url)).complete(simpleRequest());
     expect(result.message.content).toBe("ok");
@@ -117,6 +195,12 @@ describe("MiMoProvider", () => {
     expect(requests).toBe(1);
   });
 
+  it("times out while waiting for response headers", async () => {
+    const url = await serve(servers, () => undefined);
+    await expect(new MiMoProvider(model(url), { idleTimeoutMs: 20 }).complete(simpleRequest()))
+      .rejects.toThrow(/stalled|aborted/i);
+  });
+
   it("replays complete reasoning content with historical tool calls", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     let requestCount = 0;
@@ -148,6 +232,51 @@ describe("MiMoProvider", () => {
       reasoning_content: "must inspect",
       tool_calls: [{ id: "call_a" }],
     });
+    expect((bodies[1]?.messages as Array<Record<string, unknown>>)[2]).toEqual({
+      role: "tool",
+      tool_call_id: "call_a",
+      content: "contents",
+    });
+  });
+
+  it("rejects incomplete reasoning and mispaired tool history before requesting MiMo", async () => {
+    let requests = 0;
+    const url = await serve(servers, (_request, response) => {
+      requests += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end('data: {"choices":[{"delta":{"content":"unexpected"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+    const provider = new MiMoProvider(model(url));
+    await expect(provider.complete({
+      ...simpleRequest(),
+      messages: [
+        { role: "user", content: "inspect" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call_a", type: "function", function: { name: "read_file", arguments: "{}" } }],
+        },
+        { role: "tool", tool_call_id: "call_a", content: "result" },
+      ],
+    })).rejects.toThrow("missing reasoning_content");
+    await expect(provider.complete({
+      ...simpleRequest(),
+      messages: [
+        { role: "user", content: "inspect" },
+        {
+          role: "assistant",
+          content: null,
+          reasoning_content: "inspect both",
+          tool_calls: [
+            { id: "call_a", type: "function", function: { name: "read_file", arguments: "{}" } },
+            { id: "call_b", type: "function", function: { name: "read_file", arguments: "{}" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_b", content: "second" },
+        { role: "tool", tool_call_id: "call_a", content: "first" },
+      ],
+    })).rejects.toThrow("call_a is missing its ordered tool result");
+    expect(requests).toBe(0);
   });
 
   it("fails closed when a session cache prefix changes", async () => {
@@ -167,6 +296,41 @@ describe("MiMoProvider", () => {
     })).rejects.toThrow("cache prefix changed");
   });
 
+  it("accepts append-only cache history and rejects rewritten messages", async () => {
+    let requests = 0;
+    const url = await serve(servers, (_request, response) => {
+      requests += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+    const provider = new MiMoProvider(model(url));
+    const initial = [
+      { role: "system" as const, content: "stable" },
+      { role: "user" as const, content: "first" },
+    ];
+    await provider.complete({ ...simpleRequest(), messages: initial, cacheScope: "agent_1" });
+    await provider.complete({
+      ...simpleRequest(),
+      messages: [...initial, { role: "assistant" as const, content: "ok" }, { role: "user" as const, content: "second" }],
+      cacheScope: "agent_1",
+    });
+    await expect(provider.complete({
+      ...simpleRequest(),
+      messages: [...initial.slice(0, 1), { role: "user" as const, content: "rewritten" }],
+      cacheScope: "agent_1",
+    })).rejects.toThrow("message history was rewritten");
+    expect(requests).toBe(2);
+  });
+
+  it("rejects duplicate completed tool-call ids", async () => {
+    const url = await serve(servers, (_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"duplicate","function":{"name":"first","arguments":"{}"}},{"index":1,"id":"duplicate","function":{"name":"second","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n');
+    });
+    await expect(new MiMoProvider(model(url)).complete(simpleRequest()))
+      .rejects.toThrow("duplicate tool call id duplicate");
+  });
+
   it("parses split CRLF boundaries and a final usage-only chunk", async () => {
     const url = await serve(servers, (_request, response) => {
       response.writeHead(200, { "content-type": "text/event-stream" });
@@ -182,7 +346,6 @@ describe("MiMoProvider", () => {
 function model(baseUrl: string): ResolvedModel {
   return {
     name: "mimo-v2.5-pro",
-    vendor: "mimo",
     model: "mimo-v2.5-pro",
     billing: "pay-as-you-go",
     baseUrl,

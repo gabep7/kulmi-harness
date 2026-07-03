@@ -46,6 +46,7 @@ function renderText(
       break;
     case "tool.finished":
       process.stderr.write(`${event.isError ? pc.red("×") : pc.green("✓")} ${event.tool} ${pc.dim(`${event.durationMs}ms`)}\n`);
+      if (event.diff) process.stderr.write(`${pc.dim(event.diff)}\n`);
       break;
     case "plan.updated": {
       const done = event.steps.filter((step) => step.status === "completed").length;
@@ -60,9 +61,14 @@ function renderText(
       break;
     case "usage":
       if (event.usage.totalTokens > 0) {
+        const cacheInput = event.usage.cacheHitTokens + event.usage.cacheMissTokens;
+        const cacheRate = cacheInput > 0 ? Math.round(event.usage.cacheHitTokens / cacheInput * 100) : 0;
+        const searchUsage = event.usage.webSearchCalls
+          ? `, ${event.usage.webSearchCalls} searches, ${event.usage.webSearchPages ?? 0} pages`
+          : "";
         process.stderr.write(
           pc.dim(
-            `tokens ${event.usage.totalTokens} (${event.usage.cacheHitTokens} cached, ${event.usage.cacheMissTokens} new, ${event.usage.reasoningTokens ?? 0} thinking)\n`,
+            `tokens ${event.usage.totalTokens} (${event.usage.cacheHitTokens} cached, ${event.usage.cacheMissTokens} new, ${cacheRate}% cache, ${event.usage.reasoningTokens ?? 0} thinking${searchUsage})\n`,
           ),
         );
       }

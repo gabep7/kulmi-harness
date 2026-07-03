@@ -38,10 +38,10 @@ describe("ToolRegistry", () => {
       freeWebSearchTool({ mode: "free", resultLimit: 5, provider: "auto", searxngUrl: "" }),
       fetchUrlTool(),
     ]);
-    expect(registry.names()).toHaveLength(21);
-    expect(Buffer.byteLength(JSON.stringify(registry.providerTools()), "utf8")).toBeLessThan(10_000);
+    expect(registry.names()).toHaveLength(22);
+    expect(Buffer.byteLength(JSON.stringify(registry.providerTools()), "utf8")).toBeLessThan(10_500);
     expect(Buffer.byteLength(JSON.stringify(
       registry.providerTools().filter((tool) => tool.function.name !== "start_task"),
-    ), "utf8")).toBeLessThan(9_500);
+    ), "utf8")).toBeLessThan(10_000);
   });
 });
