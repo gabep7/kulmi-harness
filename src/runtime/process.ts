@@ -1,5 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
-import { accessSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import {
+  accessSync,
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { constants } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { SandboxConfig } from "../config/config.js";
@@ -226,6 +234,9 @@ export function buildSandboxInvocation(options: {
     if (root === workspaceRoot || root === sandboxRoot || isInside(workspaceRoot, root) || isInside(sandboxRoot, root)) continue;
     args.push("--ro-bind", root, root);
   }
+  for (const [target, path] of linuxFilesystemAliases()) {
+    args.push("--symlink", target, path);
+  }
   args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
   args.push("--bind", workspaceRoot, workspaceRoot);
   args.push("--bind", sandboxRoot, sandboxRoot);
@@ -234,6 +245,18 @@ export function buildSandboxInvocation(options: {
   }
   args.push("--chdir", cwd, "--", options.shell, ...options.shellArgs);
   return { command: executablePath, args, backend: "bubblewrap" };
+}
+
+function linuxFilesystemAliases(): Array<[target: string, path: string]> {
+  const aliases: Array<[target: string, path: string]> = [];
+  for (const path of ["/bin", "/sbin", "/lib", "/lib64"]) {
+    try {
+      if (lstatSync(path).isSymbolicLink()) aliases.push([readlinkSync(path), path]);
+    } catch {
+      // Missing compatibility aliases are valid on non-merged layouts.
+    }
+  }
+  return aliases;
 }
 
 function macSandboxProfile(options: {
