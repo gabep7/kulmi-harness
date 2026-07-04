@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { accessSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { constants } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -147,9 +147,29 @@ export function sandboxAvailability(
   }
   if (platform === "linux") {
     const path = findExecutable("bwrap", env.PATH);
-    return path
-      ? { available: true, backend: "bubblewrap", detail: path }
-      : { available: false, backend: "bubblewrap", detail: "install the bubblewrap package to provide bwrap" };
+    if (!path) {
+      return { available: false, backend: "bubblewrap", detail: "install the bubblewrap package to provide bwrap" };
+    }
+    const probe = spawnSync(path, [
+      "--die-with-parent",
+      "--unshare-all",
+      "--ro-bind",
+      "/",
+      "/",
+      "--",
+      "/bin/true",
+    ], {
+      encoding: "utf8",
+      env,
+      timeout: 5_000,
+    });
+    if (probe.status === 0) return { available: true, backend: "bubblewrap", detail: path };
+    const reason = (probe.stderr || probe.error?.message || `exit ${probe.status ?? "unknown"}`).trim();
+    return {
+      available: false,
+      backend: "bubblewrap",
+      detail: `${path} cannot create the required namespaces: ${reason}. Check Ubuntu AppArmor user-namespace policy`,
+    };
   }
   return { available: false, backend: "unsupported", detail: `unsupported platform ${platform}` };
 }

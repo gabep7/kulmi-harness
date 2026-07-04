@@ -74,7 +74,11 @@ command -v git >/dev/null 2>&1 || fail "git is required"
 
 case "$(uname -s)" in
   Darwin) [ -x /usr/bin/sandbox-exec ] || fail "macOS sandbox-exec is required" ;;
-  Linux) command -v bwrap >/dev/null 2>&1 || fail "bubblewrap is required on Linux; install the bubblewrap package" ;;
+  Linux)
+    command -v bwrap >/dev/null 2>&1 || fail "bubblewrap is required on Linux; install the bubblewrap package"
+    bwrap --die-with-parent --unshare-all --ro-bind / / -- /bin/true 2>/dev/null || \
+      fail "bubblewrap cannot create the required namespaces; check Ubuntu AppArmor user-namespace policy"
+    ;;
   *) fail "only macOS and Linux are supported" ;;
 esac
 

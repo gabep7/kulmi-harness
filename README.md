@@ -10,7 +10,7 @@ The provider adapter talks directly to MiMo. It preserves streamed `reasoning_co
 - Node.js 22+
 - npm
 - Git
-- Linux only: `bubblewrap`, providing the `bwrap` command
+- Linux only: `bubblewrap`, providing a working `bwrap` command with permission to create unprivileged user and network namespaces
 - A pay-as-you-go MiMo key beginning with `sk-`, or a Token Plan key beginning with `tp-`. The first-run terminal setup can store it in the system keychain.
 
 ## Install
@@ -109,6 +109,8 @@ message_history = "truncate" # truncate or keep
 ```
 
 The safe defaults require an available OS sandbox, deny command network access, and remove the undone turn from the active model and UI transcript. `keep` preserves the undone messages and appends an explicit marker telling MiMo that their file changes were reverted. `off` runs project commands without OS containment and should only be used deliberately.
+
+On Ubuntu systems that restrict unprivileged user namespaces through AppArmor, `bwrap` can be installed but unusable. `kulmi doctor` performs a real namespace probe and reports this state. Configure an administrator-approved AppArmor exception for `bwrap`; do not disable Kulmi's sandbox merely to bypass the check.
 
 Running `kulmi` opens the responsive TUI. Running `kulmi exec` keeps the stable headless interface for scripts and CI.
 

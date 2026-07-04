@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -12,6 +12,17 @@ import { disposeChildEnvironment, safeChildEnvironment } from "../src/security/e
 const exec = promisify(execFile);
 
 describe("command sandbox", () => {
+  it("reports an installed but unusable Linux sandbox backend", async () => {
+    const binaries = await mkdtemp(join(tmpdir(), "kulmi-bwrap-probe-"));
+    await symlink("/usr/bin/false", join(binaries, "bwrap"));
+
+    expect(sandboxAvailability("linux", { PATH: binaries })).toMatchObject({
+      available: false,
+      backend: "bubblewrap",
+    });
+    expect(sandboxAvailability("linux", { PATH: binaries }).detail).toContain("cannot create the required namespaces");
+  });
+
   it("builds deny-by-default macOS and isolated Linux invocations", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "kulmi-sandbox-plan-"));
     await mkdir(join(workspace, ".git"));
