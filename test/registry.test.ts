@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { fileTools } from "../src/tools/files.js";
 import { readArtifactTool } from "../src/tools/artifacts.js";
+import { astGrepTool } from "../src/tools/ast-grep.js";
+import { lspTool } from "../src/tools/lsp.js";
 import { progressTools } from "../src/tools/progress.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import { shellTool } from "../src/tools/shell.js";
@@ -31,6 +33,8 @@ describe("ToolRegistry", () => {
     const registry = new ToolRegistry([
       ...fileTools(),
       readArtifactTool,
+      astGrepTool,
+      lspTool,
       shellTool,
       ...progressTools(),
       ...subagentTools(),
@@ -38,10 +42,10 @@ describe("ToolRegistry", () => {
       freeWebSearchTool({ mode: "free", resultLimit: 5, provider: "auto", searxngUrl: "" }),
       fetchUrlTool(),
     ]);
-    expect(registry.names()).toHaveLength(22);
-    expect(Buffer.byteLength(JSON.stringify(registry.providerTools()), "utf8")).toBeLessThan(10_500);
+    expect(registry.names()).toHaveLength(25);
+    expect(Buffer.byteLength(JSON.stringify(registry.providerTools()), "utf8")).toBeLessThan(14_000);
     expect(Buffer.byteLength(JSON.stringify(
       registry.providerTools().filter((tool) => tool.function.name !== "start_task"),
-    ), "utf8")).toBeLessThan(10_000);
+    ), "utf8")).toBeLessThan(13_500);
   });
 });

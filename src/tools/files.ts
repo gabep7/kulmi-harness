@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative } from "node:path";
+import { dirname, extname, isAbsolute, relative } from "node:path";
 import fg from "fast-glob";
 import { z } from "zod";
 import { combineDiffs, createTextDiff } from "../core/diff.js";
@@ -8,19 +8,30 @@ import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.
 import { defineTool, type AnyTool } from "./types.js";
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
+const summarizableSourceExtensions: Record<string, true> = {
+  ".cjs": true,
+  ".cts": true,
+  ".js": true,
+  ".jsx": true,
+  ".mjs": true,
+  ".mts": true,
+  ".ts": true,
+  ".tsx": true,
+};
 
 export function fileTools(): AnyTool[] {
-  return [readFileTool, globTool, grepTool, writeFileTool, editFileTool, editFilesTool, deleteFileTool];
+  return [readFileTool, globTool, grepTool, writeFileTool, editFileTool, editFilesTool, deleteFileTool, replaceByLineRangeTool];
 }
 
 const readFileTool = defineTool({
   name: "read_file",
   description:
-    "Read a UTF-8 text file from the workspace with line numbers. Use offset and limit for large files.",
+    "Read UTF-8 file; mode='lines' for exact ranges.",
   schema: z.object({
     path: z.string().min(1),
     offset: z.number().int().positive().default(1),
     limit: z.number().int().positive().max(2_000).default(400),
+    mode: z.enum(["summary", "lines"]).default("summary"),
   }),
   readOnly: true,
   async execute(context, input) {
@@ -36,17 +47,90 @@ const readFileTool = defineTool({
     if (info.size > 2_000_000) throw new Error(`${input.path} exceeds the 2 MB read limit`);
     const content = textDecoder.decode(await readFile(path));
     const lines = content.split("\n");
-    const start = input.offset - 1;
-    const selected = lines.slice(start, start + input.limit);
-    const width = String(Math.min(lines.length, start + selected.length)).length;
-    const rendered = selected
-      .map((line, index) => `${String(start + index + 1).padStart(width)}\t${line}`)
-      .join("\n");
+    if (input.mode === "summary") {
+      const summary = summarizeSource(input.path, content, lines, input.limit);
+      if (summary) return { content: summary };
+    }
     return {
-      content: `${rendered}\n\n[${selected.length} of ${lines.length} lines, sha256:${sha256(content)}]`,
+      content: renderNumberedLines(content, lines, input.offset, input.limit),
     };
   },
 });
+
+function renderNumberedLines(content: string, lines: string[], offset: number, limit: number): string {
+  const start = offset - 1;
+  const selected = lines.slice(start, start + limit);
+  const width = String(Math.min(lines.length, start + selected.length)).length;
+  const rendered = selected
+    .map((line, index) => `${String(start + index + 1).padStart(width)}\t${line}`)
+    .join("\n");
+  return `${rendered}\n\n[${selected.length} of ${lines.length} lines, sha256:${sha256(content)}]`;
+}
+
+function summarizeSource(path: string, content: string, lines: string[], limit: number): string | undefined {
+  if (!summarizableSourceExtensions[extname(path)] || lines.length <= Math.min(limit, 160)) return undefined;
+  const selected = selectStructuralLines(lines, limit);
+  if (selected.length < 4) return undefined;
+  const selectedSet = new Set(selected);
+  const width = String(lines.length).length;
+  const rendered: string[] = [];
+  let previous = 0;
+  for (const lineNumber of selected) {
+    if (previous > 0 && lineNumber > previous + 1) rendered.push("…");
+    rendered.push(`${String(lineNumber).padStart(width)}\t${lines[lineNumber - 1]}`);
+    previous = lineNumber;
+  }
+  const ranges = elidedRanges(lines.length, selectedSet).slice(0, 8).join(", ");
+  const truncated = selected.length >= limit ? "; summary truncated" : "";
+  return `${rendered.join("\n")}\n\n[structural summary${truncated}; ${selected.length} of ${lines.length} lines shown; re-read exact ranges with mode='lines' and offset/limit; elided ranges: ${ranges}; sha256:${sha256(content)}]`;
+}
+
+function selectStructuralLines(lines: string[], limit: number): number[] {
+  const selected = new Set<number>();
+  for (let index = 0; index < lines.length && selected.size < limit; index++) {
+    const line = lines[index] ?? "";
+    const trimmed = line.trim();
+    const indent = line.length - line.trimStart().length;
+    if (!trimmed) continue;
+    if (
+      /^import\s/.test(trimmed) ||
+      /^export\s+(?:type\s+)?\{/.test(trimmed) ||
+      /^export\s+\*\s+from\s+/.test(trimmed)
+    ) {
+      if (selected.size < limit) selected.add(index + 1);
+      continue;
+    }
+    if (indent === 0 && /^(?:export\s+)?(?:abstract\s+)?(?:async\s+)?(?:function|class|interface|type|enum)\b/.test(trimmed)) {
+      if (selected.size < limit) selected.add(index + 1);
+      continue;
+    }
+    if (indent === 0 && /^(?:export\s+)?(?:const|let|var)\s+[A-Za-z_$][\w$]*/.test(trimmed)) {
+      if (selected.size < limit) selected.add(index + 1);
+      continue;
+    }
+    if (indent > 0 && indent <= 4 && /^(?:public\s+|private\s+|protected\s+|static\s+|async\s+|readonly\s+)*(?:[A-Za-z_$][\w$]*|#\w+)\s*[(:=]/.test(trimmed)) {
+      if (selected.size < limit) selected.add(index + 1);
+    }
+  }
+  return [...selected].sort((left, right) => left - right);
+}
+
+function elidedRanges(totalLines: number, selected: Set<number>): string[] {
+  const ranges: string[] = [];
+  let start: number | undefined;
+  for (let line = 1; line <= totalLines; line++) {
+    if (selected.has(line)) {
+      if (start !== undefined) {
+        ranges.push(start === line - 1 ? String(start) : `${start}-${line - 1}`);
+        start = undefined;
+      }
+    } else {
+      start ??= line;
+    }
+  }
+  if (start !== undefined) ranges.push(start === totalLines ? String(start) : `${start}-${totalLines}`);
+  return ranges;
+}
 
 const globTool = defineTool({
   name: "glob",
@@ -234,6 +318,7 @@ const editFileTool = defineTool({
     new_text: z.string(),
     expected_sha256: z.string().regex(/^[a-f0-9]{16}$/),
     replace_all: z.boolean().default(false),
+    allow_stale_sha256: z.boolean().default(false),
   }),
   readOnly: false,
   async execute(context, input) {
@@ -247,8 +332,13 @@ const editFileTool = defineTool({
     assertNotSensitivePath(path);
     const current = textDecoder.decode(await readFile(path));
     const fingerprint = sha256(current);
+    let staleRecoveryWarning: string | undefined;
     if (input.expected_sha256 !== fingerprint) {
-      throw new Error(`stale edit for ${input.path}: expected ${input.expected_sha256}, found ${fingerprint}`);
+      if (input.allow_stale_sha256 && current.includes(input.old_text)) {
+        staleRecoveryWarning = `Warning: expected sha256 ${input.expected_sha256} is stale (found ${fingerprint}), but old_text was located in the current file content. Proceeding with edit.`;
+      } else {
+        throw new Error(`stale edit for ${input.path}: expected ${input.expected_sha256}, found ${fingerprint}`);
+      }
     }
     const occurrences = current.split(input.old_text).length - 1;
     if (occurrences === 0) throw new Error(`old_text not found in ${input.path}`);
@@ -267,18 +357,24 @@ const editFileTool = defineTool({
     }
     await context.checkpoint.capture(path);
     await writeAtomic(path, next);
+    const actualContent = textDecoder.decode(await readFile(path));
+    if (next !== actualContent) {
+      throw new Error(`post-edit verification failed for ${input.path}: file content does not match expected state after write. This may indicate a concurrent modification.`);
+    }
     const diff = createTextDiff(rel, current, next);
     context.state.modifiedFiles.add(rel);
     context.state.revision += 1;
     delete context.state.completion;
+    const resultContent: Record<string, unknown> = {
+      path: rel,
+      replacements: input.replace_all ? occurrences : 1,
+      additions: diff?.additions ?? 0,
+      deletions: diff?.deletions ?? 0,
+      sha256: sha256(actualContent),
+    };
+    if (staleRecoveryWarning) resultContent.warning = staleRecoveryWarning;
     return {
-      content: JSON.stringify({
-        path: rel,
-        replacements: input.replace_all ? occurrences : 1,
-        additions: diff?.additions ?? 0,
-        deletions: diff?.deletions ?? 0,
-        sha256: sha256(next),
-      }),
+      content: JSON.stringify(resultContent),
       ...(diff ? { diff: diff.text } : {}),
     };
   },
@@ -390,6 +486,78 @@ const editFilesTool = defineTool({
         changed_files: changed.length,
       }),
       ...(combinedDiff ? { diff: combinedDiff } : {}),
+    };
+  },
+});
+
+const replaceByLineRangeTool = defineTool({
+  name: "replace_by_line_range",
+  description:
+    "Replace a line range in a file. Use with line numbers from read_file output. start_line and end_line are inclusive and 1-indexed.",
+  schema: z.object({
+    path: z.string().min(1),
+    start_line: z.number().int().min(1),
+    end_line: z.number().int().min(1),
+    new_text: z.string(),
+    expected_sha256: z.string().regex(/^[a-f0-9]{16}$/),
+    allow_stale_sha256: z.boolean().default(false),
+  }),
+  readOnly: false,
+  async execute(context, input) {
+    if (context.autonomy === "read") throw new Error("replace_by_line_range requires low autonomy or higher");
+    const path = await resolveWorkspacePath({
+      workspaceRoot: context.workspaceRoot,
+      cwd: context.cwd,
+      input: input.path,
+      mustExist: true,
+    });
+    assertNotSensitivePath(path);
+    const current = textDecoder.decode(await readFile(path));
+    const fingerprint = sha256(current);
+    let staleRecoveryWarning: string | undefined;
+    if (input.expected_sha256 !== fingerprint) {
+      if (input.allow_stale_sha256) {
+        staleRecoveryWarning = `Warning: expected sha256 ${input.expected_sha256} is stale (found ${fingerprint}). Proceeding with replace_by_line_range despite stale hash.`;
+      } else {
+        throw new Error(`stale edit for ${input.path}: expected ${input.expected_sha256}, found ${fingerprint}`);
+      }
+    }
+    const lines = current.split("\n");
+    if (input.start_line < 1) throw new Error(`start_line must be >= 1`);
+    if (input.end_line > lines.length) throw new Error(`end_line ${input.end_line} exceeds file length ${lines.length}`);
+    if (input.start_line > input.end_line) throw new Error(`start_line ${input.start_line} > end_line ${input.end_line}`);
+    const replacement = input.new_text.split("\n");
+    const before = lines.slice(0, input.start_line - 1);
+    const after = lines.slice(input.end_line);
+    const next = [...before, ...replacement, ...after].join("\n");
+    const rel = relative(context.workspaceRoot, path);
+    if (next === current) {
+      return {
+        content: JSON.stringify({ path: rel, unchanged: true, sha256: fingerprint }),
+        mutated: false,
+      };
+    }
+    await context.checkpoint.capture(path);
+    await writeAtomic(path, next);
+    const actualContent = textDecoder.decode(await readFile(path));
+    if (next !== actualContent) {
+      throw new Error(`post-edit verification failed for ${input.path}: file content does not match expected state after write. This may indicate a concurrent modification.`);
+    }
+    const diff = createTextDiff(rel, current, next);
+    context.state.modifiedFiles.add(rel);
+    context.state.revision += 1;
+    delete context.state.completion;
+    const resultContent: Record<string, unknown> = {
+      path: rel,
+      replacements: 1,
+      additions: diff?.additions ?? 0,
+      deletions: diff?.deletions ?? 0,
+      sha256: sha256(actualContent),
+    };
+    if (staleRecoveryWarning) resultContent.warning = staleRecoveryWarning;
+    return {
+      content: JSON.stringify(resultContent),
+      ...(diff ? { diff: diff.text } : {}),
     };
   },
 });

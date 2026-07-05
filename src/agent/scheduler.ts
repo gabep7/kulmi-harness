@@ -11,6 +11,7 @@ export interface WorkerJob {
   mode: WorkerMode;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   result?: string;
+  resultArtifactId?: string;
   error?: string;
   createdAt: string;
   startedAt?: string;
@@ -31,6 +32,7 @@ export interface WorkerJob {
 type WorkerRunner = (job: WorkerJob, signal: AbortSignal) => Promise<string>;
 type WorkerIntegrator = (job: WorkerJob) => Promise<string[]>;
 type WorkerSteerer = (job: WorkerJob, message: string) => void;
+type WorkerResultMaterializer = (job: WorkerJob, result: string) => Promise<{ content: string; artifactId?: string }>;
 
 export class SubagentScheduler implements SubagentApi {
   readonly #jobs = new Map<string, WorkerJob>();
@@ -41,6 +43,7 @@ export class SubagentScheduler implements SubagentApi {
   readonly #integrateWorker: WorkerIntegrator | undefined;
   readonly #onChange: ((jobs: WorkerJob[]) => Promise<void>) | undefined;
   readonly #steerWorker: WorkerSteerer | undefined;
+  readonly #materializeResult: WorkerResultMaterializer | undefined;
 
   constructor(
     maxConcurrency: number,
@@ -49,12 +52,14 @@ export class SubagentScheduler implements SubagentApi {
     onChange?: (jobs: WorkerJob[]) => Promise<void>,
     initialJobs: WorkerJob[] = [],
     steerWorker?: WorkerSteerer,
+    materializeResult?: WorkerResultMaterializer,
   ) {
     this.#semaphore = new Semaphore(maxConcurrency);
     this.#runWorker = runWorker;
     this.#integrateWorker = integrateWorker;
     this.#onChange = onChange;
     this.#steerWorker = steerWorker;
+    this.#materializeResult = materializeResult;
     for (const restored of initialJobs) {
       const job = structuredClone(restored);
       if (job.status === "queued" || job.status === "running") {
@@ -230,8 +235,13 @@ export class SubagentScheduler implements SubagentApi {
       job.startedAt = new Date().toISOString();
       await this.persist();
       const result = await this.#runWorker(job, signal);
+      const materialized = this.#materializeResult
+        ? await this.#materializeResult(job, result)
+        : { content: result };
       job.status = "completed";
-      job.result = result;
+      job.result = materialized.content;
+      if (materialized.artifactId) job.resultArtifactId = materialized.artifactId;
+      else delete job.resultArtifactId;
       job.finishedAt = new Date().toISOString();
       await this.persist();
       return JSON.stringify(job, null, 2);

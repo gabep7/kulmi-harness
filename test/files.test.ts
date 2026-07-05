@@ -73,6 +73,83 @@ describe("file tools", () => {
     })).resolves.toMatchObject({ content: "no matches", isError: false });
   });
 
+  it("summarizes large TypeScript sources by default and preserves exact line reads", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "kulmi-files-read-")));
+    const session = await realpath(await mkdtemp(join(tmpdir(), "kulmi-files-read-session-")));
+    const lines = [
+      'import { value } from "./dep";',
+      "",
+      "export interface Contract {",
+      "  id: string;",
+      "}",
+      "",
+      "export function important(input: string): string {",
+      '  const secretBody = "body must only appear in exact mode";',
+      "  return `${input}:${secretBody}:${value}`;",
+      "}",
+      "",
+      "export class Worker {",
+      "  run(name: string): string {",
+      '    const nestedBody = "nested body exact only";',
+      "    return name + nestedBody;",
+      "  }",
+      "}",
+      ...Array.from({ length: 170 }, (_, index) => `// filler ${index + 1}`),
+      "",
+    ];
+    const content = lines.join("\n");
+    await writeFile(join(root, "large.ts"), content);
+    const registry = new ToolRegistry(fileTools());
+    const context = {
+      workspaceRoot: root,
+      cwd: root,
+      autonomy: "read" as const,
+      signal: new AbortController().signal,
+      events: new EventBus(),
+      state: {
+        agentId: "agent",
+        mode: "task" as const,
+        status: "running" as const,
+        plan: [],
+        modifiedFiles: new Set<string>(),
+        verifications: [],
+        revision: 0,
+      },
+      checkpoint: new CheckpointStore(session, root),
+      artifacts: new ArtifactStore(session),
+      commandTimeoutMs: 10_000,
+      maxOutputBytes: 100_000,
+    };
+
+    const summary = await registry.execute({
+      name: "read_file",
+      argumentsJson: JSON.stringify({ path: "large.ts" }),
+      callId: "read-summary",
+      context,
+    });
+    expect(summary.isError, summary.content).toBe(false);
+    expect(summary.content).toContain("export function important(input: string): string {");
+    expect(summary.content).toContain("export class Worker {");
+    expect(summary.content).not.toContain("body must only appear in exact mode");
+    expect(summary.content).not.toContain("nested body exact only");
+    expect(summary.content).toContain("…");
+    expect(summary.content).toContain("[structural summary;");
+    expect(summary.content).toContain("re-read exact ranges with mode='lines' and offset/limit");
+    expect(summary.content).toContain(`sha256:${digest(content)}`);
+
+    const exact = await registry.execute({
+      name: "read_file",
+      argumentsJson: JSON.stringify({ path: "large.ts", mode: "lines", offset: 7, limit: 4 }),
+      callId: "read-lines",
+      context,
+    });
+    expect(exact.isError, exact.content).toBe(false);
+    expect(exact.content).toContain(" 7\texport function important(input: string): string {");
+    expect(exact.content).toContain(' 8\t  const secretBody = "body must only appear in exact mode";');
+    expect(exact.content).toContain("10\t}");
+    expect(exact.content).toContain(`[4 of ${content.split("\n").length} lines, sha256:${digest(content)}]`);
+  });
+
   it("emits a bounded diff and does not count no-op edits as revisions", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "kulmi-files-")));
     const session = await realpath(await mkdtemp(join(tmpdir(), "kulmi-files-session-")));

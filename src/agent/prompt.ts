@@ -5,6 +5,8 @@ export function buildSystemPrompt(options: {
   projectInstructions: string;
   readOnly: boolean;
   skillsInventory?: string;
+  rulesInventory?: string;
+  agentsInventory?: string;
 }): string {
   const mode = modeContract(options.mode);
   const authority = options.readOnly
@@ -28,7 +30,14 @@ Project instructions:
 ${options.projectInstructions.trim() || "None."}
 
 Available skills:
-${options.skillsInventory?.trim() || "None."}`;
+${options.skillsInventory?.trim() || "None."}
+
+Available rules:
+${options.rulesInventory?.trim() || "No rulebook rules were found."}
+Read relevant rules with read_rule before applying them.
+
+Custom agents:
+${options.agentsInventory?.trim() || "None."}`;
 }
 
 function modeContract(mode: AgentMode): string {

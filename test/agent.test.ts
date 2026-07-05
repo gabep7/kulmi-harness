@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -352,6 +352,96 @@ describe("Agent", () => {
     expect(agent.messages.some((message) =>
       message.role === "user" && message.content.includes("<compaction-summary>"))).toBe(true);
     expect(agent.messages[0]).toEqual({ role: "system", content: "stable" });
+  });
+
+  it("prunes only old bulky tool output from compaction summary input", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
+    const provider = new ScriptedProvider([textResponse("durable summary"), textResponse("continued")]);
+    const events = new EventBus();
+    const session = await SessionStore.create({ cwd: workspace, model: provider.model });
+    session.attach(events);
+    const oldLargeOutput = `old-head\n${"x".repeat(4_500)}\nOLD_SECRET_MIDDLE\n${"x".repeat(4_500)}\nold-tail`;
+    const liveLargeOutput = `live-head\n${"y".repeat(4_500)}\nLIVE_SECRET_MIDDLE\n${"y".repeat(4_500)}\nlive-tail`;
+    const messages: ProviderMessage[] = [
+      { role: "system", content: "stable" },
+      { role: "user", content: "old request" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "old-read", type: "function", function: { name: "read_file", arguments: "{\"path\":\"old.ts\"}" } }],
+      },
+      { role: "tool", tool_call_id: "old-read", name: "read_file", content: oldLargeOutput },
+      { role: "user", content: "empty search" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "empty-search", type: "function", function: { name: "grep", arguments: "{\"pattern\":\"missing\"}" } }],
+      },
+      { role: "tool", tool_call_id: "empty-search", name: "grep", content: "no matches" },
+      { role: "assistant", content: "old answer" },
+      { role: "user", content: "old decision" },
+      { role: "assistant", content: "decision recorded" },
+      { role: "user", content: "recent request at compaction boundary" },
+      { role: "assistant", content: "recent answer" },
+      { role: "user", content: "tail request" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "live-read", type: "function", function: { name: "read_file", arguments: "{\"path\":\"live.ts\"}" } }],
+      },
+      { role: "tool", tool_call_id: "live-read", name: "read_file", content: liveLargeOutput },
+      { role: "user", content: "tail after tool" },
+      { role: "assistant", content: "tail answer" },
+      { role: "user", content: "tail two" },
+      { role: "assistant", content: "tail answer two" },
+      { role: "user", content: "tail three" },
+      { role: "assistant", content: "tail answer three" },
+    ];
+    const state: RunState = {
+      agentId: "agent_prune_compact",
+      mode: "chat",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([]),
+      events,
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "stable",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "read",
+      maxSteps: 3,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 6_000,
+      messages,
+    });
+
+    expect((await agent.run("continue", new AbortController().signal)).text).toBe("continued");
+    const compactionUser = provider.requests[0]?.messages[1];
+    expect(compactionUser).toMatchObject({ role: "user" });
+    if (!compactionUser || compactionUser.role !== "user") throw new Error("missing compaction request");
+    const summaryInput = JSON.stringify(JSON.parse(compactionUser.content));
+    expect(summaryInput).toContain("[Tool result pruned before compaction:");
+    expect(summaryInput).toContain("[...pruned...]");
+    expect(summaryInput).not.toContain("OLD_SECRET_MIDDLE");
+    expect(summaryInput).toContain("[Uneventful result elided]");
+    expect(summaryInput).not.toContain("LIVE_SECRET_MIDDLE");
+
+    const archives = await readdir(join(session.path, "archives"));
+    expect(archives).toHaveLength(1);
+    const archivedMessages = await readFile(join(session.path, "archives", archives[0]!), "utf8");
+    expect(archivedMessages).toContain("OLD_SECRET_MIDDLE");
+    expect(archivedMessages).toContain("LIVE_SECRET_MIDDLE");
+    expect(JSON.stringify(agent.messages)).toContain("LIVE_SECRET_MIDDLE");
   });
 
   it("invalidates accepted completion when a later mutating tool runs", async () => {

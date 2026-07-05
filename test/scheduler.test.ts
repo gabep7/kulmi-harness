@@ -146,4 +146,39 @@ describe("SubagentScheduler", () => {
       integratedAt: expect.any(String),
     });
   });
+
+  it("stores materialized worker result previews with artifact IDs", async () => {
+    const scheduler = new SubagentScheduler(
+      1,
+      async () => "full worker result that belongs in an artifact",
+      undefined,
+      undefined,
+      [],
+      undefined,
+      async (_job, result) => ({
+        content: `preview:${result.slice(0, 18)}`,
+        artifactId: "artifact_worker_result",
+      }),
+    );
+    const signal = new AbortController().signal;
+    const spawned = JSON.parse(await scheduler.spawn({
+      prompt: "summarize expensive output",
+      mode: "explore",
+      background: true,
+      parentAgentId: "parent",
+      signal,
+    }));
+    if (!spawned || typeof spawned !== "object" || !("job_id" in spawned) || typeof spawned.job_id !== "string") {
+      throw new Error("spawn did not return a job ID");
+    }
+
+    const results = JSON.parse(await scheduler.wait([spawned.job_id], signal));
+    expect(results).toEqual([
+      expect.objectContaining({
+        status: "completed",
+        result: "preview:full worker result",
+        resultArtifactId: "artifact_worker_result",
+      }),
+    ]);
+  });
 });

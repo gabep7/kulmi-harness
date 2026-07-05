@@ -28,6 +28,13 @@ export interface SessionMetadata {
   createdAt: string;
   updatedAt: string;
   prompt?: string;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    cacheHitTokens: number;
+    cacheMissTokens: number;
+  };
 }
 
 export interface LoadedSession {
@@ -166,6 +173,28 @@ export class SessionStore {
     this.#metadata = {
       ...this.#metadata,
       status,
+      updatedAt: new Date().toISOString(),
+    };
+    await this.#writeMetadata();
+  }
+
+  async addUsage(tokens: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    cacheHitTokens: number;
+    cacheMissTokens: number;
+  }): Promise<void> {
+    const prev = this.#metadata.usage;
+    this.#metadata = {
+      ...this.#metadata,
+      usage: {
+        promptTokens: (prev?.promptTokens ?? 0) + tokens.promptTokens,
+        completionTokens: (prev?.completionTokens ?? 0) + tokens.completionTokens,
+        totalTokens: (prev?.totalTokens ?? 0) + tokens.totalTokens,
+        cacheHitTokens: (prev?.cacheHitTokens ?? 0) + tokens.cacheHitTokens,
+        cacheMissTokens: (prev?.cacheMissTokens ?? 0) + tokens.cacheMissTokens,
+      },
       updatedAt: new Date().toISOString(),
     };
     await this.#writeMetadata();

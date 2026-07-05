@@ -6,6 +6,21 @@ The provider adapter talks directly to MiMo. It preserves streamed `reasoning_co
 
 ## Requirements
 
+## v1.0
+
+Kulmi v1.0 adds code intelligence, lazy guidance, and edit reliability so the harness can develop itself:
+
+- **AST grep** (`ast_grep`): structural code search by syntax shape, not regex. Finds functions, imports, types, and call sites reliably.
+- **LSP integration** (`lsp`): jump to definition, find references, hover type info, and search workspace symbols via the TypeScript language server.
+- **Line-range editing** (`replace_by_line_range`): replace exact line ranges using line numbers from `read_file` output, with post-edit verification.
+- **Stale edit recovery**: edit tools can optionally proceed when the sha256 is stale but the target text is still found, with a warning.
+- **Lazy rulebook**: rules from `.kulmi/rules/*.md` are listed by name and description in the prompt; full content loads on demand via `read_rule`.
+- **Sticky rules**: `RULES.md` content re-attaches near the current turn after compaction so hard rules stay visible in long sessions.
+- **Custom agents**: `.kulmi/agents/*.md` define specialized subagents with their own system prompts, spawnable by name.
+- **@ imports**: `KULMI.md` and `AGENTS.md` support `@path` tokens that expand inline (max depth 3, max 32KB).
+- **Compaction file-op tracking**: summaries include which files were read and modified in the compacted history.
+
+
 - macOS or Linux
 - Node.js 22+
 - npm

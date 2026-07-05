@@ -43,6 +43,13 @@ const metadataSchema = z.object({
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
   prompt: z.string().optional(),
+  usage: z.object({
+    promptTokens: z.number().int().nonnegative().default(0),
+    completionTokens: z.number().int().nonnegative().default(0),
+    totalTokens: z.number().int().nonnegative().default(0),
+    cacheHitTokens: z.number().int().nonnegative().default(0),
+    cacheMissTokens: z.number().int().nonnegative().default(0),
+  }).strict().optional(),
 }).strict();
 
 const planStepSchema = z.object({
@@ -91,6 +98,7 @@ const workerSchema = z.object({
   mode: z.enum(["explore", "review", "implement"]),
   status: z.enum(["queued", "running", "completed", "failed", "cancelled"]),
   result: z.string().optional(),
+  resultArtifactId: z.string().optional(),
   error: z.string().optional(),
   createdAt: z.string().min(1),
   startedAt: z.string().optional(),

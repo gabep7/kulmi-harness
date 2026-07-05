@@ -1,37 +1,51 @@
 import { z } from "zod";
+import { readAgentPrompt, type AgentDefinition } from "../config/agents.js";
 import { defineTool, type AnyTool } from "./types.js";
 
-export function subagentTools(): AnyTool[] {
+export function subagentTools(customAgents?: AgentDefinition[]): AnyTool[] {
+  const byName = new Map((customAgents ?? []).map((agent) => [agent.name, agent]));
+  const agentNames = [...byName.keys()];
+  const spawnDescription = agentNames.length > 0
+    ? `Spawn a focused child agent with its own context and transcript. Explore and review workers are read-only. Implement workers use isolated git worktrees and may run in parallel; integrate their results explicitly. Custom agents available: ${agentNames.join(", ")}`
+    : "Spawn a focused child agent with its own context and transcript. Explore and review workers are read-only. Implement workers use isolated git worktrees and may run in parallel; integrate their results explicitly.";
+  const spawnAgentTool = defineTool({
+    name: "spawn_agent",
+    description: spawnDescription,
+    schema: z.object({
+      prompt: z.string().min(1).max(20_000),
+      description: z.string().min(1).max(120).optional(),
+      mode: z.enum(["explore", "review", "implement"]).optional(),
+      agent: z.string().optional(),
+      background: z.boolean().default(true),
+    }),
+    readOnly: false,
+    async execute(context, input) {
+      if (!context.subagents) throw new Error("subagents are unavailable in this agent");
+      let resolvedMode = input.mode;
+      let effectivePrompt = input.prompt;
+      if (input.agent) {
+        const custom = byName.get(input.agent);
+        if (!custom) throw new Error(`unknown agent ${input.agent}; available: ${agentNames.join(", ") || "none"}`);
+        resolvedMode = resolvedMode ?? custom.mode;
+        effectivePrompt = `${readAgentPrompt(custom)}\n\n${input.prompt}`;
+      }
+      resolvedMode = resolvedMode ?? "explore";
+      if (context.autonomy === "read" && resolvedMode === "implement") {
+        throw new Error("implement subagents require low autonomy or higher");
+      }
+      const content = await context.subagents.spawn({
+        prompt: effectivePrompt,
+        ...(input.description ? { description: input.description } : {}),
+        mode: resolvedMode,
+        background: input.background,
+        parentAgentId: context.state.agentId,
+        signal: context.signal,
+      });
+      return { content };
+    },
+  });
   return [spawnAgentTool, waitAgentsTool, inspectAgentTool, steerAgentTool, integrateAgentTool, cancelAgentTool, retryAgentTool];
 }
-
-const spawnAgentTool = defineTool({
-  name: "spawn_agent",
-  description:
-    "Spawn a focused child agent with its own context and transcript. Explore and review workers are read-only. Implement workers use isolated git worktrees and may run in parallel; integrate their results explicitly.",
-  schema: z.object({
-    prompt: z.string().min(1).max(20_000),
-    description: z.string().min(1).max(120).optional(),
-    mode: z.enum(["explore", "review", "implement"]).default("explore"),
-    background: z.boolean().default(true),
-  }),
-  readOnly: false,
-  async execute(context, input) {
-    if (!context.subagents) throw new Error("subagents are unavailable in this agent");
-    if (context.autonomy === "read" && input.mode === "implement") {
-      throw new Error("implement subagents require low autonomy or higher");
-    }
-    const content = await context.subagents.spawn({
-      prompt: input.prompt,
-      ...(input.description ? { description: input.description } : {}),
-      mode: input.mode,
-      background: input.background,
-      parentAgentId: context.state.agentId,
-      signal: context.signal,
-    });
-    return { content };
-  },
-});
 
 const waitAgentsTool = defineTool({
   name: "wait_agents",

@@ -50,6 +50,7 @@ export class Agent {
   readonly #options: AgentOptions;
   readonly #messages: ProviderMessage[];
   readonly #steering: string[] = [];
+  #stickyContext = "";
   #cacheEpoch = 0;
   #running = false;
 
@@ -85,6 +86,10 @@ export class Agent {
       if (this.#messages.at(-1) === context) this.#messages.pop();
       throw error;
     }
+  }
+
+  setStickyContext(content: string): void {
+    this.#stickyContext = content;
   }
 
   async applyUndo(options: {
@@ -390,7 +395,12 @@ export class Agent {
     while (boundary > 1 && this.#messages[boundary]?.role === "tool") boundary -= 1;
     if (boundary <= 1) throw new Error("context limit reached before a safe compaction boundary was available");
 
-    const compacted = this.#messages.slice(1, boundary);
+    const { messages: compacted, prunedToolResults } = pruneCompactionMessages(this.#messages.slice(1, boundary));
+    const { readFiles, modifiedFiles } = extractFileOps(compacted);
+    const fileOpsSection = formatFileOpsSection(readFiles, modifiedFiles);
+    const fileOpsMsg: ProviderMessage[] = fileOpsSection
+      ? [{ role: "user", content: fileOpsSection }]
+      : [];
     const response = await this.#options.provider.complete({
       messages: [
         {
@@ -399,6 +409,7 @@ export class Agent {
             "Summarize this coding-agent history for continuation. Preserve user requirements, decisions, files changed, commands and outcomes, open plan steps, blockers, and exact artifact IDs. Do not include hidden chain-of-thought.",
         },
         { role: "user", content: JSON.stringify(compacted) },
+        ...fileOpsMsg,
       ],
       tools: [],
       signal,
@@ -411,14 +422,20 @@ export class Agent {
     this.#messages.splice(
       1,
       boundary - 1,
-      { role: "user", content: `<compaction-summary>\n${summary}\n</compaction-summary>` },
+      { role: "user", content: `<compaction-summary>\n${summary}\n</compaction-summary>${fileOpsSection ? `\n${fileOpsSection}` : ""}` },
     );
+    if (this.#stickyContext) {
+      const last = this.#messages.at(-1);
+      if (!(last?.role === "user" && last.content.includes("<sticky-context>"))) {
+        this.#messages.push({ role: "user", content: `<sticky-context>\n${this.#stickyContext}\n</sticky-context>` });
+      }
+    }
     this.#cacheEpoch += 1;
     await this.#options.session.saveMessages(this.#messages);
     await this.#options.events.emit({
       type: "notice",
       agentId: this.#options.state.agentId,
-      message: `compacted ${compacted.length} messages after reaching the context threshold`,
+      message: `compacted ${compacted.length} messages after reaching the context threshold${prunedToolResults > 0 ? `; pruned ${prunedToolResults} old tool results from the summary input` : ""}`,
     });
     await this.#options.events.emit({
       type: "usage",
@@ -426,6 +443,31 @@ export class Agent {
       usage: response.usage,
     });
   }
+}
+
+function pruneCompactionMessages(messages: ProviderMessage[]): { messages: ProviderMessage[]; prunedToolResults: number } {
+  let prunedToolResults = 0;
+  const pruned = messages.map((message): ProviderMessage => {
+    if (message.role !== "tool") return structuredClone(message);
+    const content = message.content.trim();
+    if (content === "no matches" || content === "[]" || content === "{}") {
+      prunedToolResults += 1;
+      return { ...message, content: "[Uneventful result elided]" };
+    }
+    const bytes = Buffer.byteLength(message.content, "utf8");
+    if (bytes <= 8_000 || message.content.startsWith("[tool output truncated:")) {
+      return structuredClone(message);
+    }
+    prunedToolResults += 1;
+    const encoded = Buffer.from(message.content, "utf8");
+    const head = encoded.subarray(0, 1_500).toString("utf8");
+    const tail = encoded.subarray(Math.max(0, encoded.length - 800)).toString("utf8");
+    return {
+      ...message,
+      content: `[Tool result pruned before compaction: ${bytes} bytes]\n${head}\n\n[...pruned...]\n\n${tail}`,
+    };
+  });
+  return { messages: pruned, prunedToolResults };
 }
 
 function hashCall(name: string, argumentsJson: string): string {
@@ -492,4 +534,55 @@ export function sanitizeToolPairing(messages: ProviderMessage[]): ProviderMessag
     index = cursor - 1;
   }
   return output;
+}
+function extractFileOps(messages: ProviderMessage[]): { readFiles: Set<string>; modifiedFiles: Set<string> } {
+  const readFiles = new Set<string>();
+  const modifiedFiles = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "assistant" || !message.tool_calls?.length) continue;
+    for (const call of message.tool_calls) {
+      let filePath: string | undefined;
+      try {
+        const args = JSON.parse(call.function.arguments);
+        if (typeof args.path === "string") filePath = args.path;
+      } catch {
+        continue;
+      }
+      if (!filePath) continue;
+      if (call.function.name === "read_file") readFiles.add(filePath);
+      if (call.function.name === "write_file" || call.function.name === "edit_file" || call.function.name === "edit_files" || call.function.name === "delete_file" || call.function.name === "replace_by_line_range") modifiedFiles.add(filePath);
+    }
+  }
+  for (const filePath of modifiedFiles) readFiles.delete(filePath);
+  return { readFiles, modifiedFiles };
+}
+
+function formatFileOpsSection(readFiles: Set<string>, modifiedFiles: Set<string>): string | undefined {
+  const maxFiles = 20;
+  const entries: { path: string; label: string }[] = [];
+  for (const filePath of readFiles) entries.push({ path: filePath, label: "Read" });
+  for (const filePath of modifiedFiles) entries.push({ path: filePath, label: "Write" });
+  if (!entries.length) return undefined;
+  entries.sort((a, b) => a.path.localeCompare(b.path));
+  const grouped = new Map<string, { path: string; label: string }[]>();
+  for (const entry of entries) {
+    const dir = entry.path.includes("/") ? entry.path.slice(0, entry.path.lastIndexOf("/")) : ".";
+    const list = grouped.get(dir);
+    if (list) list.push(entry);
+    else grouped.set(dir, [entry]);
+  }
+  let lines: string[] = [];
+  for (const [dir, files] of grouped) {
+    lines.push(dir + "/");
+    for (const file of files) {
+      const base = file.path.slice(dir === "." ? 0 : dir.length + 1);
+      lines.push(`  ${base} (${file.label})`);
+    }
+  }
+  let elided = "";
+  if (lines.length > maxFiles) {
+    elided = `\n  ...${lines.length - maxFiles} files elided...`;
+    lines = lines.slice(0, maxFiles);
+  }
+  return `<files>\n${lines.join("\n")}${elided}\n</files>`;
 }

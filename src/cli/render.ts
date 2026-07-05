@@ -1,8 +1,9 @@
 import pc from "picocolors";
 import type { EventBus, EventEnvelope } from "../core/events.js";
 import type { OutputFormat } from "../core/types.js";
+import { estimateCost, formatCost } from "../provider/pricing.js";
 
-export function attachRenderer(bus: EventBus, format: OutputFormat): () => void {
+export function attachRenderer(bus: EventBus, format: OutputFormat, model?: string): () => void {
   let streamedText = false;
   return bus.on((envelope) => {
     if (format === "stream-json") {
@@ -15,15 +16,16 @@ export function attachRenderer(bus: EventBus, format: OutputFormat): () => void 
       () => { streamedText = true; },
       () => streamedText,
       () => { streamedText = false; },
+      model,
     );
   });
 }
-
 function renderText(
   envelope: EventEnvelope,
   markStreamed: () => void,
   wasStreamed: () => boolean,
   resetStreamed: () => void,
+  model?: string,
 ): void {
   const event = envelope.event;
   switch (event.type) {
@@ -66,9 +68,10 @@ function renderText(
         const searchUsage = event.usage.webSearchCalls
           ? `, ${event.usage.webSearchCalls} searches, ${event.usage.webSearchPages ?? 0} pages`
           : "";
+        const cost = estimateCost(model ?? "mimo-v2.5-pro", event.usage);
         process.stderr.write(
           pc.dim(
-            `tokens ${event.usage.totalTokens} (${event.usage.cacheHitTokens} cached, ${event.usage.cacheMissTokens} new, ${cacheRate}% cache, ${event.usage.reasoningTokens ?? 0} thinking${searchUsage})\n`,
+            `tokens ${event.usage.totalTokens} (${cacheRate}% cache, ${event.usage.reasoningTokens ?? 0} thinking${searchUsage}) ~${formatCost(cost)}\n`,
           ),
         );
       }

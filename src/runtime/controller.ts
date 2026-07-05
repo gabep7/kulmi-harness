@@ -11,6 +11,8 @@ import {
   type UndoMessageHistory,
 } from "../config/config.js";
 import { loadInstructions } from "../config/instructions.js";
+import { discoverRules, rulesPromptInventory, loadStickyRules } from "../config/rules.js";
+import { discoverAgents, agentsPromptInventory } from "../config/agents.js";
 import { discoverSkills, skillsPromptInventory } from "../config/skills.js";
 import { EventBus } from "../core/events.js";
 import { createId } from "../core/ids.js";
@@ -30,6 +32,9 @@ import { ArtifactStore } from "./artifacts.js";
 import { readArtifactTool } from "../tools/artifacts.js";
 import { fetchUrlTool, freeWebSearchTool } from "../tools/web-search.js";
 import { skillTools } from "../tools/skills.js";
+import { ruleTools } from "../tools/rules.js";
+import { astGrepTool } from "../tools/ast-grep.js";
+import { lspTool } from "../tools/lsp.js";
 
 export interface ControllerOptions {
   cwd: string;
@@ -101,6 +106,11 @@ export class SessionController {
     this.workspaceRoot = options.workspaceRoot;
     this.autonomy = options.autonomy;
     this.searchMode = options.searchMode;
+    this.events.on((envelope) => {
+      if (envelope.event.type === "usage") {
+        void this.#session.addUsage(envelope.event.usage).catch(() => undefined);
+      }
+    });
   }
 
   get messages(): readonly ProviderMessage[] {
@@ -163,9 +173,14 @@ export class SessionController {
     });
     session.attach(events);
     const autonomy = options.autonomy ?? config.defaultAutonomy;
-    const instructions = loadInstructions(workspaceRoot, cwd);
+    const instructions = await loadInstructions(workspaceRoot, cwd);
     const skills = discoverSkills(workspaceRoot);
     const skillsInventory = skillsPromptInventory(skills);
+    const customAgents = discoverAgents(workspaceRoot);
+    const agentsInventory = agentsPromptInventory(customAgents);
+    const rules = discoverRules(workspaceRoot);
+    const rulesInventory = rulesPromptInventory(rules);
+    const stickyRules = await loadStickyRules(workspaceRoot, cwd);
     const state: RunState = loaded?.session.state ?? {
       agentId: createId("agent"),
       mode: options.mode,
@@ -183,6 +198,7 @@ export class SessionController {
     if (state.mode === "task") assertGitWorkTree(cwd);
 
     const rootCheckpoint = new CheckpointStore(session.path, workspaceRoot);
+    const rootArtifacts = new ArtifactStore(session.path);
     const worktrees = new WorktreeManager(workspaceRoot);
     const activeWorkers = new Map<string, Agent>();
     let scheduler: SubagentScheduler;
@@ -217,8 +233,8 @@ export class SessionController {
       const readOnly = job.mode !== "implement";
       const searchTools = search.mode === "free" ? [freeWebSearchTool(search), fetchUrlTool()] : [];
       const childTools = readOnly
-        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...workerProgressTools()])
-        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...workerProgressTools()]);
+        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...ruleTools(rules), astGrepTool, lspTool, ...workerProgressTools()])
+        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...ruleTools(rules), astGrepTool, lspTool, ...workerProgressTools()]);
       const childAgent = new Agent({
         provider,
         tools: childTools,
@@ -232,6 +248,8 @@ export class SessionController {
           projectInstructions: instructions.content,
           readOnly,
           skillsInventory,
+          rulesInventory,
+          agentsInventory,
         })}\n${subagentReportContract}`,
         workspaceRoot: workerCwd,
         cwd: workerCwd,
@@ -281,6 +299,7 @@ export class SessionController {
         if (!worker) throw new Error(`worker ${job.id} is not accepting steering`);
         worker.steer(message);
       },
+      (job, result) => rootArtifacts.materialize("worker", job.id, result),
     );
     await scheduler.persist();
 
@@ -290,8 +309,11 @@ export class SessionController {
       shellTool,
       ...(search.mode === "free" ? [freeWebSearchTool(search), fetchUrlTool()] : []),
       ...progressTools(),
-      ...subagentTools(),
+      ...subagentTools(customAgents),
       ...skillTools(skills),
+      ...ruleTools(rules),
+      astGrepTool,
+      lspTool,
     ];
     const agent = new Agent({
       provider,
@@ -299,13 +321,15 @@ export class SessionController {
       events,
       session,
       checkpoint: rootCheckpoint,
-      artifacts: new ArtifactStore(session.path),
+      artifacts: rootArtifacts,
       state,
       systemPrompt: buildSystemPrompt({
         mode: state.mode,
         projectInstructions: instructions.content,
         readOnly: autonomy === "read",
         skillsInventory,
+        rulesInventory,
+        agentsInventory,
       }),
       workspaceRoot,
       cwd,
@@ -321,6 +345,10 @@ export class SessionController {
     });
     if (loaded && previousMode === "chat" && state.mode === "task") {
       await agent.appendRuntimeContext("Task mode is now active. Use the task tools directly; do not call start_task.");
+    }
+    if (stickyRules.content) {
+      await agent.appendRuntimeContext(stickyRules.content);
+      agent.setStickyContext(stickyRules.content);
     }
     await session.saveRunState(state);
     return new SessionController({
