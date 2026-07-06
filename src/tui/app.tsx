@@ -227,6 +227,8 @@ export function TuiApp(props: TuiAppProps) {
         {help && <Help onClose={() => setHelp(false)} />}
         {!help && !snapshot.pendingApproval && !sessions && input.startsWith("/") && <CommandPalette query={input} columns={size.columns} />}
 
+        {!snapshot.pendingApproval && !sessions && busy && <LoadingStatus />}
+
         {snapshot.pendingApproval
           ? <Approval request={snapshot.pendingApproval.request} />
           : sessions
@@ -321,11 +323,20 @@ function CompletionBlock({ completion }: { completion: CompletionSummary }) {
 }
 
 function Composer({ value, onChange, onSubmit, busy }: { value: string; onChange: (value: string) => void; onSubmit: (value: string) => void; busy: boolean }) {
-  const loading = useLoadingStatus(busy);
   return (
-    <Box marginTop={1} borderStyle="round" borderColor={busy ? theme.faint : theme.cocoa} paddingX={1}>
-      <Text color={busy ? theme.faint : theme.caramel}>{busy ? `${loading.icon} ${loading.message}` : glyph.user} </Text>
+    <Box marginTop={busy ? 0 : 1} borderStyle="round" borderColor={busy ? theme.faint : theme.cocoa} paddingX={1}>
+      <Text color={busy ? theme.faint : theme.caramel}>{glyph.user} </Text>
       <TextInput value={value} onChange={onChange} onSubmit={onSubmit} focus={!busy} placeholder={busy ? "Kulmi is working. Esc to stop." : "What should we build?"} />
+    </Box>
+  );
+}
+
+function LoadingStatus() {
+  const loading = useLoadingStatus(true);
+  return (
+    <Box marginTop={1} paddingLeft={1}>
+      <Text color={theme.caramel}>{loading.icon} </Text>
+      <Text color={theme.muted}>{loading.message}</Text>
     </Box>
   );
 }

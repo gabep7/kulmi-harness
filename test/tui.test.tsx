@@ -141,9 +141,13 @@ describe("Kulmi TUI", () => {
     await pause();
     view.stdin.write("\r");
     await pause();
-    expect(view.lastFrame()).toContain("Kulmi is working. Esc to stop.");
-    expect(view.lastFrame()).toContain("pirating MATLAB");
-    expect(view.lastFrame()).toContain("⠋");
+    const workingFrame = view.lastFrame() ?? "";
+    expect(workingFrame).toContain("Kulmi is working. Esc to stop.");
+    expect(workingFrame).toContain("pirating MATLAB");
+    expect(workingFrame).toContain("⠋");
+    expect(workingFrame.indexOf("pirating MATLAB")).toBeLessThan(workingFrame.indexOf("Kulmi is working. Esc to stop."));
+    const composerLine = workingFrame.split("\n").find((line) => line.includes("Kulmi is working. Esc to stop."));
+    expect(composerLine).not.toContain("pirating MATLAB");
     view.stdin.write("\u001b");
     await pause();
     expect(cancel).toHaveBeenCalledOnce();

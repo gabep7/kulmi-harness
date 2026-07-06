@@ -154,7 +154,7 @@ Resume directly into the TUI with:
 kulmi --session-id session_0123456789abcdef
 ```
 
-The footer shows autonomy, free-search state, cumulative tokens, and MiMo cache-hit rate. While a run is active, the composer rotates a small buffered spinner through intentionally ridiculous tech status lines such as `pirating MATLAB` and `selling your data`. Risky commands replace the composer with an explicit allow-once or deny prompt. Pressing Enter without choosing defaults to denial.
+The footer shows autonomy, free-search state, cumulative tokens, and MiMo cache-hit rate. While a run is active, a status line above the composer rotates a small buffered spinner through intentionally ridiculous messages such as `pirating MATLAB` and `selling your data`. Risky commands replace the composer with an explicit allow-once or deny prompt. Pressing Enter without choosing defaults to denial.
 
 Headless sessions can be undone with `kulmi undo <session-id>`. JSON-RPC clients use `session.undo` and receive the restored messages and run state in the response.
 
