@@ -163,7 +163,7 @@ const undoFileSchema = z.object({
 }).strict();
 const fileConfigSchema = z.object({
   default_model: z.string().min(1).optional(),
-  default_autonomy: z.enum(["read", "low", "medium", "high"]).optional(),
+  default_autonomy: z.enum(["read", "low", "medium", "high", "trusted"]).optional(),
   max_steps: z.number().int().min(1).max(10_000).optional(),
   max_subagents: z.number().int().min(1).max(64).optional(),
   command_timeout_seconds: z.number().int().min(1).max(1_800).optional(),

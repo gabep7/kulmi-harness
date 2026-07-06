@@ -143,11 +143,29 @@ describe("Kulmi TUI", () => {
     await pause();
     const workingFrame = view.lastFrame() ?? "";
     expect(workingFrame).toContain("Kulmi is working. Esc to stop.");
-    expect(workingFrame).toContain("pirating MATLAB");
+    const spinnerMessages = [
+      "selling your data",
+      "downloading more RAM",
+      "blaming DNS",
+      "ratting you out to npm",
+      "mining bitcoin briefly",
+      "accidentally optimizing your code",
+      "leaking telemetry just this once",
+      "asking the runtime to chill",
+      "convincing git not to judge you",
+      "losing the plot slightly",
+      "telling the linter a white lie",
+      "speedrunning a yak shave",
+      "abusing the event loop",
+      "touching files that don't belong to me",
+      "starting a race condition responsibly",
+    ];
+    const spinnerMessage = spinnerMessages.find((message) => workingFrame.includes(message));
+    expect(spinnerMessage).toBeDefined();
     expect(workingFrame).toContain("⠋");
-    expect(workingFrame.indexOf("pirating MATLAB")).toBeLessThan(workingFrame.indexOf("Kulmi is working. Esc to stop."));
+    expect(workingFrame.indexOf(spinnerMessage!)).toBeLessThan(workingFrame.indexOf("Kulmi is working. Esc to stop."));
     const composerLine = workingFrame.split("\n").find((line) => line.includes("Kulmi is working. Esc to stop."));
-    expect(composerLine).not.toContain("pirating MATLAB");
+    expect(composerLine).not.toContain(spinnerMessage!);
     view.stdin.write("\u001b");
     await pause();
     expect(cancel).toHaveBeenCalledOnce();
@@ -214,12 +232,12 @@ describe("Kulmi TUI", () => {
     view.stdin.write("/sessions");
     await pause();
     view.stdin.write("\r");
-    await pause();
+    await pause(100);
     expect(view.lastFrame()).toContain("Previous work");
     view.stdin.write("\u001b[B");
-    await pause();
+    await pause(100);
     view.stdin.write("\r");
-    await pause();
+    await pause(100);
     expect(switchSession).toHaveBeenCalledWith("session_fedcba0987654321");
     expect(view.lastFrame()).toContain("mimo-v2.5  ·  fedcba09");
     expect(view.lastFrame()).toContain("goal");
@@ -246,7 +264,7 @@ describe("Kulmi TUI", () => {
     view.stdin.write("/goal fix the cache");
     await pause();
     view.stdin.write("\r");
-    await pause();
+    await pause(100);
     expect(command).toHaveBeenCalledWith("/goal", "fix the cache");
     expect(submit).toHaveBeenCalledWith("fix the cache");
     expect(view.lastFrame()).toContain("goal");
@@ -397,6 +415,6 @@ describe("Kulmi TUI", () => {
   });
 });
 
-function pause(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 50));
+function pause(ms = 50): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

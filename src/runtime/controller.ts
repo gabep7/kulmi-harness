@@ -63,7 +63,7 @@ export class SessionController {
   readonly model: string;
   readonly modelProfile: string;
   readonly workspaceRoot: string;
-  readonly autonomy: AutonomyLevel;
+  autonomy: AutonomyLevel;
   readonly searchMode: SearchMode;
   readonly sandbox: SandboxConfig;
   readonly undoMessageHistory: UndoMessageHistory;
@@ -421,6 +421,12 @@ export class SessionController {
       status: this.#state.status,
     });
     await this.#session.close(this.#state.status);
+  }
+
+  setAutonomy(autonomy: AutonomyLevel): void {
+    if (this.#closed) throw new Error("session is closed");
+    this.autonomy = autonomy;
+    this.#agent.setAutonomy(autonomy);
   }
 
   workers(): WorkerJob[] {

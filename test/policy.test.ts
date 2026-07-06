@@ -63,4 +63,23 @@ describe("command policy", () => {
     expect(decideCommand("python3 run_tests.py", "medium").verification).toBe(false);
     expect(decideCommand("node dist/test.js", "medium").verification).toBe(false);
   });
+
+  it("allows local dev commands at trusted autonomy", () => {
+    expect(decideCommand("node scripts/build.js", "trusted").allowed).toBe(true);
+    expect(decideCommand("python3 script.py", "trusted").allowed).toBe(true);
+    expect(decideCommand("npm exec lint-staged", "trusted").allowed).toBe(true);
+    expect(decideCommand("git add .", "trusted").allowed).toBe(true);
+    expect(decideCommand("git commit -m fix", "trusted").allowed).toBe(true);
+    expect(decideCommand("git mv old new", "trusted").allowed).toBe(true);
+  });
+
+  it("still hard-blocks destructive commands at trusted autonomy", () => {
+    expect(decideCommand("git push origin main", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("git clean -fdx", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("sudo npm test", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("rm -rf src", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("npm publish", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("npm run deploy", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("gh pr merge 12", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
 });

@@ -19,7 +19,7 @@ const openSchema = z.object({
   cwd: z.string().min(1),
   mode: z.enum(["chat", "task"]).optional(),
   model: z.string().optional(),
-  autonomy: z.enum(["read", "low", "medium", "high"]).default("medium"),
+  autonomy: z.enum(["read", "low", "medium", "high", "trusted"]).default("medium"),
   sessionId: z.string().optional(),
   webSearch: z.enum(["off", "free"]).optional(),
 });

@@ -35,7 +35,7 @@ program
   .enablePositionalOptions()
   .version(VERSION)
   .option("-m, --model <name>", "model profile")
-  .option("--auto <level>", "autonomy: read, low, medium, high", "medium")
+  .option("--auto <level>", "autonomy: read, low, medium, high, trusted", "medium")
   .option("--web-search <mode>", "web search: off or free")
   .option("--approval-mode <mode>", "approvals: never or on-request", "on-request")
   .option("-s, --session-id <id>", "resume a session")
@@ -82,7 +82,7 @@ program
   .description("run one headless task")
   .argument("[prompt...]", "task prompt")
   .option("-m, --model <name>", "model profile")
-  .option("--auto <level>", "autonomy: read, low, medium, high", "read")
+  .option("--auto <level>", "autonomy: read, low, medium, high, trusted", "read")
   .option("-o, --output-format <format>", "text, json, or stream-json", "text")
   .option("-s, --session-id <id>", "resume a session")
   .option("--web-search <mode>", "web search: off or free")
@@ -331,7 +331,7 @@ async function execute(options: {
 }
 
 function parseAutonomy(value: string): AutonomyLevel {
-  if (["read", "low", "medium", "high"].includes(value)) return value as AutonomyLevel;
+  if (["read", "low", "medium", "high", "trusted"].includes(value)) return value as AutonomyLevel;
   throw new Error(`invalid autonomy ${value}`);
 }
 

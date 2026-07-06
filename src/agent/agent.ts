@@ -76,6 +76,10 @@ export class Agent {
     this.#steering.push(value);
   }
 
+  setAutonomy(autonomy: AutonomyLevel): void {
+    this.#options.autonomy = autonomy;
+  }
+
   async appendRuntimeContext(message: string): Promise<void> {
     if (this.#running) throw new Error("cannot change runtime context while the agent is running");
     const context: ProviderMessage = { role: "user", content: `<runtime-context>${message}</runtime-context>` };

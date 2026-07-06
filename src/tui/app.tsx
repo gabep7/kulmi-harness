@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import TextInput from "ink-text-input";
 import type { AgentMode, AutonomyLevel, PlanStep } from "../core/types.js";
+import type { PermissionRequest } from "../tools/types.js";
 import type { CompletionSummary, TuiStore, FeedItem } from "./store.js";
 import { glyph, theme } from "./theme.js";
 import { estimateCost, formatCost } from "../provider/pricing.js";
@@ -17,6 +18,7 @@ export interface TuiAppProps {
   onSubmit: (prompt: string) => Promise<void>;
   onCommand: (command: string, args: string) => Promise<TuiCommandResult>;
   onSwitchSession?: (sessionId: string) => Promise<TuiRuntimeInfo>;
+  onCycleAutonomy?: () => Promise<TuiRuntimeInfo>;
   onCancel: () => void;
   onExit: () => void;
 }
@@ -143,6 +145,16 @@ export function TuiApp(props: TuiAppProps) {
       }
     }
     if (key.ctrl && value === "o") props.store.toggleThinking();
+    if (key.shift && key.tab && !busy && props.onCycleAutonomy) {
+      setBusy(true);
+      void props.onCycleAutonomy().then((next) => {
+        setRuntime(next);
+        props.store.addNotice(`Autonomy: ${autonomyLabel(next.autonomy)}`);
+      }, (error: unknown) => {
+        props.store.addNotice(error instanceof Error ? error.message : String(error), true);
+      }).finally(() => setBusy(false));
+      return;
+    }
     if (value === "?" && input.length === 0) setHelp((shown) => !shown);
   });
 
@@ -331,6 +343,42 @@ function Composer({ value, onChange, onSubmit, busy }: { value: string; onChange
   );
 }
 
+
+const loadingMessages = [
+  "selling your data",
+  "downloading more RAM",
+  "blaming DNS",
+  "ratting you out to npm",
+  "mining bitcoin briefly",
+  "accidentally optimizing your code",
+  "leaking telemetry just this once",
+  "asking the runtime to chill",
+  "convincing git not to judge you",
+  "losing the plot slightly",
+  "telling the linter a white lie",
+  "speedrunning a yak shave",
+  "abusing the event loop",
+  "touching files that don't belong to me",
+  "starting a race condition responsibly",
+] as const;
+
+const loadingFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+function useLoadingStatus(active: boolean): { icon: string; message: string } {
+  const [messages] = useState(() => shuffledLoadingMessages());
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const timer = setInterval(() => setTick((value) => value + 1), 140);
+    return () => clearInterval(timer);
+  }, [active]);
+  return {
+    icon: loadingFrames[tick % loadingFrames.length]!,
+    message: messages[Math.floor(tick / 14) % messages.length]!,
+  };
+}
+
+
 function LoadingStatus() {
   const loading = useLoadingStatus(true);
   return (
@@ -340,35 +388,16 @@ function LoadingStatus() {
     </Box>
   );
 }
-
-const loadingFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
-const loadingMessages = [
-  "pirating MATLAB",
-  "selling your data",
-  "blaming DNS",
-  "centering a div",
-  "downloading more RAM",
-  "warming the cache",
-  "asking Stack Overflow",
-  "turning it off and on",
-  "summoning a semicolon",
-  "compiling the compiler",
-] as const;
-
-function useLoadingStatus(active: boolean): { icon: string; message: string } {
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    if (!active) return;
-    const timer = setInterval(() => setTick((value) => value + 1), 140);
-    return () => clearInterval(timer);
-  }, [active]);
-  return {
-    icon: loadingFrames[tick % loadingFrames.length]!,
-    message: loadingMessages[Math.floor(tick / 14) % loadingMessages.length]!,
-  };
+function shuffledLoadingMessages(): string[] {
+  const messages = [...loadingMessages];
+  for (let index = messages.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(Math.random() * (index + 1));
+    [messages[index], messages[swap]] = [messages[swap]!, messages[index]!];
+  }
+  return messages;
 }
 
-function Approval({ request }: { request: import("../tools/types.js").PermissionRequest }) {
+function Approval({ request }: { request: PermissionRequest }) {
   return (
     <Box marginTop={1} borderStyle="round" borderColor={theme.rust} paddingX={1} flexDirection="column">
       <Text color={theme.rose} bold>approval required  <Text color={theme.muted}>{request.risk} risk</Text></Text>
@@ -401,7 +430,7 @@ function Help({ onClose }: { onClose: () => void }) {
       <Box flexDirection="row" flexWrap="wrap">
         {commands.map(([command, detail]) => <Box key={command} width={32}><Text color={theme.sand}>{command.padEnd(12)}</Text><Text color={theme.muted}>{detail}</Text></Box>)}
       </Box>
-      <Text color={theme.faint}>esc stop  ·  ctrl+o thinking  ·  ctrl+c exit  ·  ? close</Text>
+      <Text color={theme.faint}>esc stop  ·  ctrl+o thinking  ·  shift+tab autonomy  ·  ctrl+c exit  ·  ? close</Text>
     </Box>
   );
 }
@@ -538,5 +567,6 @@ function autonomyLabel(value: AutonomyLevel): string {
   if (value === "read") return "inspect";
   if (value === "low") return "edit";
   if (value === "medium") return "local dev";
-  return "extended";
+  if (value === "high") return "extended";
+  return "trusted";
 }

@@ -119,6 +119,10 @@ Project or user configuration can control the command sandbox and undo transcrip
 mode = "required" # required or off
 network = false
 
+[default]
+# default_autonomy = "trusted"
+# Shift+Tab cycles the active autonomy level in the TUI.
+
 [undo]
 message_history = "truncate" # truncate or keep
 ```
@@ -140,6 +144,7 @@ Controls:
 - `Esc` stops the active run.
 - `Ctrl+O` expands or collapses the current thinking stream.
 - `Ctrl+C` stops an active run, or exits while idle.
+- `Shift+Tab` cycles autonomy: `low`, `medium`, `high`, then `trusted`.
 - `?` opens the compact command and shortcut guide.
 - `/sessions` opens a keyboard picker for durable sessions in the current workspace.
 - `/fork` creates an independent continuation.
@@ -154,7 +159,7 @@ Resume directly into the TUI with:
 kulmi --session-id session_0123456789abcdef
 ```
 
-The footer shows autonomy, free-search state, cumulative tokens, and MiMo cache-hit rate. While a run is active, a status line above the composer rotates a small buffered spinner through intentionally ridiculous messages such as `pirating MATLAB` and `selling your data`. Risky commands replace the composer with an explicit allow-once or deny prompt. Pressing Enter without choosing defaults to denial.
+The footer shows autonomy, free-search state, cumulative tokens, and MiMo cache-hit rate. While a run is active, a status line above the composer rotates a shuffled spinner through jokey status messages such as `selling your data`, `mining bitcoin briefly`, and `speedrunning a yak shave`. Risky commands replace the composer with an explicit allow-once or deny prompt. Pressing Enter without choosing defaults to denial.
 
 Headless sessions can be undone with `kulmi undo <session-id>`. JSON-RPC clients use `session.undo` and receive the restored messages and run state in the response.
 

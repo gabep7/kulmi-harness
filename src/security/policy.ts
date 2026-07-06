@@ -16,7 +16,7 @@ interface ParsedCommand {
   writesRedirect: boolean;
 }
 
-const rank: Record<AutonomyLevel, number> = { read: 0, low: 1, medium: 2, high: 3 };
+const rank: Record<AutonomyLevel, number> = { read: 0, low: 1, medium: 2, high: 3, trusted: 4 };
 const readPrograms = new Set([
   "cat", "cut", "diff", "du", "find", "git", "grep", "head", "ls", "pwd", "rg",
   "sed", "stat", "tail", "tree", "type", "uname", "wc", "which",
@@ -30,6 +30,10 @@ const blockedPrograms = new Set([
   "builtin", "command", "exec", "nohup", "nice", "timeout", "time",
   "case", "if", "then", "else", "while", "until", "for", "do", "done",
   ".", "busybox",
+]);
+const trustedStillBlockedPrograms = new Set([
+  "sudo", "eval", "source", "rm", "rmdir", "mkfs", "fdisk", "shutdown", "reboot", "halt",
+  "gh", "aws", "gcloud", "az", "twine", "builtin", "command", "exec", ".", "busybox",
 ]);
 
 export function decideCommand(
@@ -65,7 +69,7 @@ export function decideCommand(
   let highest = 0;
   let verification = false;
   for (const parsed of commands) {
-    const analysis = analyzeArgv(parsed.argv);
+    const analysis = analyzeArgv(parsed.argv, autonomy === "trusted");
     if (analysis.blocked) return blocked(analysis.blocked);
     highest = Math.max(highest, parsed.writesRedirect ? 1 : riskNumber(analysis.risk));
     verification ||= analysis.verification;
@@ -133,7 +137,7 @@ function parseCommands(command: string): ParsedCommand[] {
   return commands;
 }
 
-function analyzeArgv(input: string[]): {
+function analyzeArgv(input: string[], trusted: boolean): {
   risk: Exclude<CommandRisk, "blocked">;
   blocked?: string;
   verification: boolean;
@@ -144,7 +148,7 @@ function analyzeArgv(input: string[]): {
   const argv = unwrapEnvironment(input);
   const program = basename(argv[0] ?? "");
   if (!program) return { risk: "read", blocked: "missing program", verification: false };
-  if (blockedPrograms.has(program)) {
+  if (blockedPrograms.has(program) && (!trusted || trustedStillBlockedPrograms.has(program))) {
     return { risk: "read", blocked: `${program} is blocked without an approval flow`, verification: false };
   }
   if (["bash", "sh", "zsh"].includes(program) && argv.slice(1).some((arg) => arg === "-c" || arg === "--command")) {
@@ -154,20 +158,20 @@ function analyzeArgv(input: string[]): {
     return { risk: "read", blocked: `direct ${program} execution is blocked; use a declared project script`, verification: false };
   }
   if (program === "node") {
-    if (argv.slice(1).some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg))) {
+    if (!trusted && argv.slice(1).some((arg) => ["-e", "--eval", "-p", "--print"].includes(arg))) {
       return { risk: "read", blocked: "direct node -e/--eval execution is blocked; use a declared project script", verification: false };
     }
     const firstPositional = argv.slice(1).find((arg) => !arg.startsWith("-"));
-    if (firstPositional) return { risk: "medium", verification: false };
+    if (firstPositional || trusted) return { risk: "medium", verification: false };
     return { risk: "read", blocked: "direct node execution is blocked; use a declared project script", verification: false };
   }
   if (["python", "python3"].includes(program)) {
     if (argv[1] === "-m" && argv[2] === "pytest") return { risk: "medium", verification: true };
-    if (argv.slice(1).some((arg) => arg === "-c" || arg === "-m")) {
+    if (!trusted && argv.slice(1).some((arg) => arg === "-c" || arg === "-m")) {
       return { risk: "read", blocked: `direct ${program} execution is blocked; use a declared project script`, verification: false };
     }
     const firstPositional = argv.slice(1).find((arg) => !arg.startsWith("-"));
-    if (firstPositional) return { risk: "medium", verification: false };
+    if (firstPositional || trusted) return { risk: "medium", verification: false };
     return { risk: "read", blocked: `direct ${program} execution is blocked; use a declared project script`, verification: false };
   }
   if (program === "find" && argv.some((arg) => ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(arg))) {
@@ -176,8 +180,8 @@ function analyzeArgv(input: string[]): {
   if (program === "sed" && argv.some((arg) => /^-[^-]*i/.test(arg) || arg === "--in-place" || arg.startsWith("--in-place="))) {
     return { risk: "read", blocked: "in-place sed edits are blocked; use edit_file", verification: false };
   }
-  if (program === "git") return analyzeGit(argv);
-  if (["npm", "pnpm", "yarn"].includes(program) && ["exec", "dlx"].includes(argv[1] ?? "")) {
+  if (program === "git") return analyzeGit(argv, trusted);
+  if (!trusted && ["npm", "pnpm", "yarn"].includes(program) && ["exec", "dlx"].includes(argv[1] ?? "")) {
     return { risk: "read", blocked: `${program} ${argv[1]} is blocked`, verification: false };
   }
   if (
@@ -202,7 +206,7 @@ function analyzeArgv(input: string[]): {
   return { risk: "medium", verification };
 }
 
-function analyzeGit(argv: string[]): {
+function analyzeGit(argv: string[], trusted: boolean): {
   risk: Exclude<CommandRisk, "blocked">;
   blocked?: string;
   verification: boolean;
@@ -230,6 +234,9 @@ function analyzeGit(argv: string[]): {
   }
   if (["config", "alias"].includes(subcommand)) {
     return { risk: "read", blocked: `git ${subcommand} is blocked`, verification: false };
+  }
+  if (trusted && ["add", "commit", "mv"].includes(subcommand)) {
+    return { risk: "high", verification: false };
   }
   if ([
     "add", "commit", "merge", "rebase", "cherry-pick", "checkout", "restore", "switch",

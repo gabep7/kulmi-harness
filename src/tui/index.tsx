@@ -17,6 +17,8 @@ export interface RunTuiOptions {
   approvalMode: "never" | "on-request";
 }
 
+const autonomyCycle: AutonomyLevel[] = ["read", "low", "medium", "high", "trusted"];
+
 export async function runTui(options: RunTuiOptions): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("interactive TUI requires a terminal");
   const store = new TuiStore();
@@ -118,6 +120,13 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
     await previous.close();
     return runtimeInfo(controller);
   };
+  const cycleAutonomy = async (): Promise<TuiRuntimeInfo> => {
+    const current = autonomyCycle.indexOf(controller.autonomy);
+    const next = autonomyCycle[(current + 1) % autonomyCycle.length] ?? "medium";
+    controller.setAutonomy(next);
+    return runtimeInfo(controller);
+  };
+
   const close = () => { closing = true; };
 
   process.stdout.write("\u001B]0;kulmi\u0007");
@@ -133,6 +142,7 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       onSubmit={submit}
       onCommand={command}
       onSwitchSession={switchSession}
+      onCycleAutonomy={cycleAutonomy}
       onCancel={() => activeAbort?.abort(new Error("stopped by user"))}
       onExit={close}
     />,

@@ -1,4 +1,4 @@
-export type AutonomyLevel = "read" | "low" | "medium" | "high";
+export type AutonomyLevel = "read" | "low" | "medium" | "high" | "trusted";
 
 export type AgentMode = "chat" | "task" | "subagent";
 
