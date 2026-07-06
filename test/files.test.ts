@@ -391,6 +391,44 @@ describe("file tools", () => {
     expect(diffs[0]).toContain("--- a/first.ts");
     expect(diffs[0]).toContain("--- a/second.ts");
   });
+
+  it("keeps grep output compact with limits and truncation markers", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "kulmi-files-grep-")));
+    const session = await realpath(await mkdtemp(join(tmpdir(), "kulmi-files-grep-session-")));
+    await writeFile(join(root, "matches.txt"), Array.from({ length: 20 }, (_, index) => `needle ${index}`).join("\n"));
+    const registry = new ToolRegistry(fileTools());
+    const context = {
+      workspaceRoot: root,
+      cwd: root,
+      autonomy: "read" as const,
+      signal: new AbortController().signal,
+      events: new EventBus(),
+      state: {
+        agentId: "agent",
+        mode: "task" as const,
+        status: "running" as const,
+        plan: [],
+        modifiedFiles: new Set<string>(),
+        verifications: [],
+        revision: 0,
+      },
+      checkpoint: new CheckpointStore(session, root),
+      artifacts: new ArtifactStore(session),
+      commandTimeoutMs: 10_000,
+      maxOutputBytes: 1_000,
+    };
+
+    const result = await registry.execute({
+      name: "grep",
+      argumentsJson: JSON.stringify({ pattern: "needle", limit: 3 }),
+      callId: "grep-limited",
+      context,
+    });
+
+    expect(result.isError, result.content).toBe(false);
+    expect(result.content.split("\n").filter((line) => line.includes("needle"))).toHaveLength(3);
+    expect(result.content).toContain("[truncated]");
+  });
 });
 
 function digest(content: string): string {

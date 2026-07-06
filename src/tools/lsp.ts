@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { type ChildProcess, spawn } from "node:child_process";
 import { z } from "zod";
+import { resolveToolBinary } from "../runtime/binaries.js";
 import { resolveWorkspacePath } from "../security/paths.js";
 import { defineTool } from "./types.js";
 
@@ -38,18 +39,22 @@ class LspClient {
   async ensureRunning(): Promise<void> {
     if (this.#initialized && this.#process) return;
 
+    const binary = await resolveToolBinary("typescript-language-server");
+    if (!binary) {
+      throw new Error("LSP server unavailable. Install dependencies with npm install or add typescript-language-server to PATH.");
+    }
     try {
-      this.#process = spawn("typescript-language-server", ["--stdio"], {
+      this.#process = spawn(binary, ["--stdio"], {
         cwd: this.#workspaceRoot,
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch {
-      throw new Error("LSP server unavailable. Install with: npm i -g typescript-language-server typescript");
+      throw new Error("LSP server unavailable. Install dependencies with npm install or add typescript-language-server to PATH.");
     }
 
     this.#process.on("error", (err) => {
       const msg = err.message.includes("ENOENT")
-        ? "LSP server unavailable. Install with: npm i -g typescript-language-server typescript"
+        ? "LSP server unavailable. Install dependencies with npm install or add typescript-language-server to PATH."
         : "LSP server disconnected";
       this.#process = null;
       this.#initialized = false;

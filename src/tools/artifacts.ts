@@ -3,7 +3,7 @@ import { defineTool } from "./types.js";
 
 export const readArtifactTool = defineTool({
   name: "read_artifact",
-  description: "Read a bounded slice of a full tool-output artifact by ID.",
+  description: "Read a bounded byte slice of a full tool-output artifact by ID. Offsets and limits are UTF-8 bytes.",
   schema: z.object({
     artifact_id: z.string().regex(/^artifact_[a-f0-9]{16}$/),
     offset: z.number().int().nonnegative().default(0),

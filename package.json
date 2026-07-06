@@ -34,14 +34,17 @@
     "linux"
   ],
   "dependencies": {
+    "@ast-grep/cli": "^0.44.1",
     "commander": "^15.0.0",
     "fast-glob": "^3.3.3",
     "ink": "^7.1.0",
     "ink-text-input": "^6.0.0",
     "picocolors": "^1.1.1",
     "react": "^19.2.7",
+    "ripgrep": "^0.3.1",
     "shell-quote": "^1.8.4",
     "smol-toml": "^1.6.1",
+    "typescript-language-server": "^5.3.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

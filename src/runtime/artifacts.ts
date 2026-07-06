@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+const artifactDecoder = new TextDecoder("utf-8");
+
 export interface MaterializedOutput {
   content: string;
   artifactId?: string;
@@ -36,7 +38,7 @@ export class ArtifactStore {
 
   async read(id: string, offset: number, limit: number): Promise<string> {
     if (!/^artifact_[a-f0-9]{16}$/.test(id)) throw new Error(`invalid artifact ID ${id}`);
-    const content = await readFile(join(this.#root, `${id}.txt`), "utf8");
-    return content.slice(offset, offset + limit);
+    const content = await readFile(join(this.#root, `${id}.txt`));
+    return artifactDecoder.decode(content.subarray(offset, offset + limit));
   }
 }

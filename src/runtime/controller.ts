@@ -280,6 +280,13 @@ export class SessionController {
       const worktree = job.worktree;
       if (!worktree) throw new Error(`worker ${job.id} has no worktree`);
       const integrated = await worktrees.integrate(worktree, rootCheckpoint);
+      await worktrees.dispose(worktree).catch((error: unknown) =>
+        events.emit({
+          type: "notice",
+          agentId: job.parentAgentId,
+          message: `worker ${job.id} integrated, but cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+        }).then(() => undefined)
+      );
       for (const path of integrated) state.modifiedFiles.add(path);
       if (integrated.length > 0) {
         state.revision += 1;

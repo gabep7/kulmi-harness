@@ -57,6 +57,9 @@ describe("WorktreeManager", () => {
     expect(await readFile(join(root, "main.ts"), "utf8")).toContain("value = 2");
     expect(await readFile(join(root, "extra.ts"), "utf8")).toContain("extra = true");
     await expect(access(join(root, "remove.ts"))).rejects.toThrow();
+    await manager.dispose(worktree);
+    await expect(access(worktree.path)).rejects.toThrow();
+    expect((await exec("git", ["-C", root, "branch", "--list", worktree.branch])).stdout).toBe("");
   });
 
   it("integrates non-overlapping workers and rejects overlapping edits", async () => {

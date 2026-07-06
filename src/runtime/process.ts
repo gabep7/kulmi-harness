@@ -68,27 +68,29 @@ export async function runShell(options: {
     throw error;
   }
 
-  let stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
-  let stderr: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  let remainingBytes = options.maxOutputBytes;
   let truncated = false;
   let timedOut = false;
   let escalationTimer: NodeJS.Timeout | undefined;
 
-  const collect = (current: Buffer<ArrayBufferLike>, chunk: Buffer<ArrayBufferLike>): Buffer<ArrayBufferLike> => {
-    if (current.length >= options.maxOutputBytes) {
+  const collect = (target: Buffer[], chunk: Buffer): void => {
+    if (remainingBytes <= 0) {
       truncated = true;
-      return current;
+      return;
     }
-    const remaining = options.maxOutputBytes - current.length;
-    if (chunk.length > remaining) truncated = true;
-    return Buffer.concat([current, chunk.subarray(0, remaining)]);
+    const retained = chunk.subarray(0, remainingBytes);
+    target.push(retained);
+    remainingBytes -= retained.length;
+    if (chunk.length > retained.length) truncated = true;
   };
 
   child.stdout.on("data", (chunk: Buffer) => {
-    stdout = collect(stdout, chunk);
+    collect(stdoutChunks, chunk);
   });
   child.stderr.on("data", (chunk: Buffer) => {
-    stderr = collect(stderr, chunk);
+    collect(stderrChunks, chunk);
   });
 
   const kill = () => {
@@ -122,8 +124,8 @@ export async function runShell(options: {
     if (options.signal.aborted) throw options.signal.reason ?? new Error("command aborted");
     return {
       exitCode,
-      stdout: redact(stdout.toString("utf8")),
-      stderr: redact(stderr.toString("utf8")),
+      stdout: redact(Buffer.concat(stdoutChunks).toString("utf8")),
+      stderr: redact(Buffer.concat(stderrChunks).toString("utf8")),
       timedOut,
       truncated,
       durationMs: Math.round(performance.now() - started),

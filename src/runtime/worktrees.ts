@@ -109,6 +109,19 @@ export class WorktreeManager {
     });
   }
 
+  async dispose(info: WorktreeInfo): Promise<void> {
+    return this.#exclusive(async () => {
+      await this.#git(this.#root, ["worktree", "remove", "--force", info.path]).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/not a working tree|No such file|does not exist/i.test(message)) throw error;
+      });
+      await this.#git(this.#root, ["branch", "-D", info.branch]).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/not found|not a valid refname/i.test(message)) throw error;
+      });
+    });
+  }
+
   async #assertPathUnchanged(
     info: WorktreeInfo,
     path: string,

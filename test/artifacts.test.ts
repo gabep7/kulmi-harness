@@ -15,6 +15,15 @@ describe("ArtifactStore", () => {
     expect(await store.read(result.artifactId!, 140, 30)).toBe(full.slice(140, 170));
   });
 
+  it("reads artifact slices by UTF-8 byte offsets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-artifacts-"));
+    const store = new ArtifactStore(root, 1);
+    const result = await store.materialize("shell", "call_bytes", "abc😀def");
+
+    expect(await store.read(result.artifactId!, 3, 4)).toBe("😀");
+    expect(await store.read(result.artifactId!, 7, 3)).toBe("def");
+  });
+
   it("bounds multibyte previews by bytes", async () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-artifacts-"));
     const store = new ArtifactStore(root);

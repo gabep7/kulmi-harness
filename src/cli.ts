@@ -21,6 +21,7 @@ import { runTui } from "./tui/index.js";
 import { acceptCredential, resolveExistingCredential, type CredentialKind } from "./auth/credentials.js";
 import { CredentialSetupCancelledError, runCredentialOnboarding } from "./tui/onboarding.js";
 import { sandboxAvailability } from "./runtime/process.js";
+import { resolveToolBinary } from "./runtime/binaries.js";
 
 type ApprovalMode = "never" | "on-request";
 
@@ -234,6 +235,9 @@ program
     const selected = config.models[profile];
     const selectedKey = selected ? process.env[selected.apiKeyEnv] : undefined;
     const sandbox = sandboxAvailability();
+    const astGrepBinary = await resolveToolBinary("sg");
+    const lspBinary = await resolveToolBinary("typescript-language-server");
+    const ripgrepBinary = await resolveToolBinary("rg");
     const checks = [
       ["node", Number.parseInt(process.versions.node, 10) >= 22, process.versions.node],
       ["git", Boolean(gitVersion), gitVersion || "missing"],
@@ -241,12 +245,15 @@ program
       ["model", Boolean(selected), profile],
       ["credential", Boolean(selectedKey), selected ? `${selected.apiKeyEnv} ${selectedKey ? "set" : "missing"}` : "unknown profile"],
       ["sandbox", config.sandbox.mode === "off" || sandbox.available, config.sandbox.mode === "off" ? "disabled by configuration" : `${sandbox.backend} ${sandbox.detail}`],
+      ["ast-grep", Boolean(astGrepBinary), astGrepBinary ?? "sg missing; run npm install or add sg to PATH"],
+      ["lsp", Boolean(lspBinary), lspBinary ?? "typescript-language-server missing; run npm install or add it to PATH"],
+      ["ripgrep", Boolean(ripgrepBinary), ripgrepBinary ?? "rg missing; run npm install or add rg to PATH"],
       ["search", true, config.search.mode === "free" ? config.search.provider : "off"],
     ] as const;
     for (const [name, ok, detail] of checks) {
       process.stdout.write(`${ok ? "ok" : "warn"}\t${name}\t${detail}\n`);
     }
-    if (checks.slice(0, 6).some(([, ok]) => !ok)) process.exitCode = 1;
+    if (checks.slice(0, 9).some(([, ok]) => !ok)) process.exitCode = 1;
   });
 
 program

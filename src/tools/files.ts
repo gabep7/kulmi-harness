@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, relative } from "node:path";
@@ -5,6 +6,7 @@ import fg from "fast-glob";
 import { z } from "zod";
 import { combineDiffs, createTextDiff } from "../core/diff.js";
 import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
+import { resolveToolBinary } from "../runtime/binaries.js";
 import { defineTool, type AnyTool } from "./types.js";
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -222,8 +224,11 @@ const grepTool = defineTool({
       mustExist: true,
     });
     assertNotSensitivePath(cwd);
-    const { spawn } = await import("node:child_process");
-    const args = ["--line-number", "--color", "never", "--no-heading"];
+    const binary = await resolveToolBinary("rg");
+    if (!binary) {
+      throw new Error("rg (ripgrep) binary not found. Install dependencies with npm install or add rg to PATH.");
+    }
+    const args = ["--line-number", "--color", "never", "--no-heading", "--max-count", String(input.limit)];
     if (input.glob) args.push("--glob", input.glob);
     args.push(
       "--glob", "!**/.env", "--glob", "!**/.env.*", "--glob", "!**/*.pem",
@@ -231,26 +236,39 @@ const grepTool = defineTool({
     );
     if (input.fixed_strings) args.push("--fixed-strings");
     args.push("--", input.pattern, ".");
-    const child = spawn("rg", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(binary, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
     const chunks: Buffer[] = [];
     const errors: Buffer[] = [];
-    let bytes = 0;
+    let retainedBytes = 0;
+    let truncated = false;
     child.stdout.on("data", (chunk: Buffer) => {
-      if (bytes >= context.maxOutputBytes) return;
-      chunks.push(chunk.subarray(0, context.maxOutputBytes - bytes));
-      bytes += chunk.length;
+      if (retainedBytes >= context.maxOutputBytes) {
+        truncated = true;
+        child.kill("SIGTERM");
+        return;
+      }
+      const remaining = context.maxOutputBytes - retainedBytes;
+      const retained = chunk.subarray(0, remaining);
+      chunks.push(retained);
+      retainedBytes += retained.length;
+      if (chunk.length > remaining) {
+        truncated = true;
+        child.kill("SIGTERM");
+      }
     });
     child.stderr.on("data", (chunk: Buffer) => errors.push(chunk));
     const abort = () => child.kill("SIGTERM");
     context.signal.addEventListener("abort", abort, { once: true });
-    const code = await new Promise<number>((resolve, reject) => {
+    const { code, signal } = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       child.once("error", reject);
-      child.once("close", (value) => resolve(value ?? 1));
+      child.once("close", (code, signal) => resolve({ code, signal }));
     }).finally(() => context.signal.removeEventListener("abort", abort));
     if (context.signal.aborted) throw context.signal.reason ?? new Error("grep aborted");
-    if (code > 1) throw new Error(Buffer.concat(errors).toString("utf8") || `rg exited ${code}`);
+    if (!truncated && (code ?? 1) > 1) throw new Error(Buffer.concat(errors).toString("utf8") || `rg exited ${code}`);
     const lines = Buffer.concat(chunks).toString("utf8").split("\n").filter(Boolean);
-    return { content: lines.slice(0, input.limit).join("\n") || "no matches" };
+    const limited = lines.slice(0, input.limit);
+    const clipped = truncated || lines.length >= input.limit || signal === "SIGTERM";
+    return { content: limited.length ? `${limited.join("\n")}${clipped ? "\n[truncated]" : ""}` : "no matches" };
   },
 });
 
