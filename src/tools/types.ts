@@ -4,6 +4,7 @@ import type { AutonomyLevel, RunState } from "../core/types.js";
 import type { CheckpointStore } from "../runtime/checkpoints.js";
 import type { ArtifactStore } from "../runtime/artifacts.js";
 import type { SandboxConfig } from "../config/config.js";
+import type { HooksConfig } from "../config/config.js";
 
 export interface ToolResult {
   content: string;
@@ -56,6 +57,7 @@ export interface ToolContext {
   sandbox?: SandboxConfig;
   subagents?: SubagentApi;
   permissions?: PermissionApi;
+  hooks?: HooksConfig;
 }
 
 export interface Tool<TSchema extends z.ZodType = z.ZodType> {

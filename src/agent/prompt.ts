@@ -45,6 +45,7 @@ function modeContract(mode: AgentMode): string {
     return `Task mode:
 - Maintain a concise evidence-backed plan with update_plan.
 - Continue until the goal is verified. Finish only through complete_task.
+- Use worker presets sparingly for independent testing, review, security, performance, or release checks; do not spawn workers for small single-file work.
 - Modified work requires a successful current-revision verification_command.`;
   }
   if (mode === "subagent") {
@@ -54,8 +55,9 @@ function modeContract(mode: AgentMode): string {
 - Stay within the assigned checkout and authority. Return a compact evidence-backed report to the parent.`;
   }
   return `Chat mode:
-- Answer directly when workspace access is unnecessary.
-- For implementation, inspection, commands, edits, or research, call start_task once.
+- Answer directly only when workspace access is clearly unnecessary.
+- If the user refers to "this", "here", the current repo, project, app, site, codebase, files, or asks for improvements/review, assume they mean the current workspace and call start_task once.
+- For implementation, inspection, commands, edits, workspace research, or code review, call start_task once.
 - After promotion, create a plan, work to verification, and finish through complete_task.`;
 }
 

@@ -279,6 +279,26 @@ describe("MiMoProvider", () => {
     expect(requests).toBe(0);
   });
 
+  it("rejects image content for text-only MiMo profiles before opening a request", async () => {
+    let requests = 0;
+    const url = await serve(servers, (_request, response) => {
+      requests += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end('data: {"choices":[{"delta":{"content":"unexpected"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+    await expect(new MiMoProvider(model(url)).complete({
+      ...simpleRequest(),
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "inspect" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+        ],
+      }],
+    })).rejects.toThrow("image attachments require mimo-v2.5");
+    expect(requests).toBe(0);
+  });
+
   it("fails closed when a session cache prefix changes", async () => {
     const url = await serve(servers, (_request, response) => {
       response.writeHead(200, { "content-type": "text/event-stream" });
@@ -343,10 +363,10 @@ describe("MiMoProvider", () => {
   });
 });
 
-function model(baseUrl: string): ResolvedModel {
+function model(baseUrl: string, modelId: ResolvedModel["model"] = "mimo-v2.5-pro"): ResolvedModel {
   return {
-    name: "mimo-v2.5-pro",
-    model: "mimo-v2.5-pro",
+    name: modelId,
+    model: modelId,
     billing: "pay-as-you-go",
     baseUrl,
     apiKeyEnv: "MIMO_API_KEY",

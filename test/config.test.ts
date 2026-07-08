@@ -28,6 +28,14 @@ describe("MiMo configuration", () => {
     expect(template).toContain('[undo]\nmessage_history = "truncate"');
   });
 
+  it("accepts the documented default table for default profile settings", () => {
+    const changed = applyFileConfig(config(payg()), {
+      default: { default_autonomy: "trusted", default_model: "api" },
+    });
+    expect(changed.defaultAutonomy).toBe("trusted");
+    expect(changed.defaultModel).toBe("api");
+  });
+
   it("configures command isolation and undo transcript retention explicitly", () => {
     const changed = applyFileConfig(config(payg()), {
       sandbox: { mode: "off", network: true },
@@ -38,6 +46,25 @@ describe("MiMo configuration", () => {
     expect(() => applyFileConfig(config(payg()), {
       undo: { message_history: "delete" },
     })).toThrow("message_history");
+  });
+
+  it("parses hook script commands and explicit timeouts from file config", () => {
+    const changed = applyFileConfig(config(payg()), {
+      hooks: {
+        tool_pre: ["npm run lint:changed", { command: "npm test -- --changed", timeout_seconds: 12 }],
+        toolPost: [{ command: "node scripts/notify-hook.mjs", timeoutSeconds: 7 }],
+      },
+    });
+
+    expect(changed.hooks.toolPre.map((hook) => hook.command)).toEqual([
+      "npm run lint:changed",
+      "npm test -- --changed",
+    ]);
+    expect(changed.hooks.toolPre[1]).toEqual({ command: "npm test -- --changed", timeoutSeconds: 12 });
+    expect(changed.hooks.toolPost).toEqual([{ command: "node scripts/notify-hook.mjs", timeoutSeconds: 7 }]);
+    expect(() => applyFileConfig(config(payg()), {
+      hooks: { tool_pre: [{ command: "too fast", timeout_seconds: 0 }] },
+    })).toThrow("timeout_seconds");
   });
 
   it("rejects invalid limits, endpoints, billing environments, and removed MCP config", () => {
@@ -92,6 +119,7 @@ function config(...models: ModelConfig[]): KulmiConfig {
     },
     sandbox: { mode: "required", network: false },
     undo: { messageHistory: "truncate" },
+    hooks: { toolPre: [], toolPost: [] },
   };
 }
 

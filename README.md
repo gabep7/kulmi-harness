@@ -119,8 +119,7 @@ Project or user configuration can control the command sandbox and undo transcrip
 mode = "required" # required or off
 network = false
 
-[default]
-# default_autonomy = "trusted"
+default_autonomy = "trusted"
 # Shift+Tab cycles the active autonomy level in the TUI.
 
 [undo]
@@ -144,7 +143,7 @@ Controls:
 - `Esc` stops the active run.
 - `Ctrl+O` expands or collapses the current thinking stream.
 - `Ctrl+C` stops an active run, or exits while idle.
-- `Shift+Tab` cycles autonomy: `low`, `medium`, `high`, then `trusted`.
+- `Shift+Tab` cycles autonomy: `read`, `low`, `medium`, `high`, then `trusted`.
 - `?` opens the compact command and shortcut guide.
 - `/sessions` opens a keyboard picker for durable sessions in the current workspace.
 - `/fork` creates an independent continuation.
@@ -185,9 +184,12 @@ adapter                 + isolated worktrees
 
 The runtime is headless. The TUI and CLI only send commands and render events. They do not own sessions, permissions, tools, prompts, worker state, or provider credentials.
 
-Explore and review subagents are read-only and may share the checkout. Implement subagents receive isolated Git worktrees. Worker state and child transcripts are durable. Integration is explicit and rejects overlapping changes.
+Explore and review subagents are read-only and may share the checkout. Implement subagents receive isolated Git worktrees. Built-in worker presets are `tester`, `reviewer`, `security`, `performance`, and `release`; they are compact routing hints over the same three execution modes, not always-on extra agents. Worker state and child transcripts are durable. Integration is explicit and rejects overlapping changes.
 
 Running workers can be redirected with `steer_agent`. Failed or interrupted workers can be retried as new durable jobs. Local skills are discovered from `.kulmi/skills/*/SKILL.md`, `.agents/skills/*/SKILL.md`, and `~/.config/kulmi/skills/*/SKILL.md`; their compact inventory stays in the stable prompt and full instructions are loaded only when needed.
+
+
+Git workflow tools list, read, and resolve merge conflicts, then stage the resolved file. `commit_changes` creates local commits from inside the harness and never pushes. Browser QA can open a URL in headless Chromium and store screenshots as session attachments when Chrome/Chromium is available. Prompts can attach images with `@image path/to/image.png` when using `mimo-v2.5`; `mimo-v2.5-pro` rejects image input locally.
 
 `kulmi fork <session-id>` creates an independent continuation without mutating the source session. Interactive shell commands include `/help`, `/status`, `/sessions`, and `/loop <task>`.
 
@@ -195,11 +197,13 @@ Running workers can be redirected with `steer_agent`. Failed or interrupted work
 
 MiMo prompt caching is automatic and prefix-based. Kulmi optimizes it by keeping the system message byte-stable, sorting tools canonically, canonicalizing every JSON schema, preserving message and tool-result order, and appending volatile state only at the conversation tail. Chat and task mode use separate cache scopes so the one deliberate tool-catalog expansion cannot invalidate either stable prefix. Compaction happens only near the 1M context boundary and only at a complete message boundary. Large tool output is stored as a retrievable artifact with a bounded preview, and state-changing tools return compact acknowledgements instead of duplicating state into the next fresh prompt tail.
 
+Configured `tool_pre` hooks run before tool execution and can block a tool by exiting nonzero. `tool_post` hooks run after tool execution; failures are reported as runtime errors without replacing the original tool result. Hooks are plain project commands with safe environment, timeout, and bounded output, not a plugin system.
+
 MiMo reports cache reads through `usage.prompt_tokens_details.cached_tokens`. Kulmi reports cached and fresh tokens independently for every request. Cache writes are currently free according to MiMo's pricing documentation, while cache-hit input for `mimo-v2.5-pro` is priced far below uncached input.
 
 ## Safety and persistence
 
-Autonomy levels are `read`, `low`, `medium`, and `high`. The shell policy blocks deletion, privilege escalation, remote publication, unsafe redirects, nested shells, dynamic interpreters, and credential exposure. Model-controlled processes receive a minimal environment, isolated home and temporary directory, closed stdin, timeout, bounded output, process-group cancellation, and secret redaction.
+Autonomy levels are `read`, `low`, `medium`, `high`, and `trusted`. The shell policy blocks deletion, privilege escalation, remote publication, unsafe redirects, nested shells, dynamic interpreters, and credential exposure. Model-controlled processes receive a minimal environment, isolated home and temporary directory, closed stdin, timeout, bounded output, process-group cancellation, and secret redaction.
 
 OS containment is required by default. On macOS, Kulmi uses the built-in Seatbelt runner through `sandbox-exec` with a deny-by-default profile. On Linux, it uses Bubblewrap with an empty mount namespace and user, IPC, PID, UTS, cgroup, and network namespaces. Both expose system and selected toolchain paths read-only, expose the workspace and private sandbox temporary directory as writable, deny writes to `.git`, and deny network access unless `sandbox.network=true`. Kulmi fails closed when the required backend is unavailable. Apple marks `sandbox-exec` as deprecated, but it remains the only built-in process-level profile runner on supported macOS releases; `kulmi doctor` reports backend availability.
 

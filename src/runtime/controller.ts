@@ -34,6 +34,9 @@ import { fetchUrlTool, freeWebSearchTool } from "../tools/web-search.js";
 import { skillTools } from "../tools/skills.js";
 import { ruleTools } from "../tools/rules.js";
 import { astGrepTool } from "../tools/ast-grep.js";
+import { gitTools } from "../tools/git.js";
+import { browserQaTool } from "../tools/browser.js";
+import { attachImageTool } from "../tools/media.js";
 import { lspTool } from "../tools/lsp.js";
 
 export interface ControllerOptions {
@@ -45,7 +48,7 @@ export interface ControllerOptions {
   resumeSessionId?: string;
   events?: EventBus;
   webSearch?: SearchMode;
-  requestPermission?: (request: PermissionRequest) => Promise<boolean>;
+  requestPermission?: (request: PermissionRequest, requestId: string) => Promise<boolean>;
 }
 
 export interface UndoResult {
@@ -158,7 +161,7 @@ export class SessionController {
         await events.emit({ type: "permission.requested", agentId: "runtime", requestId, request });
         let approved = false;
         try {
-          approved = await options.requestPermission?.(request) ?? false;
+          approved = await options.requestPermission?.(request, requestId) ?? false;
           return approved;
         } finally {
           await events.emit({ type: "permission.resolved", agentId: "runtime", requestId, approved });
@@ -233,8 +236,8 @@ export class SessionController {
       const readOnly = job.mode !== "implement";
       const searchTools = search.mode === "free" ? [freeWebSearchTool(search), fetchUrlTool()] : [];
       const childTools = readOnly
-        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...ruleTools(rules), astGrepTool, lspTool, ...workerProgressTools()])
-        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...ruleTools(rules), astGrepTool, lspTool, ...workerProgressTools()]);
+        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools().filter((tool) => tool.readOnly), browserQaTool, attachImageTool, ...workerProgressTools()])
+        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools(), browserQaTool, attachImageTool, ...workerProgressTools()]);
       const childAgent = new Agent({
         provider,
         tools: childTools,
@@ -260,6 +263,7 @@ export class SessionController {
         contextWindow: resolved.contextWindow,
         sandbox: config.sandbox,
         ...(!readOnly && permissions ? { permissions } : {}),
+        hooks: config.hooks,
       });
       activeWorkers.set(job.id, childAgent);
       try {
@@ -320,7 +324,10 @@ export class SessionController {
       ...skillTools(skills),
       ...ruleTools(rules),
       astGrepTool,
+      ...gitTools(),
       lspTool,
+      browserQaTool,
+      attachImageTool,
     ];
     const agent = new Agent({
       provider,
@@ -349,6 +356,7 @@ export class SessionController {
       ...(loaded?.session.messages ? { messages: loaded.session.messages as ProviderMessage[] } : {}),
       subagents: scheduler,
       permissions,
+      hooks: config.hooks,
     });
     if (loaded && previousMode === "chat" && state.mode === "task") {
       await agent.appendRuntimeContext("Task mode is now active. Use the task tools directly; do not call start_task.");

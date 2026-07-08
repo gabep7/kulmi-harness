@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -350,7 +350,7 @@ describe("Agent", () => {
     expect(provider.requests[1]?.cacheScope).toBe("agent_compact:chat:1");
     expect((await readdir(join(session.path, "archives"))).length).toBe(1);
     expect(agent.messages.some((message) =>
-      message.role === "user" && message.content.includes("<compaction-summary>"))).toBe(true);
+      message.role === "user" && typeof message.content === "string" && message.content.includes("<compaction-summary>"))).toBe(true);
     expect(agent.messages[0]).toEqual({ role: "system", content: "stable" });
   });
 
@@ -429,6 +429,7 @@ describe("Agent", () => {
     const compactionUser = provider.requests[0]?.messages[1];
     expect(compactionUser).toMatchObject({ role: "user" });
     if (!compactionUser || compactionUser.role !== "user") throw new Error("missing compaction request");
+    if (typeof compactionUser.content !== "string") throw new Error("compaction request should be text");
     const summaryInput = JSON.stringify(JSON.parse(compactionUser.content));
     expect(summaryInput).toContain("[Tool result pruned before compaction:");
     expect(summaryInput).toContain("[...pruned...]");
@@ -442,6 +443,53 @@ describe("Agent", () => {
     expect(archivedMessages).toContain("OLD_SECRET_MIDDLE");
     expect(archivedMessages).toContain("LIVE_SECRET_MIDDLE");
     expect(JSON.stringify(agent.messages)).toContain("LIVE_SECRET_MIDDLE");
+  });
+
+  it("converts @image prompt attachments into provider content parts", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-image-prompt-"));
+    await writeFile(
+      join(workspace, "pixel.png"),
+      Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/azYfHsAAAAASUVORK5CYII=", "base64"),
+    );
+    const provider = new ScriptedProvider([textResponse("seen")], "mimo-v2.5");
+    const session = await SessionStore.create({ cwd: workspace, model: provider.model });
+    const state: RunState = {
+      agentId: "agent_image_prompt",
+      mode: "chat",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([]),
+      events: new EventBus(),
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "stable",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "read",
+      maxSteps: 3,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 1_000_000,
+    });
+
+    await expect(agent.run("Compare @image pixel.png now", new AbortController().signal)).resolves.toMatchObject({ text: "seen" });
+    const userMessage = provider.requests[0]?.messages[1];
+    if (!userMessage || userMessage.role !== "user" || !Array.isArray(userMessage.content)) {
+      throw new Error("image prompt should be sent as user content parts");
+    }
+    expect(userMessage.content[0]).toMatchObject({ type: "text", text: expect.stringMatching(/^Compare\s+now$/) });
+    expect(userMessage.content[1]).toEqual({
+      type: "image_url",
+      image_url: { url: expect.stringMatching(/^data:image\/png;base64,/) },
+    });
   });
 
   it("invalidates accepted completion when a later mutating tool runs", async () => {
@@ -678,11 +726,12 @@ describe("Agent", () => {
 
 class ScriptedProvider implements ModelProvider {
   readonly name = "fake";
-  readonly model = "mimo-v2.5-pro";
+  readonly model: string;
   readonly requests: ProviderRequest[] = [];
   readonly #responses: ProviderResponse[];
 
-  constructor(responses: ProviderResponse[]) {
+  constructor(responses: ProviderResponse[], model = "mimo-v2.5-pro") {
+    this.model = model;
     this.#responses = responses;
   }
 

@@ -9,9 +9,14 @@ export interface FunctionToolCall {
   };
 }
 
+export type ProviderContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } }
+  | { type: "image_attachment"; attachment_id: string; mime_type: string; path: string };
+
 export type ProviderMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | { role: "user"; content: string | ProviderContentPart[] }
   | {
       role: "assistant";
       content: string | null;

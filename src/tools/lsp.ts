@@ -3,6 +3,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { z } from "zod";
 import { resolveToolBinary } from "../runtime/binaries.js";
 import { resolveWorkspacePath } from "../security/paths.js";
+import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
 import { defineTool } from "./types.js";
 
 interface LspMessage {
@@ -30,6 +31,8 @@ class LspClient {
   #buffer = "";
   #initialized = false;
   #openFiles = new Set<string>();
+  #starting: Promise<void> | undefined;
+  #env: NodeJS.ProcessEnv | undefined;
   readonly #workspaceRoot: string;
 
   constructor(workspaceRoot: string) {
@@ -38,17 +41,28 @@ class LspClient {
 
   async ensureRunning(): Promise<void> {
     if (this.#initialized && this.#process) return;
+    this.#starting ??= this.#start();
+    try {
+      await this.#starting;
+    } finally {
+      this.#starting = undefined;
+    }
+  }
 
+  async #start(): Promise<void> {
     const binary = await resolveToolBinary("typescript-language-server");
     if (!binary) {
       throw new Error("LSP server unavailable. Install dependencies with npm install or add typescript-language-server to PATH.");
     }
+    this.#env = safeChildEnvironment();
     try {
       this.#process = spawn(binary, ["--stdio"], {
         cwd: this.#workspaceRoot,
+        env: this.#env,
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch {
+      this.#disposeProcess();
       throw new Error("LSP server unavailable. Install dependencies with npm install or add typescript-language-server to PATH.");
     }
 
@@ -56,14 +70,14 @@ class LspClient {
       const msg = err.message.includes("ENOENT")
         ? "LSP server unavailable. Install dependencies with npm install or add typescript-language-server to PATH."
         : "LSP server disconnected";
-      this.#process = null;
+      this.#disposeProcess();
       this.#initialized = false;
       for (const pending of this.#pending.values()) pending.reject(new Error(msg));
       this.#pending.clear();
     });
 
     this.#process.on("exit", () => {
-      this.#process = null;
+      this.#disposeProcess();
       this.#initialized = false;
       for (const pending of this.#pending.values()) pending.reject(new Error("LSP server exited"));
       this.#pending.clear();
@@ -76,7 +90,12 @@ class LspClient {
 
     this.#process.stderr?.on("data", () => {});
 
-    await this.#initialize();
+    try {
+      await this.#initialize();
+    } catch (error) {
+      this.#disposeProcess();
+      throw error;
+    }
   }
 
   async #initialize(): Promise<void> {
@@ -193,13 +212,22 @@ class LspClient {
   }
 
   dispose(): void {
-    if (this.#process) {
-      this.#process.kill();
-      this.#process = null;
-    }
+    this.#disposeProcess();
     this.#initialized = false;
+    this.#starting = undefined;
     for (const pending of this.#pending.values()) pending.reject(new Error("LSP client disposed"));
     this.#pending.clear();
+  }
+
+  #disposeProcess(): void {
+    this.#process?.kill();
+    this.#process = null;
+    this.#buffer = "";
+    this.#openFiles.clear();
+    if (this.#env) {
+      disposeChildEnvironment(this.#env);
+      this.#env = undefined;
+    }
   }
 }
 

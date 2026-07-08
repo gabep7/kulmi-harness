@@ -68,7 +68,7 @@ const updatePlanTool = defineTool({
 const startTaskTool = defineTool({
   name: "start_task",
   description:
-    "Promote this session from free-form chat to goal-oriented task mode. In task mode you must create a plan, work through it step by step, and call complete_task to finish. Use this when the user has given you a concrete implementation or research request rather than casual conversation.",
+    "Promote chat to task mode for concrete implementation, inspection, code-review, or research. If the user says \"this\", \"here\", current repo/project/app/site/codebase/files, or asks for improvements/review, assume they mean the current workspace and use this tool.",
   schema: z.object({
     goal: z.string().min(1).max(2000).describe("Short description of what needs to be done"),
   }),

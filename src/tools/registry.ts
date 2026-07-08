@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { EventBus } from "../core/events.js";
 import type { ProviderTool } from "../provider/types.js";
 import { redactKnownSecrets } from "../core/redact.js";
+import { runToolHooks } from "../runtime/hooks.js";
 import type { AnyTool, ToolContext, ToolResult } from "./types.js";
 
 export interface ToolExecution {
@@ -82,6 +83,21 @@ export class ToolRegistry {
       );
     }
 
+    const preHook = options.context.hooks
+      ? await runToolHooks(options.context.hooks, {
+        phase: "tool_pre",
+        tool: tool.name,
+        callId: options.callId,
+        agentId: options.context.state.agentId,
+        cwd: options.context.cwd,
+        workspaceRoot: options.context.workspaceRoot,
+        input: parsed.data,
+      })
+      : { ok: true, output: "" };
+    if (!preHook.ok) {
+      return this.#finishHookError(tool, options, started, `pre-tool hook failed for ${tool.name}: ${preHook.output}`);
+    }
+
     await options.context.events.emit({
       type: "tool.started",
       agentId: options.context.state.agentId,
@@ -95,6 +111,25 @@ export class ToolRegistry {
       result = await tool.execute(options.context, parsed.data);
     } catch (error) {
       result = { content: error instanceof Error ? error.message : String(error), isError: true };
+    }
+    if (options.context.hooks) {
+      const postHook = await runToolHooks(options.context.hooks, {
+        phase: "tool_post",
+        tool: tool.name,
+        callId: options.callId,
+        agentId: options.context.state.agentId,
+        cwd: options.context.cwd,
+        workspaceRoot: options.context.workspaceRoot,
+        input: parsed.data,
+        result,
+      });
+      if (!postHook.ok) {
+        await options.context.events.emit({
+          type: "error",
+          agentId: options.context.state.agentId,
+          message: `post-tool hook failed for ${tool.name}: ${postHook.output}`,
+        });
+      }
     }
     if (
       !tool.readOnly &&
@@ -148,6 +183,25 @@ export class ToolRegistry {
     detail: string,
   ): Promise<ToolExecution> {
     const content = `invalid arguments for ${tool.name}: ${detail}`;
+    await options.context.events.emit({
+      type: "tool.finished",
+      agentId: options.context.state.agentId,
+      callId: options.callId,
+      tool: tool.name,
+      output: content,
+      isError: true,
+      durationMs: Math.round(performance.now() - started),
+    });
+    return { content, isError: true };
+  }
+
+  async #finishHookError(
+    tool: AnyTool,
+    options: { callId: string; context: ToolContext },
+    started: number,
+    detail: string,
+  ): Promise<ToolExecution> {
+    const content = redactKnownSecrets(detail);
     await options.context.events.emit({
       type: "tool.finished",
       agentId: options.context.state.agentId,

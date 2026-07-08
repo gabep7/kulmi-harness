@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { type ChildProcessByStdio, spawn } from "node:child_process";
+import type { Readable } from "node:stream";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, extname, isAbsolute, relative } from "node:path";
@@ -6,6 +7,7 @@ import fg from "fast-glob";
 import { z } from "zod";
 import { combineDiffs, createTextDiff } from "../core/diff.js";
 import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
+import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
 import { resolveToolBinary } from "../runtime/binaries.js";
 import { defineTool, type AnyTool } from "./types.js";
 
@@ -236,7 +238,14 @@ const grepTool = defineTool({
     );
     if (input.fixed_strings) args.push("--fixed-strings");
     args.push("--", input.pattern, ".");
-    const child = spawn(binary, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const env = safeChildEnvironment();
+    let child: ChildProcessByStdio<null, Readable, Readable>;
+    try {
+      child = spawn(binary, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      disposeChildEnvironment(env);
+      throw error;
+    }
     const chunks: Buffer[] = [];
     const errors: Buffer[] = [];
     let retainedBytes = 0;
@@ -262,7 +271,10 @@ const grepTool = defineTool({
     const { code, signal } = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       child.once("error", reject);
       child.once("close", (code, signal) => resolve({ code, signal }));
-    }).finally(() => context.signal.removeEventListener("abort", abort));
+    }).finally(() => {
+      context.signal.removeEventListener("abort", abort);
+      disposeChildEnvironment(env);
+    });
     if (context.signal.aborted) throw context.signal.reason ?? new Error("grep aborted");
     if (!truncated && (code ?? 1) > 1) throw new Error(Buffer.concat(errors).toString("utf8") || `rg exited ${code}`);
     const lines = Buffer.concat(chunks).toString("utf8").split("\n").filter(Boolean);

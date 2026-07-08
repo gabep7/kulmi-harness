@@ -48,6 +48,17 @@ export interface UndoConfig {
   messageHistory: UndoMessageHistory;
 }
 
+export interface HookScriptConfig {
+  tool?: string;
+  command: string;
+  timeoutSeconds: number;
+}
+
+export interface HooksConfig {
+  toolPre: HookScriptConfig[];
+  toolPost: HookScriptConfig[];
+}
+
 export interface KulmiConfig {
   defaultModel: string;
   defaultAutonomy: AutonomyLevel;
@@ -59,6 +70,7 @@ export interface KulmiConfig {
   search: SearchConfig;
   sandbox: SandboxConfig;
   undo: UndoConfig;
+  hooks: HooksConfig;
 }
 
 export interface ResolvedModel extends ModelConfig {
@@ -124,6 +136,10 @@ const defaults: KulmiConfig = {
   undo: {
     messageHistory: "truncate",
   },
+  hooks: {
+    toolPre: [],
+    toolPost: [],
+  },
 };
 
 const httpUrlSchema = z.string().url().refine((value) => {
@@ -161,16 +177,41 @@ const undoFileSchema = z.object({
   message_history: z.enum(["truncate", "keep"]).optional(),
   messageHistory: z.enum(["truncate", "keep"]).optional(),
 }).strict();
+const defaultFileSchema = z.object({
+  default_model: z.string().min(1).optional(),
+  defaultModel: z.string().min(1).optional(),
+  default_autonomy: z.enum(["read", "low", "medium", "high", "trusted"]).optional(),
+  defaultAutonomy: z.enum(["read", "low", "medium", "high", "trusted"]).optional(),
+}).strict();
+const hookScriptFileSchema = z.union([
+  z.string().min(1),
+  z.object({
+    command: z.string().min(1),
+    tool: z.string().min(1).optional(),
+    timeout_seconds: z.number().int().min(1).max(1_800).optional(),
+    timeoutSeconds: z.number().int().min(1).max(1_800).optional(),
+  }).strict(),
+]);
+const hooksFileSchema = z.object({
+  tool_pre: z.array(hookScriptFileSchema).optional(),
+  toolPre: z.array(hookScriptFileSchema).optional(),
+  tool_post: z.array(hookScriptFileSchema).optional(),
+  toolPost: z.array(hookScriptFileSchema).optional(),
+}).strict();
 const fileConfigSchema = z.object({
   default_model: z.string().min(1).optional(),
+  defaultModel: z.string().min(1).optional(),
   default_autonomy: z.enum(["read", "low", "medium", "high", "trusted"]).optional(),
+  defaultAutonomy: z.enum(["read", "low", "medium", "high", "trusted"]).optional(),
   max_steps: z.number().int().min(1).max(10_000).optional(),
   max_subagents: z.number().int().min(1).max(64).optional(),
   command_timeout_seconds: z.number().int().min(1).max(1_800).optional(),
   max_output_bytes: z.number().int().min(1_024).max(100_000_000).optional(),
+  default: defaultFileSchema.optional(),
   search: searchFileSchema.optional(),
   sandbox: sandboxFileSchema.optional(),
   undo: undoFileSchema.optional(),
+  hooks: hooksFileSchema.optional(),
   models: z.record(z.string().min(1), modelFileSchema).optional(),
 }).passthrough();
 type FileConfig = z.infer<typeof fileConfigSchema>;
@@ -250,9 +291,10 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
   const search = file.search;
   const sandbox = file.sandbox;
   const undo = file.undo;
+  const hooks = file.hooks;
   const merged: KulmiConfig = {
-    defaultModel: file.default_model ?? base.defaultModel,
-    defaultAutonomy: file.default_autonomy ?? base.defaultAutonomy,
+    defaultModel: file.default_model ?? file.defaultModel ?? file.default?.default_model ?? file.default?.defaultModel ?? base.defaultModel,
+    defaultAutonomy: file.default_autonomy ?? file.defaultAutonomy ?? file.default?.default_autonomy ?? file.default?.defaultAutonomy ?? base.defaultAutonomy,
     maxSteps: file.max_steps ?? base.maxSteps,
     maxSubagents: file.max_subagents ?? base.maxSubagents,
     commandTimeoutSeconds: file.command_timeout_seconds ?? base.commandTimeoutSeconds,
@@ -271,6 +313,12 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
     undo: {
       messageHistory: undo?.message_history ?? undo?.messageHistory ?? base.undo.messageHistory,
     },
+    hooks: hooks
+      ? {
+        toolPre: parseHookScripts(hooks.tool_pre ?? hooks.toolPre ?? []),
+        toolPost: parseHookScripts(hooks.tool_post ?? hooks.toolPost ?? []),
+      }
+      : base.hooks,
   };
   validateMergedConfig(merged);
   return merged;
@@ -302,6 +350,12 @@ function validateMergedConfig(config: KulmiConfig): void {
       throw new Error(`model ${name} (${model.billing}) must use ${expectedEnv}`);
     }
   }
+}
+
+function parseHookScripts(values: z.infer<typeof hookScriptFileSchema>[]): HookScriptConfig[] {
+  return values.map((value) => typeof value === "string"
+    ? { command: value, timeoutSeconds: 30 }
+    : { command: value.command, timeoutSeconds: value.timeout_seconds ?? value.timeoutSeconds ?? 30, ...(value.tool ? { tool: value.tool } : {}) });
 }
 
 export function resolveModel(config: KulmiConfig, name?: string): ResolvedModel {
@@ -346,6 +400,11 @@ network = false # allow sandboxed project commands to use the network
 
 [undo]
 message_history = "truncate" # truncate or keep
+
+[hooks]
+# tool_pre = ["npm run lint:changed"]
+# tool_post = ["npm run verify:changed"]
+# tool_pre = [{ tool = "edit_file", command = "npm run lint:changed", timeout_seconds = 30 }]
 
 [models.mimo-v2.5-pro]
 model = "mimo-v2.5-pro"

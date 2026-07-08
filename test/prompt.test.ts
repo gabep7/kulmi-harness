@@ -8,8 +8,11 @@ describe("system prompt", () => {
     const worker = prompt("subagent", true);
 
     expect(chat).toContain("call start_task once");
+    expect(chat).toContain("assume they mean the current workspace");
+    expect(chat).toContain("asks for improvements/review");
     expect(task).toContain("Finish only through complete_task");
     expect(task).not.toContain("call start_task once");
+    expect(task).toContain("Use worker presets sparingly");
     expect(worker).toContain("Worker mode");
     expect(worker).toContain("start_task, update_plan, complete_task, and child-agent tools are unavailable");
     expect(worker).toContain("Finish only through report_worker");
@@ -22,7 +25,7 @@ describe("system prompt", () => {
     expect(first).toBe(second);
     expect(first).toContain("PROJECT CONTRACT");
     expect(first).toContain("- release: Verify a release");
-    expect(Buffer.byteLength(first, "utf8")).toBeLessThan(2_200);
+    expect(Buffer.byteLength(first, "utf8")).toBeLessThan(2_400);
   });
 });
 

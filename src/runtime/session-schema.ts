@@ -17,9 +17,23 @@ const toolCallSchema = z.object({
   }).strict(),
 }).strict();
 
+const providerContentPartSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("text"), text: z.string() }).strict(),
+  z.object({
+    type: z.literal("image_url"),
+    image_url: z.object({ url: z.string().min(1) }).strict(),
+  }).strict(),
+  z.object({
+    type: z.literal("image_attachment"),
+    attachment_id: z.string().regex(/^attachment_[a-f0-9]{16}$/),
+    mime_type: z.string().min(1),
+    path: z.string().min(1),
+  }).strict(),
+]);
+
 const providerMessageSchema = z.discriminatedUnion("role", [
   z.object({ role: z.literal("system"), content: z.string() }).strict(),
-  z.object({ role: z.literal("user"), content: z.string() }).strict(),
+  z.object({ role: z.literal("user"), content: z.union([z.string(), z.array(providerContentPartSchema).min(1)]) }).strict(),
   z.object({
     role: z.literal("assistant"),
     content: z.string().nullable(),

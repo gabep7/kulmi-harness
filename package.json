@@ -22,9 +22,10 @@
     "test:watch": "vitest",
     "test:live:mimo": "tsx scripts/mimo-smoke.ts",
     "test:tui": "vitest run test/tui.test.tsx",
+    "test:package": "node scripts/package-smoke.mjs",
     "check:version": "node scripts/check-version.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "check": "npm run check:version && npm run typecheck && npm test && npm run build"
+    "check": "node scripts/check.mjs"
   },
   "engines": {
     "node": ">=22"
@@ -40,6 +41,7 @@
     "ink": "^7.1.0",
     "ink-text-input": "^6.0.0",
     "picocolors": "^1.1.1",
+    "playwright-core": "^1.61.1",
     "react": "^19.2.7",
     "ripgrep": "^0.3.1",
     "shell-quote": "^1.8.4",

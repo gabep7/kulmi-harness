@@ -101,6 +101,9 @@ export class MiMoProvider implements ModelProvider {
       ...tool,
       function: { ...tool.function, strict: true },
     }));
+    if (this.model !== "mimo-v2.5" && request.messages.some(hasImagePart)) {
+      throw new Error("image attachments require mimo-v2.5; mimo-v2.5-pro is text-only");
+    }
     const messages = request.messages.map(toWireMessage);
     validateConversation(messages, thinking);
     const body = JSON.stringify({
@@ -322,6 +325,11 @@ function toWireMessage(message: ProviderMessage): ProviderMessage {
     content: message.content,
     tool_call_id: message.tool_call_id,
   };
+}
+
+function hasImagePart(message: ProviderMessage): boolean {
+  return message.role === "user" && Array.isArray(message.content) &&
+    message.content.some((part) => part.type === "image_url");
 }
 
 function isPrefix(previous: readonly string[], current: readonly string[]): boolean {

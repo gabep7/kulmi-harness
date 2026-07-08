@@ -25,10 +25,21 @@ const openSchema = z.object({
 });
 const sessionIdSchema = z.object({ sessionId: z.string() });
 const promptSchema = sessionIdSchema.extend({ prompt: z.string().min(1) });
+const workerIdSchema = sessionIdSchema.extend({ jobId: z.string().min(1) });
+const workerSteerSchema = workerIdSchema.extend({ message: z.string().min(1) });
+const permissionResponseSchema = sessionIdSchema.extend({
+  requestId: z.string().min(1),
+  approved: z.boolean(),
+});
+
+interface PendingPermission {
+  resolve: (approved: boolean) => void;
+}
 
 interface ManagedSession {
   controller: SessionController;
   running: AbortController | undefined;
+  pendingPermissions: Map<string, PendingPermission>;
 }
 
 export async function runRpcServer(defaultCwd: string): Promise<void> {
@@ -58,17 +69,21 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
       ...(requestedModel ? { requestedModel } : {}),
     });
     const events = new EventBus();
+    const pendingPermissions = new Map<string, PendingPermission>();
     const controller = await SessionController.create({
       cwd: params.cwd,
       mode: (params.mode ?? saved?.state?.mode ?? "task") as AgentMode,
       autonomy: params.autonomy as AutonomyLevel,
       events,
+      requestPermission: (_request, requestId) => new Promise<boolean>((resolve) => {
+        pendingPermissions.set(requestId, { resolve });
+      }),
       ...(params.model || credential?.model ? { model: params.model ?? credential!.model } : {}),
       ...(params.sessionId ? { resumeSessionId: params.sessionId } : {}),
       ...(params.webSearch ? { webSearch: params.webSearch as SearchMode } : {}),
     });
     events.on((envelope) => notify("event", { sessionId: controller.sessionId, envelope }).then(() => undefined));
-    sessions.set(controller.sessionId, { controller, running: undefined });
+    sessions.set(controller.sessionId, { controller, running: undefined, pendingPermissions });
     return {
       sessionId: controller.sessionId,
       model: controller.model,
@@ -101,6 +116,8 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
               streamingEvents: true,
               cancellation: true,
               undo: true,
+              workers: true,
+              permissions: true,
             },
           });
           return;
@@ -152,11 +169,69 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
           });
           return;
         }
+        case "workers.list": {
+          const params = sessionIdSchema.parse(request.params);
+          const managed = sessions.get(params.sessionId);
+          if (!managed) throw new RpcError(-32001, `session ${params.sessionId} is not open`);
+          await respond(request.id, managed.controller.workers());
+          return;
+        }
+        case "worker.inspect": {
+          const params = workerIdSchema.parse(request.params);
+          const managed = sessions.get(params.sessionId);
+          if (!managed) throw new RpcError(-32001, `session ${params.sessionId} is not open`);
+          const job = managed.controller.workers().find((worker) => worker.id === params.jobId);
+          if (!job) throw new RpcError(-32004, `unknown worker ${params.jobId}`);
+          await respond(request.id, job);
+          return;
+        }
+        case "worker.steer": {
+          const params = workerSteerSchema.parse(request.params);
+          const managed = sessions.get(params.sessionId);
+          if (!managed) throw new RpcError(-32001, `session ${params.sessionId} is not open`);
+          await respond(request.id, { result: await managed.controller.steerWorker(params.jobId, params.message) });
+          return;
+        }
+        case "worker.cancel": {
+          const params = workerIdSchema.parse(request.params);
+          const managed = sessions.get(params.sessionId);
+          if (!managed) throw new RpcError(-32001, `session ${params.sessionId} is not open`);
+          await respond(request.id, { result: await managed.controller.cancelWorker(params.jobId) });
+          return;
+        }
+        case "worker.retry": {
+          const params = workerIdSchema.parse(request.params);
+          const managed = sessions.get(params.sessionId);
+          if (!managed) throw new RpcError(-32001, `session ${params.sessionId} is not open`);
+          const abort = new AbortController();
+          await respond(request.id, { result: await managed.controller.retryWorker(params.jobId, abort.signal) });
+          return;
+        }
+        case "worker.integrate": {
+          const params = workerIdSchema.parse(request.params);
+          const managed = sessions.get(params.sessionId);
+          if (!managed) throw new RpcError(-32001, `session ${params.sessionId} is not open`);
+          await respond(request.id, { result: await managed.controller.integrateWorker(params.jobId) });
+          return;
+        }
+        case "permission.respond": {
+          const params = permissionResponseSchema.parse(request.params);
+          const managed = sessions.get(params.sessionId);
+          if (!managed) throw new RpcError(-32001, `session ${params.sessionId} is not open`);
+          const pending = managed.pendingPermissions.get(params.requestId);
+          if (!pending) throw new RpcError(-32005, `unknown permission ${params.requestId}`);
+          managed.pendingPermissions.delete(params.requestId);
+          pending.resolve(params.approved);
+          await respond(request.id, { resolved: true });
+          return;
+        }
         case "session.close": {
           const params = sessionIdSchema.parse(request.params);
           const managed = sessions.get(params.sessionId);
           if (managed) {
             managed.running?.abort(new Error("session closed by client"));
+            for (const pending of managed.pendingPermissions.values()) pending.resolve(false);
+            managed.pendingPermissions.clear();
             await managed.controller.close();
             sessions.delete(params.sessionId);
           }

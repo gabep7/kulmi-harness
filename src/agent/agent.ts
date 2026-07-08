@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
+import { extname } from "node:path";
+import { readFile } from "node:fs/promises";
 import type { EventBus } from "../core/events.js";
 import type { AutonomyLevel, CompletionRecord, RunState } from "../core/types.js";
-import type { ModelProvider, ProviderMessage, ProviderTool } from "../provider/types.js";
+import type { ModelProvider, ProviderContentPart, ProviderMessage, ProviderTool } from "../provider/types.js";
 import type { CheckpointStore } from "../runtime/checkpoints.js";
 import type { ArtifactStore } from "../runtime/artifacts.js";
 import type { SessionStore } from "../runtime/session-store.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { PermissionApi, SubagentApi, ToolContext } from "../tools/types.js";
-import type { SandboxConfig } from "../config/config.js";
+import type { HooksConfig, SandboxConfig } from "../config/config.js";
+import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
 
 export interface AgentOptions {
   provider: ModelProvider;
@@ -29,6 +32,7 @@ export interface AgentOptions {
   messages?: ProviderMessage[];
   subagents?: SubagentApi;
   permissions?: PermissionApi;
+  hooks?: HooksConfig;
 }
 
 export interface AgentResult {
@@ -162,7 +166,7 @@ export class Agent {
         ...(state.parentAgentId ? { parentAgentId: state.parentAgentId } : {}),
         prompt,
       });
-      this.#messages.push({ role: "user", content: prompt });
+      this.#messages.push({ role: "user", content: await promptContent(prompt, this.#options.workspaceRoot, this.#options.cwd, this.#options.artifacts) });
       await this.#options.session.saveMessages(this.#messages);
 
       let consecutiveBareFinals = 0;
@@ -189,7 +193,7 @@ export class Agent {
           promptTokens = estimateTokens(this.#messages, providerTools);
         }
         const response = await this.#options.provider.complete({
-          messages: this.#messages,
+          messages: await materializeMessageAttachments(this.#messages),
           tools: providerTools,
           signal,
           cacheScope: `${state.agentId}:${state.mode}:${this.#cacheEpoch}`,
@@ -381,6 +385,7 @@ export class Agent {
       ...(options.sandbox ? { sandbox: options.sandbox } : {}),
       ...(options.subagents ? { subagents: options.subagents } : {}),
       ...(options.permissions ? { permissions: options.permissions } : {}),
+      ...(options.hooks ? { hooks: options.hooks } : {}),
     };
   }
 
@@ -430,7 +435,7 @@ export class Agent {
     );
     if (this.#stickyContext) {
       const last = this.#messages.at(-1);
-      if (!(last?.role === "user" && last.content.includes("<sticky-context>"))) {
+      if (!(last?.role === "user" && typeof last.content === "string" && last.content.includes("<sticky-context>"))) {
         this.#messages.push({ role: "user", content: `<sticky-context>\n${this.#stickyContext}\n</sticky-context>` });
       }
     }
@@ -448,6 +453,78 @@ export class Agent {
     });
   }
 }
+async function promptContent(prompt: string, workspaceRoot: string, cwd: string, artifacts: ArtifactStore): Promise<string | ProviderContentPart[]> {
+  const matches = [...prompt.matchAll(/@image\s+([^\s]+)/g)];
+  if (matches.length === 0) return prompt;
+  const parts: ProviderContentPart[] = [
+    { type: "text", text: prompt.replace(/@image\s+([^\s]+)/g, "").trim() || "Inspect the attached image." },
+  ];
+  for (const match of matches) {
+    const rawPath = match[1];
+    if (!rawPath) continue;
+    const path = await resolveWorkspacePath({ workspaceRoot, cwd, input: rawPath, mustExist: true });
+    assertNotSensitivePath(path);
+    const bytes = await readFile(path);
+    if (bytes.length > 50 * 1024 * 1024) throw new Error(`image attachment is too large: ${rawPath}`);
+    const mimeType = mimeTypeFor(path);
+    const attachment = await artifacts.storeAttachment({
+      source: rawPath,
+      bytes,
+      mimeType,
+      extension: extname(path).slice(1).toLowerCase(),
+    });
+    parts.push({
+      type: "image_attachment",
+      attachment_id: attachment.attachmentId,
+      mime_type: attachment.mimeType,
+      path: attachment.path,
+    });
+  }
+  return parts;
+}
+
+async function materializeMessageAttachments(messages: ProviderMessage[]): Promise<ProviderMessage[]> {
+  const out: ProviderMessage[] = [];
+  for (const message of messages) {
+    if (message.role !== "user" || !Array.isArray(message.content)) {
+      out.push(message);
+      continue;
+    }
+    const content: ProviderContentPart[] = [];
+    for (const part of message.content) {
+      if (part.type !== "image_attachment") {
+        content.push(part);
+        continue;
+      }
+      const bytes = await readFile(part.path);
+      content.push({
+        type: "image_url",
+        image_url: { url: `data:${part.mime_type};base64,${bytes.toString("base64")}` },
+      });
+    }
+    out.push({ ...message, content });
+  }
+  return out;
+}
+
+function mimeTypeFor(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    case ".bmp":
+      return "image/bmp";
+    default:
+      throw new Error(`unsupported image attachment type: ${path}`);
+  }
+}
+
 
 function pruneCompactionMessages(messages: ProviderMessage[]): { messages: ProviderMessage[]; prunedToolResults: number } {
   let prunedToolResults = 0;
@@ -501,7 +578,7 @@ function replaceRunState(target: RunState, source: RunState): void {
 }
 
 function isUndoContext(message: ProviderMessage | undefined, checkpointId: string): boolean {
-  return message?.role === "user" && message.content.includes(`<undo-context checkpoint="${checkpointId}">`);
+  return message?.role === "user" && typeof message.content === "string" && message.content.includes(`<undo-context checkpoint="${checkpointId}">`);
 }
 
 function estimateTokens(messages: ProviderMessage[], tools: ProviderTool[] = []): number {

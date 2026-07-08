@@ -238,6 +238,7 @@ program
     const astGrepBinary = await resolveToolBinary("sg");
     const lspBinary = await resolveToolBinary("typescript-language-server");
     const ripgrepBinary = await resolveToolBinary("rg");
+    const chromium = resolveChromiumBinary();
     const checks = [
       ["node", Number.parseInt(process.versions.node, 10) >= 22, process.versions.node],
       ["git", Boolean(gitVersion), gitVersion || "missing"],
@@ -249,6 +250,7 @@ program
       ["lsp", Boolean(lspBinary), lspBinary ?? "typescript-language-server missing; run npm install or add it to PATH"],
       ["ripgrep", Boolean(ripgrepBinary), ripgrepBinary ?? "rg missing; run npm install or add rg to PATH"],
       ["search", true, config.search.mode === "free" ? config.search.provider : "off"],
+      ["browser", true, chromium ?? "Chrome/Chromium missing; browser_qa needs KULMI_CHROMIUM or a local browser"],
     ] as const;
     for (const [name, ok, detail] of checks) {
       process.stdout.write(`${ok ? "ok" : "warn"}\t${name}\t${detail}\n`);
@@ -328,6 +330,17 @@ async function execute(options: {
     approvalReadline?.close();
     await controller.close();
   }
+}
+
+function resolveChromiumBinary(): string | undefined {
+  return [
+    process.env.KULMI_CHROMIUM,
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ].find((path) => path && existsSync(path));
 }
 
 function parseAutonomy(value: string): AutonomyLevel {

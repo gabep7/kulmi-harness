@@ -1,0 +1,124 @@
+import { execFile } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { z } from "zod";
+import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
+import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
+import { defineTool, type AnyTool, type ToolContext } from "./types.js";
+
+const execFileAsync = promisify(execFile);
+
+export function gitTools(): AnyTool[] {
+  return [listConflictsTool, readConflictTool, resolveConflictTool, commitChangesTool];
+}
+
+const listConflictsTool = defineTool({
+  name: "list_conflicts",
+  description: "List unresolved Git merge-conflict files in the workspace.",
+  schema: z.object({}),
+  readOnly: true,
+  async execute(context) {
+    const files = await conflictFiles(context.workspaceRoot);
+    return { content: files.length ? JSON.stringify({ conflicts: files }, null, 2) : "no conflicts" };
+  },
+});
+
+const readConflictTool = defineTool({
+  name: "read_conflict",
+  description: "Read one unresolved conflict file with conflict marker blocks and line numbers.",
+  schema: z.object({ path: z.string().min(1) }),
+  readOnly: true,
+  async execute(context, input) {
+    const path = await resolveWorkspacePath({ workspaceRoot: context.workspaceRoot, cwd: context.cwd, input: input.path, mustExist: true });
+    assertNotSensitivePath(path);
+    const rel = relativeConflictPath(context.workspaceRoot, path);
+    const conflicts = await conflictFiles(context.workspaceRoot);
+    if (!conflicts.includes(rel)) throw new Error(`${rel} is not an unresolved conflict`);
+    const lines = (await readFile(path, "utf8")).split("\n");
+    return { content: lines.map((line, index) => `${index + 1}:${line}`).join("\n") };
+  },
+});
+
+const resolveConflictTool = defineTool({
+  name: "resolve_conflict",
+  description: "Resolve one Git conflict by writing final file content and staging the file. Use content only after reading the conflict.",
+  schema: z.object({ path: z.string().min(1), content: z.string() }),
+  readOnly: false,
+  async execute(context, input) {
+    await requireGitMutationApproval(context, `resolve conflict ${input.path}`);
+    const path = await resolveWorkspacePath({ workspaceRoot: context.workspaceRoot, cwd: context.cwd, input: input.path, mustExist: true });
+    assertNotSensitivePath(path);
+    const rel = relativeConflictPath(context.workspaceRoot, path);
+    const conflicts = await conflictFiles(context.workspaceRoot);
+    if (!conflicts.includes(rel)) throw new Error(`${rel} is not an unresolved conflict`);
+    if (/^<<<<<<< |^=======\s*$|^>>>>>>> /m.test(input.content)) throw new Error("resolved content still contains conflict markers");
+    await writeFile(path, input.content);
+    await git(context.workspaceRoot, ["add", "--", rel]);
+    return { content: `resolved and staged ${rel}`, mutated: true };
+  },
+});
+
+const commitChangesTool = defineTool({
+  name: "commit_changes",
+  description: "Create a local Git commit from selected paths or all current changes. Never pushes. Requires trusted autonomy or approval.",
+  schema: z.object({
+    message: z.string().min(1).max(200),
+    paths: z.array(z.string().min(1)).default([]),
+  }),
+  readOnly: false,
+  async execute(context, input) {
+    await requireGitMutationApproval(context, "create local git commit");
+    if (/\n/.test(input.message)) throw new Error("commit message must be a single line");
+    const statusBefore = await git(context.workspaceRoot, ["status", "--porcelain=v1"]);
+    if (!statusBefore.trim()) throw new Error("nothing to commit");
+    if (input.paths.length > 0) {
+      const rels = [];
+      for (const item of input.paths) {
+        const path = await resolveWorkspacePath({ workspaceRoot: context.workspaceRoot, cwd: context.cwd, input: item, mustExist: false });
+        assertNotSensitivePath(path);
+        rels.push(relativeConflictPath(context.workspaceRoot, path));
+      }
+      await git(context.workspaceRoot, ["add", "--", ...rels]);
+    } else {
+      await git(context.workspaceRoot, ["add", "--all"]);
+    }
+    const staged = await git(context.workspaceRoot, ["diff", "--cached", "--name-only"]);
+    if (!staged.trim()) throw new Error("nothing staged for commit");
+    await git(context.workspaceRoot, ["commit", "-m", input.message]);
+    const hash = (await git(context.workspaceRoot, ["rev-parse", "--short", "HEAD"])).trim();
+    return { content: `created local commit ${hash}: ${input.message}`, mutated: false };
+  },
+});
+
+async function conflictFiles(root: string): Promise<string[]> {
+  const output = await git(root, ["diff", "--name-only", "--diff-filter=U"]);
+  return output.split("\n").map((line) => line.trim()).filter(Boolean).sort();
+}
+
+async function requireGitMutationApproval(context: ToolContext, reason: string): Promise<void> {
+  if (context.autonomy === "trusted") return;
+  const approved = await context.permissions?.request({ tool: "git", risk: "high", reason, input: {} });
+  if (!approved) throw new Error(`${reason} requires trusted autonomy or approval`);
+}
+
+function relativeConflictPath(root: string, path: string): string {
+  const prefix = root.endsWith("/") ? root : `${root}/`;
+  if (!path.startsWith(prefix)) throw new Error(`path is outside workspace: ${path}`);
+  return path.slice(prefix.length);
+}
+
+async function git(root: string, args: string[]): Promise<string> {
+  const env = safeChildEnvironment();
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", root, ...args], {
+      env,
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return stdout;
+  } finally {
+    disposeChildEnvironment(env);
+  }
+}

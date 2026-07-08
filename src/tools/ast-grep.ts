@@ -1,6 +1,8 @@
-import { spawn } from "node:child_process";
+import { type ChildProcessByStdio, spawn } from "node:child_process";
+import type { Readable } from "node:stream";
 import { z } from "zod";
 import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
+import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
 import { resolveToolBinary } from "../runtime/binaries.js";
 import { defineTool } from "./types.js";
 
@@ -31,7 +33,14 @@ export const astGrepTool = defineTool({
     if (!binary) {
       throw new Error("sg (ast-grep) binary not found. Install dependencies with npm install or add sg to PATH.");
     }
-    const child = spawn(binary, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const env = safeChildEnvironment();
+    let child: ChildProcessByStdio<null, Readable, Readable>;
+    try {
+      child = spawn(binary, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      disposeChildEnvironment(env);
+      throw error;
+    }
     const errors: Buffer[] = [];
     const lines: string[] = [];
     let carry = "";
@@ -77,7 +86,10 @@ export const astGrepTool = defineTool({
     const { code } = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       child.once("error", reject);
       child.once("close", (code, signal) => resolve({ code, signal }));
-    }).finally(() => context.signal.removeEventListener("abort", abort));
+    }).finally(() => {
+      context.signal.removeEventListener("abort", abort);
+      disposeChildEnvironment(env);
+    });
     if (context.signal.aborted) throw context.signal.reason ?? new Error("ast_grep aborted");
     if (carry.trim() && !truncated) pushMatch(carry);
     if (!truncated && (code ?? 1) > 1) {

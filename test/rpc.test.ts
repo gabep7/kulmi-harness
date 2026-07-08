@@ -39,7 +39,7 @@ describe("JSON-RPC bridge", () => {
     })}\n`);
     const opened = await waitForResponse(responses, 2);
     await expect(waitForResponse(responses, 1)).resolves.toMatchObject({
-      result: { capabilities: { undo: true } },
+      result: { capabilities: { undo: true, workers: true, permissions: true } },
     });
     const result = opened.result as {
       sessionId: string;
@@ -59,10 +59,26 @@ describe("JSON-RPC bridge", () => {
     child.stdin.write(`${JSON.stringify({
       jsonrpc: "2.0",
       id: 3,
+      method: "workers.list",
+      params: { sessionId: result.sessionId },
+    })}\n`);
+    await expect(waitForResponse(responses, 3)).resolves.toMatchObject({ result: [] });
+    child.stdin.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "permission.respond",
+      params: { sessionId: result.sessionId, requestId: "permission_missing", approved: true },
+    })}\n`);
+    await expect(waitForResponse(responses, 4)).resolves.toMatchObject({
+      error: { code: -32005, message: "unknown permission permission_missing" },
+    });
+    child.stdin.write(`${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 5,
       method: "session.close",
       params: { sessionId: result.sessionId },
     })}\n`);
-    await expect(waitForResponse(responses, 3)).resolves.toMatchObject({ result: { closed: true } });
+    await expect(waitForResponse(responses, 5)).resolves.toMatchObject({ result: { closed: true } });
     child.stdin.end();
     await expect(new Promise<number | null>((resolve) => child.once("exit", resolve))).resolves.toBe(0);
     lines.close();
