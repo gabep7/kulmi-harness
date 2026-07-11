@@ -91,6 +91,8 @@ export class ToolRegistry {
         agentId: options.context.state.agentId,
         cwd: options.context.cwd,
         workspaceRoot: options.context.workspaceRoot,
+        ...(options.context.sandbox ? { sandbox: options.context.sandbox } : {}),
+        signal: options.context.signal,
         input: parsed.data,
       })
       : { ok: true, output: "" };
@@ -120,6 +122,8 @@ export class ToolRegistry {
         agentId: options.context.state.agentId,
         cwd: options.context.cwd,
         workspaceRoot: options.context.workspaceRoot,
+        ...(options.context.sandbox ? { sandbox: options.context.sandbox } : {}),
+        signal: options.context.signal,
         input: parsed.data,
         result,
       });

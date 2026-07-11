@@ -154,6 +154,25 @@ describe("MiMoProvider", () => {
     expect(requests).toBe(2);
   });
 
+  it("honors Retry-After beyond the stream idle timeout before a successful retry", async () => {
+    let requests = 0;
+    const url = await serve(servers, (_request, response) => {
+      requests += 1;
+      if (requests === 1) {
+        response.writeHead(429, { "content-type": "application/json", "retry-after": "0.1" });
+        response.end('{"error":{"message":"rate limited"}}');
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end('data: {"choices":[{"delta":{"content":"recovered"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+
+    const result = await new MiMoProvider(model(url), { idleTimeoutMs: 25 }).complete(simpleRequest());
+
+    expect(result.message.content).toBe("recovered");
+    expect(requests).toBe(2);
+  });
+
   it("retries buffered output when no callback observed it", async () => {
     let requests = 0;
     const url = await serve(servers, (_request, response) => {
@@ -197,7 +216,7 @@ describe("MiMoProvider", () => {
 
   it("times out while waiting for response headers", async () => {
     const url = await serve(servers, () => undefined);
-    await expect(new MiMoProvider(model(url), { idleTimeoutMs: 20 }).complete(simpleRequest()))
+    await expect(new MiMoProvider(model(url), { idleTimeoutMs: 100 }).complete(simpleRequest()))
       .rejects.toThrow(/stalled|aborted/i);
   });
 
@@ -314,6 +333,36 @@ describe("MiMoProvider", () => {
         function: { name: "new_tool", description: "changed", parameters: { type: "object" } },
       }],
     })).rejects.toThrow("cache prefix changed");
+  });
+
+  it("invalidates matching cache scopes without weakening unrelated scopes", async () => {
+    let requests = 0;
+    const url = await serve(servers, (_request, response) => {
+      requests += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+    });
+    const provider = new MiMoProvider(model(url));
+    const changedTools = [{
+      type: "function" as const,
+      function: { name: "changed_tool", description: "changed", parameters: { type: "object" } },
+    }];
+    await provider.complete({ ...simpleRequest(), cacheScope: "agent_1:turn" });
+    await provider.complete({ ...simpleRequest(), cacheScope: "agent_10:turn" });
+
+    provider.invalidateCacheScopes("agent_1:");
+
+    await expect(provider.complete({
+      ...simpleRequest(),
+      cacheScope: "agent_1:turn",
+      tools: changedTools,
+    })).resolves.toMatchObject({ message: { content: "ok" } });
+    await expect(provider.complete({
+      ...simpleRequest(),
+      cacheScope: "agent_10:turn",
+      tools: changedTools,
+    })).rejects.toThrow("cache prefix changed");
+    expect(requests).toBe(3);
   });
 
   it("accepts append-only cache history and rejects rewritten messages", async () => {

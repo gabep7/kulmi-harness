@@ -149,6 +149,7 @@ const httpUrlSchema = z.string().url().refine((value) => {
 const positiveInt = z.number().int().positive();
 const modelFileSchema = z.object({
   vendor: z.string().min(1).optional(),
+  provider: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   billing: z.enum(["pay-as-you-go", "token-plan"]).optional(),
   base_url: httpUrlSchema.optional(),
@@ -156,11 +157,13 @@ const modelFileSchema = z.object({
   api_key_env: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
   apiKeyEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
   thinking: z.boolean().optional(),
+  reasoning_effort: z.string().min(1).optional(),
+  reasoningEffort: z.string().min(1).optional(),
   context_window: positiveInt.optional(),
   contextWindow: positiveInt.optional(),
   max_output_tokens: positiveInt.optional(),
   maxOutputTokens: positiveInt.optional(),
-}).passthrough();
+}).strict();
 const searchFileSchema = z.object({
   mode: z.enum(["off", "free"]).optional(),
   result_limit: z.number().int().min(1).max(10).optional(),
@@ -207,13 +210,15 @@ const fileConfigSchema = z.object({
   max_subagents: z.number().int().min(1).max(64).optional(),
   command_timeout_seconds: z.number().int().min(1).max(1_800).optional(),
   max_output_bytes: z.number().int().min(1_024).max(100_000_000).optional(),
+  api_keys: z.record(z.string(), z.unknown()).optional(),
+  apiKeys: z.record(z.string(), z.unknown()).optional(),
   default: defaultFileSchema.optional(),
   search: searchFileSchema.optional(),
   sandbox: sandboxFileSchema.optional(),
   undo: undoFileSchema.optional(),
   hooks: hooksFileSchema.optional(),
   models: z.record(z.string().min(1), modelFileSchema).optional(),
-}).passthrough();
+}).strict();
 type FileConfig = z.infer<typeof fileConfigSchema>;
 
 export function findWorkspaceRoot(cwd: string): string {

@@ -69,4 +69,5 @@ export interface ModelProvider {
   readonly name: string;
   readonly model: string;
   complete(request: ProviderRequest): Promise<ProviderResponse>;
+  invalidateCacheScopes?(prefix: string): void;
 }

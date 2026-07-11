@@ -91,6 +91,12 @@ export class MiMoProvider implements ModelProvider {
     this.#idleTimeoutMs = options.idleTimeoutMs ?? 300_000;
   }
 
+  invalidateCacheScopes(prefix: string): void {
+    for (const scope of this.#cacheStates.keys()) {
+      if (scope.startsWith(prefix)) this.#cacheStates.delete(scope);
+    }
+  }
+
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
     const thinking = request.thinking ?? this.#config.thinking;
     const maxCompletionTokens = Math.min(
@@ -140,8 +146,12 @@ export class MiMoProvider implements ModelProvider {
     if (request.signal.aborted) relayAbort();
 
     let idleTimer: NodeJS.Timeout | undefined;
+    const clearIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    };
     const resetIdleTimer = () => {
-      if (idleTimer) clearTimeout(idleTimer);
+      clearIdleTimer();
       idleTimer = setTimeout(
         () => controller.abort(new Error("MiMo stream stalled")),
         this.#idleTimeoutMs,
@@ -155,14 +165,18 @@ export class MiMoProvider implements ModelProvider {
         let emitted = false;
         try {
           resetIdleTimer();
-          const response = await this.#fetch(body, controller.signal);
-          return await this.#readResponse(
-            response,
-            request,
-            controller.signal,
-            resetIdleTimer,
-            () => { emitted = true; },
-          );
+          try {
+            const response = await this.#fetch(body, controller.signal);
+            return await this.#readResponse(
+              response,
+              request,
+              controller.signal,
+              resetIdleTimer,
+              () => { emitted = true; },
+            );
+          } finally {
+            clearIdleTimer();
+          }
         } catch (error) {
           if (
             controller.signal.aborted ||
@@ -180,7 +194,7 @@ export class MiMoProvider implements ModelProvider {
       throw lastError instanceof Error ? lastError : new Error("MiMo stream failed");
     } finally {
       request.signal.removeEventListener("abort", relayAbort);
-      if (idleTimer) clearTimeout(idleTimer);
+      clearIdleTimer();
     }
   }
 

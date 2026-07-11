@@ -28,6 +28,7 @@ export async function runShell(options: {
   cwd: string;
   workspaceRoot?: string;
   sandbox?: SandboxConfig;
+  env?: NodeJS.ProcessEnv;
   signal: AbortSignal;
   timeoutMs: number;
   maxOutputBytes: number;
@@ -39,7 +40,7 @@ export async function runShell(options: {
   }
   const shell = "/bin/bash";
   const args = ["--noprofile", "--norc", "-c", options.command];
-  const childEnv = safeChildEnvironment();
+  const childEnv = safeChildEnvironment(options.env);
   let sandboxBackend: SandboxInvocation["backend"] = "none";
   let child;
   try {

@@ -1,6 +1,6 @@
 # Releasing Kulmi
 
-Kulmi releases are GitHub releases built from version tags. The release workflow checks Node.js 22 and 24, builds the package, creates the npm tarball, and uploads a prebuilt `kulmi-node.tar.gz` for the installer.
+Kulmi releases are GitHub releases built from version tags. The release workflow checks Node.js 22 and 24, builds and smoke-tests the installable package, creates the npm tarball, and uploads a prebuilt `kulmi-node.tar.gz` plus its SHA-256 checksum for the installer.
 
 ## Release gate
 
@@ -29,6 +29,7 @@ The workflow rejects a tag that does not match `package.json` or the built CLI v
 
 - `kulmi-harness-0.5.0.tgz`
 - `kulmi-node.tar.gz`
+- `kulmi-node.tar.gz.sha256`
 - generated GitHub release notes
 
 ## Verify the release

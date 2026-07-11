@@ -5,6 +5,7 @@ REPO="${KULMI_REPOSITORY:-gabep7/kulmi-harness}"
 VERSION="${KULMI_INSTALL_VERSION:-latest}"
 SOURCE_REF="${KULMI_SOURCE_REF:-master}"
 RELEASE_URL="${KULMI_RELEASE_URL:-}"
+RELEASE_CHECKSUM_URL="${KULMI_RELEASE_CHECKSUM_URL:-}"
 INSTALL_DIR="${KULMI_INSTALL_DIR:-$HOME/.local/lib/kulmi}"
 BIN_DIR="${KULMI_BIN_DIR:-$HOME/.local/bin}"
 SOURCE_DIR="${KULMI_INSTALL_SOURCE:-}"
@@ -43,19 +44,83 @@ has_authenticated_gh() {
   command -v gh >/dev/null 2>&1 && gh auth status --hostname github.com >/dev/null 2>&1
 }
 
-download_release() {
-  destination="$1"
-  if [ -n "$RELEASE_URL" ]; then
-    curl --fail --location --silent --show-error "$RELEASE_URL" -o "$destination"
-  elif has_authenticated_gh; then
-    if [ "$VERSION" = "latest" ]; then
-      gh release download --repo "$REPO" --pattern kulmi-node.tar.gz --output "$destination"
-    else
-      gh release download "$VERSION" --repo "$REPO" --pattern kulmi-node.tar.gz --output "$destination"
-    fi
+download_url() {
+  url="$1"
+  destination="$2"
+  partial="$destination.part"
+  http_code="$(curl --fail --location --silent --show-error --output "$partial" --write-out '%{http_code}' "$url")" && {
+    mv "$partial" "$destination"
+    return 0
+  }
+  status=$?
+  rm -f "$partial"
+  [ "$http_code" = "404" ] && return 2
+  return "$status"
+}
+
+download_github_asset() {
+  asset="$1"
+  destination="$2"
+  if [ "$VERSION" = "latest" ]; then
+    endpoint="repos/$REPO/releases/latest"
   else
-    curl --fail --location --silent --show-error "$release_url" -o "$destination"
+    endpoint="repos/$REPO/releases/tags/$VERSION"
   fi
+  if ! asset_id="$(gh api --hostname github.com "$endpoint" --jq ".assets[] | select(.name == \"$asset\") | .id" 2>"$work/gh-api-error")"; then
+    error="$(cat "$work/gh-api-error")"
+    printf '%s\n' "$error" >&2
+    case "$error" in
+      *"HTTP 404"*) return 2 ;;
+      *) return 1 ;;
+    esac
+  fi
+  [ -n "$asset_id" ] || return 2
+  gh api --hostname github.com -H 'Accept: application/octet-stream' \
+    "repos/$REPO/releases/assets/$asset_id" > "$destination.part" || {
+    rm -f "$destination.part"
+    return 1
+  }
+  mv "$destination.part" "$destination"
+}
+
+download_release_asset() {
+  asset="$1"
+  destination="$2"
+  if [ -n "$RELEASE_URL" ]; then
+    if [ "$asset" = "kulmi-node.tar.gz" ]; then
+      asset_url="$RELEASE_URL"
+    elif [ -n "$RELEASE_CHECKSUM_URL" ]; then
+      asset_url="$RELEASE_CHECKSUM_URL"
+    else
+      case "$RELEASE_URL" in
+        *\?*) asset_url="${RELEASE_URL%%\?*}.sha256?${RELEASE_URL#*\?}" ;;
+        *) asset_url="$RELEASE_URL.sha256" ;;
+      esac
+    fi
+    download_url "$asset_url" "$destination"
+  elif has_authenticated_gh; then
+    download_github_asset "$asset" "$destination"
+  else
+    download_url "$release_base_url/$asset" "$destination"
+  fi
+}
+
+verify_release_checksum() {
+  archive="$1"
+  checksum="$2"
+  IFS=' ' read -r expected ignored < "$checksum" || fail "release checksum is empty"
+  [ "${#expected}" -eq 64 ] || fail "release checksum is malformed"
+  case "$expected" in *[!0-9A-Fa-f]*) fail "release checksum is malformed" ;; esac
+  expected="$(printf '%s' "$expected" | tr 'A-F' 'a-f')"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$archive")"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$archive")"
+  else
+    fail "sha256sum or shasum is required to verify release integrity"
+  fi
+  actual="${actual%% *}"
+  [ "$actual" = "$expected" ] || fail "release checksum mismatch"
 }
 
 download_source() {
@@ -152,20 +217,29 @@ else
       command -v curl >/dev/null 2>&1 || fail "curl is required when authenticated GitHub CLI access is unavailable"
     fi
     command -v tar >/dev/null 2>&1 || fail "tar is required"
-    if [ -n "$RELEASE_URL" ]; then
-      release_url="$RELEASE_URL"
-    elif [ "$VERSION" = "latest" ]; then
-      release_url="https://github.com/$REPO/releases/latest/download/kulmi-node.tar.gz"
+    if [ "$VERSION" = "latest" ]; then
+      release_base_url="https://github.com/$REPO/releases/latest/download"
     else
-      release_url="https://github.com/$REPO/releases/download/$VERSION/kulmi-node.tar.gz"
+      release_base_url="https://github.com/$REPO/releases/download/$VERSION"
     fi
     printf 'Downloading prebuilt kulmi %s...\n' "$VERSION"
-    if download_release "$work/kulmi-node.tar.gz"; then
+    if download_release_asset kulmi-node.tar.gz "$work/kulmi-node.tar.gz"; then
+      if download_release_asset kulmi-node.tar.gz.sha256 "$work/kulmi-node.tar.gz.sha256"; then
+        verify_release_checksum "$work/kulmi-node.tar.gz" "$work/kulmi-node.tar.gz.sha256"
+      else
+        checksum_status=$?
+        if [ "$checksum_status" -eq 2 ]; then
+          fail "release checksum is missing"
+        fi
+        fail "could not download release checksum"
+      fi
       tar -xzf "$work/kulmi-node.tar.gz" -C "$package"
       [ -f "$package/dist/cli.js" ] || fail "release bundle is missing dist/cli.js"
       [ -d "$package/node_modules" ] || fail "release bundle is missing production dependencies"
       prebuilt=1
     else
+      release_status=$?
+      [ "$release_status" -eq 2 ] || fail "could not download prebuilt release"
       printf 'No prebuilt release found; falling back to source %s...\n' "$SOURCE_REF"
       download_source "$work/kulmi-source.tar.gz"
       tar -xzf "$work/kulmi-source.tar.gz" --strip-components=1 -C "$package"

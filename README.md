@@ -66,7 +66,7 @@ To install a different local checkout explicitly:
 KULMI_INSTALL_SOURCE="$PWD" ./install.sh
 ```
 
-The repository is not published at the package URL yet, so the installer intentionally uses the checkout when invoked as `./install.sh`. Tagged releases include a prebuilt `kulmi-node.tar.gz` containing `dist` and production dependencies. Remote installs use an authenticated `gh` session for private repositories, download the bundle without npm installation or local compilation, then fall back to an authenticated source archive when a prebuilt release is unavailable. Public repositories can use plain `curl`. Select releases through `KULMI_REPOSITORY` and `KULMI_INSTALL_VERSION`.
+The repository is not published at the package URL yet, so the installer intentionally uses the checkout when invoked as `./install.sh`. Tagged releases include a prebuilt `kulmi-node.tar.gz`, containing `dist` and production dependencies, plus `kulmi-node.tar.gz.sha256`. Remote installs verify the checksum before extraction and fail closed if it is missing, malformed, or mismatched. They use an authenticated `gh` session for private repositories and fall back to a source archive only when the prebuilt asset is unavailable. Public repositories can use plain `curl`. Select releases through `KULMI_REPOSITORY` and `KULMI_INSTALL_VERSION`. Custom mirrors use `KULMI_RELEASE_URL`; its checksum defaults to the same URL plus `.sha256` and can be overridden with `KULMI_RELEASE_CHECKSUM_URL`.
 
 Then start Kulmi:
 

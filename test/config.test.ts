@@ -99,6 +99,47 @@ describe("MiMo configuration", () => {
       models: { legacy: { vendor: "removed-provider", model: "unsupported-model" } },
     })).toThrow("unknown default model legacy");
   });
+  it.each([
+    { scope: "root", input: { surprise: true }, key: "surprise" },
+    { scope: "model", input: { models: { api: { surprise: true } } }, key: "surprise" },
+  ])("rejects an unknown $scope configuration key", ({ input, key }) => {
+    expect(() => applyFileConfig(config(payg()), input)).toThrow(key);
+  });
+
+  it("accepts compatibility spellings while applying their supported behavior", () => {
+    const changed = applyFileConfig(config(payg()), {
+      defaultModel: "api",
+      defaultAutonomy: "high",
+      api_keys: { legacy: "ignored" },
+      apiKeys: { newerLegacy: "ignored" },
+      models: {
+        api: {
+          vendor: "mimo",
+          provider: "mimo",
+          model: "mimo-v2.5",
+          billing: "pay-as-you-go",
+          baseUrl: "https://api.xiaomimimo.com/v1",
+          apiKeyEnv: "MIMO_API_KEY",
+          thinking: false,
+          reasoning_effort: "high",
+          reasoningEffort: "high",
+          contextWindow: 262_144,
+          maxOutputTokens: 65_536,
+        },
+      },
+    });
+
+    expect(changed).toMatchObject({ defaultModel: "api", defaultAutonomy: "high" });
+    expect(changed.models.api).toEqual({
+      model: "mimo-v2.5",
+      billing: "pay-as-you-go",
+      baseUrl: "https://api.xiaomimimo.com/v1",
+      apiKeyEnv: "MIMO_API_KEY",
+      thinking: false,
+      contextWindow: 262_144,
+      maxOutputTokens: 65_536,
+    });
+  });
 });
 
 function config(...models: ModelConfig[]): KulmiConfig {

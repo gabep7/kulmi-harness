@@ -44,6 +44,7 @@ interface ManagedSession {
 
 export async function runRpcServer(defaultCwd: string): Promise<void> {
   const sessions = new Map<string, ManagedSession>();
+  const openingSessionIds = new Set<string>();
   let outputQueue = Promise.resolve();
   const send = (message: unknown) => {
     outputQueue = outputQueue.then(() => new Promise<void>((resolve, reject) => {
@@ -58,49 +59,80 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
 
   const open = async (raw: unknown) => {
     const params = openSchema.parse({ cwd: defaultCwd, ...(isRecord(raw) ? raw : {}) });
-    const saved = params.sessionId ? (await SessionStore.open(params.sessionId)).session : undefined;
-    const savedProfile = saved?.metadata.modelProfile ?? (saved
-      ? Object.entries(loadConfig(params.cwd).models)
-        .find(([, profile]) => profile.model === saved.metadata.model)?.[0]
-      : undefined);
-    const requestedModel = params.model ?? savedProfile;
-    const credential = await resolveExistingCredential({
-      cwd: params.cwd,
-      ...(requestedModel ? { requestedModel } : {}),
-    });
-    const events = new EventBus();
-    const pendingPermissions = new Map<string, PendingPermission>();
-    const controller = await SessionController.create({
-      cwd: params.cwd,
-      mode: (params.mode ?? saved?.state?.mode ?? "task") as AgentMode,
-      autonomy: params.autonomy as AutonomyLevel,
-      events,
-      requestPermission: (_request, requestId) => new Promise<boolean>((resolve) => {
-        pendingPermissions.set(requestId, { resolve });
-      }),
-      ...(params.model || credential?.model ? { model: params.model ?? credential!.model } : {}),
-      ...(params.sessionId ? { resumeSessionId: params.sessionId } : {}),
-      ...(params.webSearch ? { webSearch: params.webSearch as SearchMode } : {}),
-    });
-    events.on((envelope) => notify("event", { sessionId: controller.sessionId, envelope }).then(() => undefined));
-    sessions.set(controller.sessionId, { controller, running: undefined, pendingPermissions });
-    return {
-      sessionId: controller.sessionId,
-      model: controller.model,
-      modelProfile: controller.modelProfile,
-      cwd: controller.workspaceRoot,
-      autonomy: controller.autonomy,
-      messages: controller.messages,
-      mode: controller.mode,
-      search: controller.searchMode,
-      sandbox: controller.sandbox,
-      undoMessageHistory: controller.undoMessageHistory,
-      state: {
-        ...controller.state,
-        modifiedFiles: [...controller.state.modifiedFiles],
-      },
-      workers: controller.workers(),
-    };
+    const requestedSessionId = params.sessionId;
+    if (requestedSessionId) {
+      if (sessions.has(requestedSessionId) || openingSessionIds.has(requestedSessionId)) {
+        throw sessionAlreadyOpen(requestedSessionId);
+      }
+      openingSessionIds.add(requestedSessionId);
+    }
+
+    let unownedController: SessionController | undefined;
+    try {
+      const saved = requestedSessionId ? (await SessionStore.open(requestedSessionId)).session : undefined;
+      const savedProfile = saved?.metadata.modelProfile ?? (saved
+        ? Object.entries(loadConfig(params.cwd).models)
+          .find(([, profile]) => profile.model === saved.metadata.model)?.[0]
+        : undefined);
+      const requestedModel = params.model ?? savedProfile;
+      const credential = await resolveExistingCredential({
+        cwd: params.cwd,
+        ...(requestedModel ? { requestedModel } : {}),
+      });
+      const events = new EventBus();
+      const pendingPermissions = new Map<string, PendingPermission>();
+      const controller = unownedController = await SessionController.create({
+        cwd: params.cwd,
+        mode: (params.mode ?? saved?.state?.mode ?? "task") as AgentMode,
+        autonomy: params.autonomy as AutonomyLevel,
+        events,
+        requestPermission: (_request, requestId) => new Promise<boolean>((resolve) => {
+          pendingPermissions.set(requestId, { resolve });
+        }),
+        ...(params.model || credential?.model ? { model: params.model ?? credential!.model } : {}),
+        ...(requestedSessionId ? { resumeSessionId: requestedSessionId } : {}),
+        ...(params.webSearch ? { webSearch: params.webSearch as SearchMode } : {}),
+      });
+
+      const sessionId = controller.sessionId;
+      const collidesWithOpeningRequest = openingSessionIds.has(sessionId) && sessionId !== requestedSessionId;
+      if (sessions.has(sessionId) || collidesWithOpeningRequest) {
+        throw sessionAlreadyOpen(sessionId);
+      }
+
+      const result = {
+        sessionId,
+        model: controller.model,
+        modelProfile: controller.modelProfile,
+        cwd: controller.workspaceRoot,
+        autonomy: controller.autonomy,
+        messages: controller.messages,
+        mode: controller.mode,
+        search: controller.searchMode,
+        sandbox: controller.sandbox,
+        undoMessageHistory: controller.undoMessageHistory,
+        state: {
+          ...controller.state,
+          modifiedFiles: [...controller.state.modifiedFiles],
+        },
+        workers: controller.workers(),
+      };
+      events.on((envelope) => notify("event", { sessionId, envelope }).then(() => undefined));
+      sessions.set(sessionId, { controller, running: undefined, pendingPermissions });
+      unownedController = undefined;
+      return result;
+    } catch (error) {
+      if (unownedController) {
+        try {
+          await unownedController.close();
+        } catch {
+          // Preserve the original, stable RPC error after attempting to release all controller resources.
+        }
+      }
+      throw error;
+    } finally {
+      if (requestedSessionId) openingSessionIds.delete(requestedSessionId);
+    }
   };
 
   const handle = async (request: z.infer<typeof requestSchema>) => {
@@ -278,6 +310,10 @@ class RpcError extends Error {
   constructor(readonly code: number, message: string) {
     super(message);
   }
+}
+
+function sessionAlreadyOpen(sessionId: string): RpcError {
+  return new RpcError(-32006, `session ${sessionId} is already open or opening`);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

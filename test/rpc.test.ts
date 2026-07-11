@@ -84,6 +84,87 @@ describe("JSON-RPC bridge", () => {
     lines.close();
   }, 15_000);
 
+  it("rejects a sequential duplicate open without losing the original session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-rpc-duplicate-workspace-"));
+    const data = await mkdtemp(join(tmpdir(), "kulmi-rpc-duplicate-data-"));
+    await exec("git", ["init", root]);
+    const rpc = startRpc(root, data);
+
+    rpc.request(1, "session.open", { cwd: root, mode: "task" });
+    const sessionId = responseSessionId(await waitForResponse(rpc.responses, 1));
+    rpc.request(2, "session.close", { sessionId });
+    await expect(waitForResponse(rpc.responses, 2)).resolves.toMatchObject({ result: { closed: true } });
+
+    rpc.request(3, "session.open", { cwd: root, sessionId });
+    await expect(waitForResponse(rpc.responses, 3)).resolves.toMatchObject({ result: { sessionId } });
+    rpc.request(4, "session.open", { cwd: root, sessionId });
+    await expect(waitForResponse(rpc.responses, 4)).resolves.toMatchObject({
+      error: { code: -32006, message: `session ${sessionId} is already open or opening` },
+    });
+    rpc.request(5, "workers.list", { sessionId });
+    await expect(waitForResponse(rpc.responses, 5)).resolves.toMatchObject({ result: [] });
+
+    rpc.request(6, "session.close", { sessionId });
+    await waitForResponse(rpc.responses, 6);
+    await rpc.stop();
+  }, 15_000);
+
+  it("allows only one concurrent open of a persisted session and keeps the winner addressable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-rpc-concurrent-workspace-"));
+    const data = await mkdtemp(join(tmpdir(), "kulmi-rpc-concurrent-data-"));
+    await exec("git", ["init", root]);
+    const rpc = startRpc(root, data);
+
+    rpc.request(1, "session.open", { cwd: root, mode: "task" });
+    const sessionId = responseSessionId(await waitForResponse(rpc.responses, 1));
+    rpc.request(2, "session.close", { sessionId });
+    await waitForResponse(rpc.responses, 2);
+
+    rpc.request(3, "session.open", { cwd: root, sessionId });
+    rpc.request(4, "session.open", { cwd: root, sessionId });
+    const attempts = await Promise.all([
+      waitForResponse(rpc.responses, 3),
+      waitForResponse(rpc.responses, 4),
+    ]);
+    expect(attempts.filter((response) => "result" in response)).toHaveLength(1);
+    expect(attempts.filter((response) => "error" in response)).toEqual([
+      expect.objectContaining({
+        error: { code: -32006, message: `session ${sessionId} is already open or opening` },
+      }),
+    ]);
+    rpc.request(5, "workers.list", { sessionId });
+    await expect(waitForResponse(rpc.responses, 5)).resolves.toMatchObject({ result: [] });
+
+    rpc.request(6, "session.close", { sessionId });
+    await waitForResponse(rpc.responses, 6);
+    await rpc.stop();
+  }, 15_000);
+
+  it("releases a persisted session reservation when opening it fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-rpc-failed-open-workspace-"));
+    const data = await mkdtemp(join(tmpdir(), "kulmi-rpc-failed-open-data-"));
+    await exec("git", ["init", root]);
+    const rpc = startRpc(root, data);
+
+    rpc.request(1, "session.open", { cwd: root, mode: "task" });
+    const sessionId = responseSessionId(await waitForResponse(rpc.responses, 1));
+    rpc.request(2, "session.close", { sessionId });
+    await waitForResponse(rpc.responses, 2);
+
+    rpc.request(3, "session.open", { cwd: root, sessionId, model: "missing-profile" });
+    await expect(waitForResponse(rpc.responses, 3)).resolves.toMatchObject({
+      error: { code: -32603, message: "unknown model missing-profile" },
+    });
+    rpc.request(4, "session.open", { cwd: root, sessionId });
+    await expect(waitForResponse(rpc.responses, 4)).resolves.toMatchObject({ result: { sessionId } });
+    rpc.request(5, "workers.list", { sessionId });
+    await expect(waitForResponse(rpc.responses, 5)).resolves.toMatchObject({ result: [] });
+
+    rpc.request(6, "session.close", { sessionId });
+    await waitForResponse(rpc.responses, 6);
+    await rpc.stop();
+  }, 15_000);
+
   it("restores a durable turn through session.undo", async () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-rpc-undo-workspace-"));
     const data = await mkdtemp(join(tmpdir(), "kulmi-rpc-undo-data-"));
@@ -180,4 +261,44 @@ async function waitForResponse(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`timed out waiting for RPC response ${id}: ${JSON.stringify(responses)}`);
+}
+
+function startRpc(root: string, data: string) {
+  const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "rpc", "--cwd", root], {
+    cwd: process.cwd(),
+    env: { ...process.env, XDG_DATA_HOME: data, MIMO_API_KEY: "sk-123456789" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const lines = createInterface({ input: child.stdout });
+  const responses: Array<Record<string, unknown>> = [];
+  lines.on("line", (line) => responses.push(parseRpcResponse(line)));
+  return {
+    responses,
+    request(id: number, method: string, params: Record<string, unknown>) {
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    },
+    async stop() {
+      child.stdin.end();
+      await expect(new Promise<number | null>((resolve) => child.once("exit", resolve))).resolves.toBe(0);
+      lines.close();
+    },
+  };
+}
+
+function responseSessionId(response: Record<string, unknown>): string {
+  const result = response.result;
+  if (!result || typeof result !== "object" || !("sessionId" in result) || typeof result.sessionId !== "string") {
+    throw new Error(`RPC response did not contain a session id: ${JSON.stringify(response)}`);
+  }
+  return result.sessionId;
+}
+
+function parseRpcResponse(line: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(line);
+  if (!isRecord(parsed)) throw new Error(`RPC emitted a non-object response: ${line}`);
+  return parsed;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

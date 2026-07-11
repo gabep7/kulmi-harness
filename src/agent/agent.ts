@@ -123,8 +123,8 @@ export class Agent {
         content: `<undo-context checkpoint="${options.checkpointId}">The previous turn's file changes and run state were reverted. Its messages remain visible only because undo.message_history=keep. Treat the reverted files as absent and continue from the restored workspace.</undo-context>`,
       });
     }
+    this.#advanceCacheEpoch();
     replaceRunState(this.#options.state, options.state);
-    this.#cacheEpoch += 1;
     try {
       await this.#options.session.saveMessages(this.#messages);
       await this.#options.session.saveRunState(this.#options.state);
@@ -140,9 +140,9 @@ export class Agent {
       removedMessages,
       rollback: async () => {
         if (rolledBack) return;
+        this.#advanceCacheEpoch();
         this.#messages.splice(0, this.#messages.length, ...originalMessages);
         replaceRunState(this.#options.state, originalState);
-        this.#cacheEpoch += 1;
         await this.#options.session.saveMessages(this.#messages);
         await this.#options.session.saveRunState(this.#options.state);
         rolledBack = true;
@@ -439,7 +439,7 @@ export class Agent {
         this.#messages.push({ role: "user", content: `<sticky-context>\n${this.#stickyContext}\n</sticky-context>` });
       }
     }
-    this.#cacheEpoch += 1;
+    this.#advanceCacheEpoch();
     await this.#options.session.saveMessages(this.#messages);
     await this.#options.events.emit({
       type: "notice",
@@ -451,6 +451,11 @@ export class Agent {
       agentId: this.#options.state.agentId,
       usage: response.usage,
     });
+  }
+
+  #advanceCacheEpoch(): void {
+    this.#options.provider.invalidateCacheScopes?.(`${this.#options.state.agentId}:`);
+    this.#cacheEpoch += 1;
   }
 }
 async function promptContent(prompt: string, workspaceRoot: string, cwd: string, artifacts: ArtifactStore): Promise<string | ProviderContentPart[]> {

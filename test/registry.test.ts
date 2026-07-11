@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -16,6 +16,7 @@ import { shellTool } from "../src/tools/shell.js";
 import { skillTools } from "../src/tools/skills.js";
 import { subagentTools } from "../src/tools/subagents.js";
 import { EventBus, type RuntimeEvent } from "../src/core/events.js";
+import { sandboxAvailability } from "../src/runtime/process.js";
 import type { AgentDefinition } from "../src/config/agents.js";
 import { defineTool, type SubagentApi, type ToolContext } from "../src/tools/types.js";
 import { fetchUrlTool, freeWebSearchTool } from "../src/tools/web-search.js";
@@ -232,6 +233,54 @@ describe("ToolRegistry", () => {
       type: "error",
       message: expect.stringContaining("post-tool hook failed for hooked_tool"),
     });
+  });
+
+  it.runIf(sandboxAvailability().available)("preserves hook metadata while required sandboxing denies writes outside the workspace", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-hook-workspace-"));
+    const outside = await mkdtemp(join(tmpdir(), "kulmi-hook-outside-"));
+    let executions = 0;
+    try {
+      const hooked = defineTool({
+        name: "contained_tool",
+        description: "test hook containment",
+        schema: z.object({ value: z.string() }),
+        readOnly: false,
+        async execute() {
+          executions += 1;
+          return { content: "ran" };
+        },
+      });
+      const registry = new ToolRegistry([hooked]);
+      const context = fakeToolContext(fakeSubagents(), "medium");
+      context.cwd = workspace;
+      context.workspaceRoot = workspace;
+      context.sandbox = { mode: "required", network: false };
+      context.hooks = {
+        toolPre: [{
+          command: `printf '%s' "$KULMI_HOOK_PHASE|$KULMI_HOOK_TOOL|$KULMI_HOOK_CALL_ID|$KULMI_HOOK_AGENT_ID|$KULMI_WORKSPACE_ROOT|$KULMI_TOOL_INPUT" > hook-env.txt; printf denied > ${JSON.stringify(join(outside, "escaped.txt"))}`,
+          timeoutSeconds: 5,
+        }],
+        toolPost: [],
+      };
+
+      const result = await registry.execute({
+        name: "contained_tool",
+        argumentsJson: JSON.stringify({ value: "preserved" }),
+        callId: "hook_containment",
+        context,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content).toContain("pre-tool hook failed");
+      expect(await readFile(join(workspace, "hook-env.txt"), "utf8")).toBe(
+        `tool_pre|contained_tool|hook_containment|agent_1|${workspace}|{\"value\":\"preserved\"}`,
+      );
+      expect(executions).toBe(0);
+      await expect(access(join(outside, "escaped.txt"))).rejects.toThrow();
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it("keeps the complete built-in tool catalog compact while exposing browser, image, and git workflow tools", () => {
