@@ -22,6 +22,7 @@ export interface TuiAppProps {
   onCommand: (command: string, args: string) => Promise<TuiCommandResult>;
   onSwitchSession?: (sessionId: string) => Promise<TuiRuntimeInfo>;
   onCycleAutonomy?: () => Promise<TuiRuntimeInfo>;
+  onSwitchModel?: (name: string) => Promise<TuiRuntimeInfo>;
   onCancel: () => void;
   onExit: () => void;
 }
@@ -33,6 +34,14 @@ export interface TuiSessionOption {
   title: string;
   current: boolean;
 }
+
+
+export interface TuiModelOption {
+  name: string;
+  model: string;
+  active: boolean;
+}
+
 
 export interface TuiRuntimeInfo {
   model: string;
@@ -48,6 +57,7 @@ export type TuiCommandResult = string | {
   notice?: string;
   mode?: AgentMode;
   sessions?: TuiSessionOption[];
+  models?: TuiModelOption[];
 } | undefined;
 
 const commands = [
@@ -78,6 +88,8 @@ export function TuiApp(props: TuiAppProps) {
   const [busy, setBusy] = useState(false);
   const [sessions, setSessions] = useState<TuiSessionOption[] | undefined>();
   const [sessionCursor, setSessionCursor] = useState(0);
+  const [models, setModels] = useState<TuiModelOption[] | undefined>();
+  const [modelCursor, setModelCursor] = useState(0);
   const [runtime, setRuntime] = useState<TuiRuntimeInfo>({
     model: props.model,
     sessionId: props.sessionId,
@@ -138,6 +150,40 @@ export function TuiApp(props: TuiAppProps) {
         void props.onSwitchSession(selected.id).then((next) => {
           setRuntime(next);
           setSessions(undefined);
+        }, (error: unknown) => {
+          props.store.addNotice(error instanceof Error ? error.message : String(error), true);
+        }).finally(() => setBusy(false));
+        return;
+      }
+      return;
+    }
+    if (models) {
+      if (key.ctrl && value === "c") {
+        props.onExit();
+        exit();
+        return;
+      }
+      if (busy) return;
+      if (key.escape) {
+        setModels(undefined);
+        return;
+      }
+      if (key.upArrow) {
+        setModelCursor((index) => (index - 1 + models.length) % models.length);
+        return;
+      }
+      if (key.downArrow) {
+        setModelCursor((index) => (index + 1) % models.length);
+        return;
+      }
+      if (key.return) {
+        const selected = models[modelCursor];
+        setModels(undefined);
+        if (!selected || selected.active || !props.onSwitchModel) return;
+        setBusy(true);
+        void props.onSwitchModel(selected.name).then((next) => {
+          setRuntime(next);
+          props.store.addNotice(`Switched to ${next.model}`);
         }, (error: unknown) => {
           props.store.addNotice(error instanceof Error ? error.message : String(error), true);
         }).finally(() => setBusy(false));
@@ -212,6 +258,10 @@ export function TuiApp(props: TuiAppProps) {
               setSessions(result.sessions);
             }
           }
+          if (result.models) {
+            setModelCursor(Math.max(0, result.models.findIndex((entry) => entry.active)));
+            setModels(result.models);
+          }
           if (result.submit) await props.onSubmit(result.submit);
         }
       } catch (error) {
@@ -257,15 +307,17 @@ export function TuiApp(props: TuiAppProps) {
         {snapshot.completion && <CompletionBlock completion={snapshot.completion} />}
 
         {help && <Help onClose={() => setHelp(false)} custom={props.customCommands ?? []} />}
-        {!help && !snapshot.pendingApproval && !sessions && input.startsWith("/") && <CommandPalette query={input} columns={size.columns} />}
+        {!help && !snapshot.pendingApproval && !sessions && !models && input.startsWith("/") && <CommandPalette query={input} columns={size.columns} />}
 
-        {!snapshot.pendingApproval && !sessions && busy && <LoadingStatus />}
+        {!snapshot.pendingApproval && !sessions && !models && busy && <LoadingStatus />}
 
         {snapshot.pendingApproval
           ? <Approval request={snapshot.pendingApproval.request} />
           : sessions
             ? <SessionPicker sessions={sessions} cursor={sessionCursor} />
-            : <Composer value={input} onChange={setInput} onSubmit={submit} busy={busy} />}
+            : models
+              ? <ModelPicker models={models} cursor={modelCursor} />
+              : <Composer value={input} onChange={setInput} onSubmit={submit} busy={busy} />}
 
         <Footer runtime={runtime} status={snapshot.status} usage={snapshot.usage} busy={busy} />
       </Box>
@@ -413,6 +465,20 @@ function SessionPicker({ sessions, cursor }: { sessions: TuiSessionOption[]; cur
         </Text>
       ))}
       <Text color={theme.faint}>↑↓ select  ·  enter open  ·  esc close</Text>
+    </Box>
+  );
+}
+
+function ModelPicker({ models, cursor }: { models: TuiModelOption[]; cursor: number }) {
+  return (
+    <Box marginTop={1} borderStyle="round" borderColor={theme.cocoa} paddingX={1} flexDirection="column">
+      <Text color={theme.cream} bold>models</Text>
+      {models.map((entry, index) => (
+        <Text key={entry.name} color={index === cursor ? theme.sand : theme.muted} bold={index === cursor}>
+          {index === cursor ? "›" : " "} {entry.name.padEnd(22)} {entry.model}{entry.active ? "  current" : ""}
+        </Text>
+      ))}
+      <Text color={theme.faint}>up/down select  enter switch  esc close</Text>
     </Box>
   );
 }

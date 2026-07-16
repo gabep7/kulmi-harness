@@ -78,7 +78,8 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       case "/model": {
         if (!args) {
           const profiles = controller.listModels();
-          return profiles.map((entry) => `${entry.active ? "▸" : " "} ${entry.name.padEnd(16)} ${entry.model}`).join("\n") || "No model profiles configured";
+          if (profiles.length <= 1) return profiles.length === 0 ? "No model profiles configured" : `Only ${profiles[0]?.name} is configured`;
+          return { models: profiles };
         }
         return await controller.setModel(args.trim());
       }
@@ -139,6 +140,11 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
     return runtimeInfo(controller);
   };
 
+  const switchModel = async (name: string): Promise<TuiRuntimeInfo> => {
+    await controller.setModel(name);
+    return runtimeInfo(controller);
+  };
+
   const close = () => { closing = true; };
 
   process.stdout.write("\u001B]0;kulmi\u0007");
@@ -159,6 +165,7 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       onCancel={() => activeAbort?.abort(new Error("stopped by user"))}
       onExit={close}
       onSteer={(message) => controller.steer(message)}
+      onSwitchModel={switchModel}
       onAlwaysAllow={(request) => {
         const entry = allowlistEntryFor(controller.workspaceRoot, request);
         if (!entry) return;
