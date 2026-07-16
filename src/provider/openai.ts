@@ -74,7 +74,7 @@ interface CacheState {
   messages: string[];
 }
 
-export class MiMoProvider implements ModelProvider {
+export class OpenAIProvider implements ModelProvider {
   readonly name: string;
   readonly model: string;
   readonly #config: ResolvedModel;
@@ -107,9 +107,6 @@ export class MiMoProvider implements ModelProvider {
       ...tool,
       function: { ...tool.function, strict: true },
     }));
-    if (this.model !== "mimo-v2.5" && request.messages.some(hasImagePart)) {
-      throw new Error("image attachments require mimo-v2.5; mimo-v2.5-pro is text-only");
-    }
     const messages = request.messages.map(toWireMessage);
     validateConversation(messages, thinking);
     const body = JSON.stringify({
@@ -118,7 +115,7 @@ export class MiMoProvider implements ModelProvider {
       ...(tools.length ? { tools } : {}),
       stream: true,
       max_completion_tokens: maxCompletionTokens,
-      thinking: { type: thinking ? "enabled" : "disabled" },
+      ...(thinking ? { thinking: { type: "enabled" } } : {}),
     });
     if (request.cacheScope) {
       const anchor = createHash("sha256").update(JSON.stringify({
@@ -132,10 +129,10 @@ export class MiMoProvider implements ModelProvider {
       );
       const previous = this.#cacheStates.get(request.cacheScope);
       if (previous && previous.anchor !== anchor) {
-        throw new Error(`MiMo cache prefix changed inside scope ${request.cacheScope}`);
+        throw new Error(`cache prefix changed inside scope ${request.cacheScope}`);
       }
       if (previous && !isPrefix(previous.messages, messageHashes)) {
-        throw new Error(`MiMo message history was rewritten inside cache scope ${request.cacheScope}`);
+        throw new Error(`message history was rewritten inside cache scope ${request.cacheScope}`);
       }
       this.#cacheStates.set(request.cacheScope, { anchor, messages: messageHashes });
     }
@@ -153,7 +150,7 @@ export class MiMoProvider implements ModelProvider {
     const resetIdleTimer = () => {
       clearIdleTimer();
       idleTimer = setTimeout(
-        () => controller.abort(new Error("MiMo stream stalled")),
+        () => controller.abort(new Error("stream stalled")),
         this.#idleTimeoutMs,
       );
       idleTimer.unref();
@@ -182,16 +179,16 @@ export class MiMoProvider implements ModelProvider {
             controller.signal.aborted ||
             emitted ||
             attempt === 2 ||
-            (error instanceof MiMoHttpError && !error.retryable)
+            (error instanceof OpenAIHttpError && !error.retryable)
           ) throw error;
           lastError = error;
-          const delay = error instanceof MiMoHttpError && error.retryAfterMs !== undefined
+          const delay = error instanceof OpenAIHttpError && error.retryAfterMs !== undefined
             ? error.retryAfterMs
             : 500 * 2 ** attempt + Math.floor(Math.random() * 200);
           await sleep(delay, controller.signal);
         }
       }
-      throw lastError instanceof Error ? lastError : new Error("MiMo stream failed");
+      throw lastError instanceof Error ? lastError : new Error("stream failed");
     } finally {
       request.signal.removeEventListener("abort", relayAbort);
       clearIdleTimer();
@@ -205,7 +202,7 @@ export class MiMoProvider implements ModelProvider {
     resetIdleTimer: () => void,
     markEmitted: () => void,
   ): Promise<ProviderResponse> {
-    if (!response.body) throw new Error("MiMo returned an empty response body");
+    if (!response.body) throw new Error("empty response body");
 
     let reasoning = "";
     let content = "";
@@ -229,9 +226,9 @@ export class MiMoProvider implements ModelProvider {
         chunk = wireChunkSchema.parse(JSON.parse(data));
       } catch (error) {
         const detail = error instanceof z.ZodError ? z.prettifyError(error) : String(error);
-        throw new Error(`invalid MiMo stream chunk: ${detail}; data=${data.slice(0, 300)}`);
+        throw new Error(`invalid stream chunk: ${detail}; data=${data.slice(0, 300)}`);
       }
-      if (chunk.error?.message) throw new Error(`MiMo: ${chunk.error.message}`);
+      if (chunk.error?.message) throw new Error(chunk.error.message);
 
       const choice = chunk.choices?.[0];
       const delta = choice?.delta;
@@ -292,7 +289,7 @@ export class MiMoProvider implements ModelProvider {
       }
     }
 
-    if (!sawDone) throw new Error(`MiMo stream ended before [DONE]`);
+    if (!sawDone) throw new Error(`stream ended before [DONE]`);
     const toolCalls = [...calls.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, call]) => call);
@@ -314,7 +311,7 @@ export class MiMoProvider implements ModelProvider {
     const response = await fetch(url, {
       method: "POST",
       headers: {
-        "api-key": this.#config.apiKey,
+        authorization: `Bearer ${this.#config.apiKey}`,
         "content-type": "application/json",
         accept: "text/event-stream",
       },
@@ -324,8 +321,8 @@ export class MiMoProvider implements ModelProvider {
     if (response.ok) return response;
     const errorBody = (await response.text()).slice(0, 2_000);
     const quotaExhausted = response.status === 429 && /(?:quota|credit|exhaust|套餐|额度)/i.test(errorBody);
-    throw new MiMoHttpError(
-      `MiMo HTTP ${response.status}: ${errorBody}`,
+    throw new OpenAIHttpError(
+      `HTTP ${response.status}: ${errorBody}`,
       !quotaExhausted && ([408, 409, 429].includes(response.status) || response.status >= 500),
       parseRetryAfter(response.headers.get("retry-after")),
     );
@@ -341,11 +338,6 @@ function toWireMessage(message: ProviderMessage): ProviderMessage {
   };
 }
 
-function hasImagePart(message: ProviderMessage): boolean {
-  return message.role === "user" && Array.isArray(message.content) &&
-    message.content.some((part) => part.type === "image_url");
-}
-
 function isPrefix(previous: readonly string[], current: readonly string[]): boolean {
   return previous.length <= current.length && previous.every((message, index) => current[index] === message);
 }
@@ -355,16 +347,16 @@ function validateConversation(messages: readonly ProviderMessage[], thinking: bo
     const message = messages[index];
     if (!message) continue;
     if (message.role === "tool") {
-      throw new Error(`MiMo tool result ${message.tool_call_id} has no preceding assistant tool call`);
+      throw new Error(`tool result ${message.tool_call_id} has no preceding assistant tool call`);
     }
     if (message.role !== "assistant" || !message.tool_calls?.length) continue;
     if (thinking && !("reasoning_content" in message)) {
-      throw new Error(`MiMo assistant tool-call history is missing reasoning_content`);
+      throw new Error(`assistant tool-call history is missing reasoning_content`);
     }
     for (const [offset, call] of message.tool_calls.entries()) {
       const result = messages[index + offset + 1];
       if (result?.role !== "tool" || result.tool_call_id !== call.id) {
-        throw new Error(`MiMo tool call ${call.id} is missing its ordered tool result`);
+        throw new Error(`tool call ${call.id} is missing its ordered tool result`);
       }
     }
     index += message.tool_calls.length;
@@ -374,19 +366,19 @@ function validateConversation(messages: readonly ProviderMessage[], thinking: bo
 function validateToolCalls(calls: FunctionToolCall[]): void {
   const ids = new Set<string>();
   for (const call of calls) {
-    if (!call.function.name.trim()) throw new Error(`MiMo returned a tool call without a function name`);
-    if (ids.has(call.id)) throw new Error(`MiMo returned duplicate tool call id ${call.id}`);
+    if (!call.function.name.trim()) throw new Error(`tool call without a function name`);
+    if (ids.has(call.id)) throw new Error(`duplicate tool call id ${call.id}`);
     ids.add(call.id);
   }
 }
 
-class MiMoHttpError extends Error {
+class OpenAIHttpError extends Error {
   readonly retryable: boolean;
   readonly retryAfterMs: number | undefined;
 
   constructor(message: string, retryable: boolean, retryAfterMs?: number) {
     super(message);
-    this.name = "MiMoHttpError";
+    this.name = "OpenAIHttpError";
     this.retryable = retryable;
     this.retryAfterMs = retryAfterMs;
   }
@@ -548,15 +540,15 @@ async function* parseSse(
 }
 
 function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", abort);
-      resolve();
-    }, milliseconds);
-    const abort = () => {
-      clearTimeout(timer);
-      reject(signal.reason ?? new Error("request aborted"));
-    };
-    signal.addEventListener("abort", abort, { once: true });
-  });
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", abort);
+    resolve();
+  }, milliseconds);
+  const abort = () => {
+    clearTimeout(timer);
+    reject(signal.reason ?? new Error("request aborted"));
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  return promise;
 }

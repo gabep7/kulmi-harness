@@ -30,7 +30,7 @@ try {
   if (!version.stdout.trim()) throw new Error("kulmi --version returned empty output");
   const doctor = await execFileAsync(bin, ["doctor"], {
     cwd: root,
-    env: { ...process.env, MIMO_API_KEY: process.env.MIMO_API_KEY ?? "sk-package-smoke-00000000" },
+    env: { ...process.env, OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? "sk-package-smoke-00000000" },
     maxBuffer: 1024 * 1024,
   });
   if (!doctor.stdout.includes("ok\tnode") || !doctor.stdout.includes("ok\tgit")) {

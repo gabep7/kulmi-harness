@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Box, Text, render, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
-import { credentialHint, validateCredential, type CredentialChoice, type CredentialKind } from "../auth/credentials.js";
+import { validateCredential, credentialHint, type CredentialChoice } from "../auth/credentials.js";
 import { glyph, theme } from "./theme.js";
 
 export class CredentialSetupCancelledError extends Error {
@@ -11,20 +11,14 @@ export class CredentialSetupCancelledError extends Error {
   }
 }
 
-export async function runCredentialOnboarding(initial: CredentialKind = "api"): Promise<CredentialChoice> {
+export async function runCredentialOnboarding(): Promise<CredentialChoice> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error("MiMo credentials are missing. Set MIMO_API_KEY or MIMO_TOKEN_PLAN_API_KEY.");
+    throw new Error("API key is missing. Set the environment variable named by your model profile's api_key_env.");
   }
-  let resolveChoice!: (choice: CredentialChoice) => void;
-  let rejectChoice!: (error: Error) => void;
-  const choice = new Promise<CredentialChoice>((resolve, reject) => {
-    resolveChoice = resolve;
-    rejectChoice = reject;
-  });
+  const { promise, resolve: resolveChoice, reject: rejectChoice } = Promise.withResolvers<CredentialChoice>();
   process.stdout.write("\u001B[?1049h\u001B[?25l");
   const instance = render(
     <CredentialSetup
-      initial={initial}
       onComplete={resolveChoice}
       onCancel={() => rejectChoice(new CredentialSetupCancelledError())}
     />,
@@ -35,22 +29,19 @@ export async function runCredentialOnboarding(initial: CredentialKind = "api"): 
     },
   );
   try {
-    return await choice;
+    return await promise;
   } finally {
     instance.unmount();
     await instance.waitUntilExit();
-    process.stdout.write("\u001B[?25h\u001B[?1049l");
+    process.stdout.write("\u001B?25h\u001B[?1049l");
   }
 }
 
-export function CredentialSetup({ initial, onComplete, onCancel = () => undefined }: {
-  initial: CredentialKind;
+export function CredentialSetup({ onComplete, onCancel = () => undefined }: {
   onComplete: (choice: CredentialChoice) => void;
   onCancel?: () => void;
 }) {
   const { exit } = useApp();
-  const [step, setStep] = useState<"plan" | "key">("plan");
-  const [kind, setKind] = useState<CredentialKind>(initial);
   const [key, setKey] = useState("");
   const [error, setError] = useState("");
 
@@ -60,69 +51,46 @@ export function CredentialSetup({ initial, onComplete, onCancel = () => undefine
       exit();
       return;
     }
-    if (step === "plan" && (pressed.upArrow || pressed.downArrow || pressed.tab)) {
-      setKind((value) => value === "api" ? "token-plan" : "api");
-    }
-    if (step === "plan" && pressed.return) setStep("key");
-    if (step === "key" && pressed.escape) {
-      setKey("");
-      setError("");
-      setStep("plan");
+    if (pressed.escape) {
+      onCancel();
+      exit();
     }
   });
 
   const submit = (value: string) => {
     const clean = value.trim();
-    if (!validateCredential(kind, clean)) {
-      setError(credentialHint(kind));
+    if (!validateCredential(clean)) {
+      setError(credentialHint());
       return;
     }
-    onComplete({ kind, key: clean });
+    onComplete({ key: clean });
     exit();
   };
 
   return (
-    <Box minHeight={18} flexDirection="column" paddingX={2} paddingY={1}>
+    <Box minHeight={14} flexDirection="column" paddingX={2} paddingY={1}>
       <Text color={theme.caramel} bold>{glyph.brand} kulmi</Text>
       <Box marginTop={2} flexDirection="column">
-        <Text color={theme.cream} bold>Connect MiMo</Text>
-        <Text color={theme.muted}>Choose how you access MiMo V2.5 Pro. You can change this later.</Text>
+        <Text color={theme.cream} bold>Connect</Text>
+        <Text color={theme.muted}>Enter your API key. You can change this later with `kulmi auth`.</Text>
       </Box>
-      {step === "plan" ? (
-        <Box marginTop={2} flexDirection="column">
-          <Choice active={kind === "api"} title="API" detail="Pay as you go · key starts with sk-" />
-          <Choice active={kind === "token-plan"} title="Token Plan" detail="Subscription quota · key starts with tp-" />
-          <Box marginTop={1}><Text color={theme.faint}>↑↓ choose  ·  enter continue</Text></Box>
+      <Box marginTop={2} flexDirection="column">
+        <Text color={theme.sand}>API key</Text>
+        <Box borderStyle="round" borderColor={error ? theme.rose : theme.cocoa} paddingX={1}>
+          <TextInput
+            value={key}
+            onChange={(value) => { setKey(value); setError(""); }}
+            onSubmit={submit}
+            placeholder="sk-…"
+            mask="•"
+            showCursor
+          />
         </Box>
-      ) : (
-        <Box marginTop={2} flexDirection="column">
-          <Text color={theme.sand}>{kind === "api" ? "API key" : "Token Plan key"}</Text>
-          <Box borderStyle="round" borderColor={error ? theme.rose : theme.cocoa} paddingX={1}>
-            <TextInput
-              value={key}
-              onChange={(value) => { setKey(value); setError(""); }}
-              onSubmit={submit}
-              placeholder={kind === "api" ? "sk-…" : "tp-…"}
-              mask="•"
-              showCursor
-            />
-          </Box>
-          {error
-            ? <Text color={theme.rose}>{error}</Text>
-            : <Text color={theme.faint}>Will be stored in macOS Keychain, never in project files.</Text>}
-          <Text color={theme.faint}>enter connect  ·  esc back</Text>
-        </Box>
-      )}
-    </Box>
-  );
-}
-
-function Choice({ active, title, detail }: { active: boolean; title: string; detail: string }) {
-  return (
-    <Box>
-      <Text color={active ? theme.caramel : theme.faint}>{active ? "●" : "○"} </Text>
-      <Text color={active ? theme.cream : theme.muted} bold={active}>{title.padEnd(12)}</Text>
-      <Text color={active ? theme.sand : theme.faint}>{detail}</Text>
+        {error
+          ? <Text color={theme.rose}>{error}</Text>
+          : <Text color={theme.faint}>Will be stored in macOS Keychain, never in project files.</Text>}
+        <Text color={theme.faint}>enter connect  ·  esc cancel</Text>
+      </Box>
     </Box>
   );
 }

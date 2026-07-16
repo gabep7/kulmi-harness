@@ -667,7 +667,7 @@ function applyReplacements(
   return { content, replacements };
 }
 
-async function writeAtomic(path: string, content: string): Promise<void> {
+export async function writeAtomic(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   let mode: number | undefined;
   try {

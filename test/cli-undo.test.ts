@@ -3,19 +3,28 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { RunState } from "../src/core/types.js";
 import type { ProviderMessage } from "../src/provider/types.js";
 import { CheckpointStore } from "../src/runtime/checkpoints.js";
 import { SessionStore } from "../src/runtime/session-store.js";
+import { TEST_API_KEY_ENV, TEST_MODEL, TEST_MODEL_PROFILE, writeTestModelConfig } from "./helpers/test-config.js";
 
 const exec = promisify(execFile);
+const originalHome = process.env.HOME;
+
+afterEach(() => {
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+});
 
 describe("kulmi undo", () => {
   it("restores the latest durable turn from the headless CLI", async () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-cli-undo-workspace-"));
     const data = await mkdtemp(join(tmpdir(), "kulmi-cli-undo-data-"));
     await exec("git", ["init", root]);
+    await writeTestModelConfig(root);
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
     process.env.XDG_DATA_HOME = data;
     const file = join(root, "file.txt");
     await writeFile(file, "before\n");
@@ -36,8 +45,8 @@ describe("kulmi undo", () => {
     ];
     const session = await SessionStore.create({
       cwd: root,
-      model: "mimo-v2.5-pro",
-      modelProfile: "mimo-v2.5-pro",
+      model: TEST_MODEL,
+      modelProfile: TEST_MODEL_PROFILE,
     });
     await session.saveMessages(before);
     await session.saveRunState(state);
@@ -63,7 +72,7 @@ describe("kulmi undo", () => {
       session.id,
     ], {
       cwd: root,
-      env: { ...process.env, XDG_DATA_HOME: data, MIMO_API_KEY: "sk-123456789" },
+      env: { ...process.env, XDG_DATA_HOME: data, [TEST_API_KEY_ENV]: "sk-123456789" },
     });
     expect(result.stdout).toContain("message history truncate");
     expect(await readFile(file, "utf8")).toBe("before\n");

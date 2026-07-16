@@ -4,25 +4,34 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { SessionStore } from "../src/runtime/session-store.js";
 import { CheckpointStore } from "../src/runtime/checkpoints.js";
 import type { RunState } from "../src/core/types.js";
 import type { ProviderMessage } from "../src/provider/types.js";
+import { TEST_API_KEY_ENV, TEST_MODEL, TEST_MODEL_PROFILE, writeTestModelConfig } from "./helpers/test-config.js";
 
 const exec = promisify(execFile);
+const originalHome = process.env.HOME;
+
+afterEach(() => {
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+});
 
 describe("JSON-RPC bridge", () => {
-  it("opens and closes a durable MiMo session with runtime state", async () => {
+  it("opens and closes a durable session with runtime state", async () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-rpc-workspace-"));
     const data = await mkdtemp(join(tmpdir(), "kulmi-rpc-data-"));
     await exec("git", ["init", root]);
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    await writeTestModelConfig(root);
     const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "rpc", "--cwd", root], {
       cwd: process.cwd(),
       env: {
         ...process.env,
         XDG_DATA_HOME: data,
-        MIMO_API_KEY: "sk-123456789",
+        KULMI_TEST_API_KEY: "sk-123456789",
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -50,8 +59,8 @@ describe("JSON-RPC bridge", () => {
     };
     expect(result).toMatchObject({
       sessionId: expect.stringMatching(/^session_[a-f0-9]{16}$/),
-      model: "mimo-v2.5-pro",
-      modelProfile: "mimo-v2.5-pro",
+      model: TEST_MODEL,
+      modelProfile: TEST_MODEL_PROFILE,
       mode: "task",
       state: { mode: "task", status: "idle", modifiedFiles: [] },
     });
@@ -88,6 +97,8 @@ describe("JSON-RPC bridge", () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-rpc-duplicate-workspace-"));
     const data = await mkdtemp(join(tmpdir(), "kulmi-rpc-duplicate-data-"));
     await exec("git", ["init", root]);
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    await writeTestModelConfig(root);
     const rpc = startRpc(root, data);
 
     rpc.request(1, "session.open", { cwd: root, mode: "task" });
@@ -113,6 +124,8 @@ describe("JSON-RPC bridge", () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-rpc-concurrent-workspace-"));
     const data = await mkdtemp(join(tmpdir(), "kulmi-rpc-concurrent-data-"));
     await exec("git", ["init", root]);
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    await writeTestModelConfig(root);
     const rpc = startRpc(root, data);
 
     rpc.request(1, "session.open", { cwd: root, mode: "task" });
@@ -144,6 +157,8 @@ describe("JSON-RPC bridge", () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-rpc-failed-open-workspace-"));
     const data = await mkdtemp(join(tmpdir(), "kulmi-rpc-failed-open-data-"));
     await exec("git", ["init", root]);
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    await writeTestModelConfig(root);
     const rpc = startRpc(root, data);
 
     rpc.request(1, "session.open", { cwd: root, mode: "task" });
@@ -169,13 +184,15 @@ describe("JSON-RPC bridge", () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-rpc-undo-workspace-"));
     const data = await mkdtemp(join(tmpdir(), "kulmi-rpc-undo-data-"));
     await exec("git", ["init", root]);
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    await writeTestModelConfig(root);
     process.env.XDG_DATA_HOME = data;
     const file = join(root, "file.txt");
     await writeFile(file, "before\n");
     const session = await SessionStore.create({
       cwd: root,
-      model: "mimo-v2.5-pro",
-      modelProfile: "mimo-v2.5-pro",
+      model: TEST_MODEL,
+      modelProfile: TEST_MODEL_PROFILE,
     });
     const state: RunState = {
       agentId: "agent_rpc_undo",
@@ -210,7 +227,7 @@ describe("JSON-RPC bridge", () => {
 
     const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "rpc", "--cwd", root], {
       cwd: process.cwd(),
-      env: { ...process.env, XDG_DATA_HOME: data, MIMO_API_KEY: "sk-123456789" },
+      env: { ...process.env, XDG_DATA_HOME: data, KULMI_TEST_API_KEY: "sk-123456789" },
       stdio: ["pipe", "pipe", "pipe"],
     });
     const lines = createInterface({ input: child.stdout });
@@ -264,9 +281,11 @@ async function waitForResponse(
 }
 
 function startRpc(root: string, data: string) {
+  // HOME already isolated by callers so user config is ignored
+
   const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "rpc", "--cwd", root], {
     cwd: process.cwd(),
-    env: { ...process.env, XDG_DATA_HOME: data, MIMO_API_KEY: "sk-123456789" },
+    env: { ...process.env, XDG_DATA_HOME: data, KULMI_TEST_API_KEY: "sk-123456789" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const lines = createInterface({ input: child.stdout });

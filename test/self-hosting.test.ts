@@ -103,7 +103,7 @@ describe("Kulmi self-hosting path", () => {
 
 class ScriptedProvider implements ModelProvider {
   readonly name = "self-host-test";
-  readonly model = "mimo-v2.5-pro";
+  readonly model = "test-model";
   readonly requests: ProviderRequest[] = [];
   readonly #responses: ProviderResponse[];
 

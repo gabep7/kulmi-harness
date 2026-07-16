@@ -4,21 +4,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import { disposeChildEnvironment, safeChildEnvironment } from "../src/security/environment.js";
 
 describe("safe child environment", () => {
-  const original = {
-    api: process.env.MIMO_API_KEY,
-    tokenPlan: process.env.MIMO_TOKEN_PLAN_API_KEY,
-  };
+  const original = process.env.OPENAI_API_KEY;
   afterEach(() => {
-    restore("MIMO_API_KEY", original.api);
-    restore("MIMO_TOKEN_PLAN_API_KEY", original.tokenPlan);
+    restore("OPENAI_API_KEY", original);
   });
 
   it("does not pass provider credentials to model-controlled processes", () => {
-    process.env.MIMO_API_KEY = "sk-secret";
-    process.env.MIMO_TOKEN_PLAN_API_KEY = "tp-secret";
+    process.env.OPENAI_API_KEY = "sk-secret";
     const env = safeChildEnvironment();
-    expect(env.MIMO_API_KEY).toBeUndefined();
-    expect(env.MIMO_TOKEN_PLAN_API_KEY).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(env.HOME).not.toBe(process.env.HOME);
     expect(env.PATH?.split(delimiter).every((entry) => isAbsolute(entry))).toBe(true);
     disposeChildEnvironment(env);

@@ -16,7 +16,7 @@ if (!mode || !workspace || !marker || !output) throw new Error("missing fixture 
 
 async function startInterruptedRun(): Promise<void> {
   const events = new EventBus();
-  const session = await SessionStore.create({ cwd: workspace!, model: "mimo-v2.5-pro", id: sessionId });
+  const session = await SessionStore.create({ cwd: workspace!, model: "test-model", id: sessionId });
   session.attach(events);
   const state = freshState();
   await session.saveRunState(state);
@@ -94,7 +94,7 @@ function freshState(): RunState {
 
 class CrashProvider implements ModelProvider {
   readonly name = "fixture";
-  readonly model = "mimo-v2.5-pro";
+  readonly model = "test-model";
   async complete(): Promise<ProviderResponse> {
     return {
       message: {
@@ -111,7 +111,7 @@ class CrashProvider implements ModelProvider {
 
 class RecoveryProvider implements ModelProvider {
   readonly name = "fixture";
-  readonly model = "mimo-v2.5-pro";
+  readonly model = "test-model";
   constructor(readonly outputPath: string) {}
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
     await writeFile(this.outputPath, `${JSON.stringify(request.messages, null, 2)}\n`, "utf8");

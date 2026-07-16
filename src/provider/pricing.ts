@@ -4,18 +4,17 @@ export interface PricingRates {
   output: number; // USD per 1M tokens
 }
 
-const MODEL_PRICING: Record<string, PricingRates> = {
-  "mimo-v2.5-pro": {
-    inputCacheHit: 0.0036,
-    inputCacheMiss: 0.435,
-    output: 0.87,
-  },
-  "mimo-v2.5": {
-    inputCacheHit: 0.0028,
-    inputCacheMiss: 0.14,
-    output: 0.28,
-  },
+const FALLBACK_RATES: PricingRates = {
+  inputCacheHit: 0,
+  inputCacheMiss: 0,
+  output: 0,
 };
+
+const MODEL_PRICING: Record<string, PricingRates> = {};
+
+export function registerPricing(model: string, rates: PricingRates): void {
+  MODEL_PRICING[model] = rates;
+}
 
 export function estimateCost(
   model: string,
@@ -26,7 +25,7 @@ export function estimateCost(
     cacheMissTokens: number;
   },
 ): number {
-  const rates = MODEL_PRICING[model] ?? MODEL_PRICING["mimo-v2.5-pro"]!;
+  const rates = MODEL_PRICING[model] ?? FALLBACK_RATES;
   const inputCost =
     (usage.cacheHitTokens / 1_000_000) * rates.inputCacheHit +
     (usage.cacheMissTokens / 1_000_000) * rates.inputCacheMiss;

@@ -14,7 +14,7 @@ describe("Kulmi TUI", () => {
     const view = render(
       <TuiApp
         store={store}
-        model="mimo-v2.5-pro"
+        model="test-model"
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
@@ -81,7 +81,7 @@ describe("Kulmi TUI", () => {
     const view = render(
       <TuiApp
         store={store}
-        model="mimo-v2.5-pro"
+        model="test-model"
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
@@ -104,7 +104,7 @@ describe("Kulmi TUI", () => {
     const view = render(
       <TuiApp
         store={store}
-        model="mimo-v2.5-pro"
+        model="test-model"
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
@@ -126,7 +126,7 @@ describe("Kulmi TUI", () => {
     const view = render(
       <TuiApp
         store={store}
-        model="mimo-v2.5-pro"
+        model="test-model"
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
@@ -143,39 +143,11 @@ describe("Kulmi TUI", () => {
     await pause();
     const workingFrame = view.lastFrame() ?? "";
     expect(workingFrame).toContain("Kulmi is working. Esc to stop.");
-    const spinnerMessages = [
-      "selling your data",
-      "downloading more RAM",
-      "mining bitcoin briefly",
-      "leaking telemetry just this once",
-      "blaming DNS",
-      "abusing the event loop",
-      "speedrunning a yak shave",
-      "barking up the wrong tree",
-      "spilling the beans",
-      "opening a can of worms",
-      "crying over spilled milk",
-      "beating a dead horse",
-      "letting the cat out of the bag",
-      "throwing stones in glass houses",
-      "burning the candle at both ends",
-      "crossing that bridge when we come to it",
-      "kicking the can down the road",
-      "beating around the bush",
-      "the pot calling the kettle black",
-      "counting chickens before they hatch",
-      "putting the cart before the horse",
-      "biting off more than you can chew",
-      "opening Pandora's box",
-      "biting the bullet",
-      "stepping on a rake",
-    ];
-    const spinnerMessage = spinnerMessages.find((message) => workingFrame.includes(message));
-    expect(spinnerMessage).toBeDefined();
     expect(workingFrame).toContain("⠋");
-    expect(workingFrame.indexOf(spinnerMessage!)).toBeLessThan(workingFrame.indexOf("Kulmi is working. Esc to stop."));
+    expect(workingFrame).toContain("thinking");
+    expect(workingFrame.indexOf("thinking")).toBeLessThan(workingFrame.indexOf("Kulmi is working. Esc to stop."));
     const composerLine = workingFrame.split("\n").find((line) => line.includes("Kulmi is working. Esc to stop."));
-    expect(composerLine).not.toContain(spinnerMessage!);
+    expect(composerLine).not.toContain("thinking");
     view.stdin.write("\u001b");
     await pause();
     expect(cancel).toHaveBeenCalledOnce();
@@ -187,7 +159,7 @@ describe("Kulmi TUI", () => {
     const view = render(
       <TuiApp
         store={store}
-        model="mimo-v2.5-pro"
+        model="test-model"
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
@@ -212,7 +184,7 @@ describe("Kulmi TUI", () => {
   it("opens and switches sessions from the keyboard picker", async () => {
     const store = new TuiStore();
     const switchSession = vi.fn(async () => ({
-      model: "mimo-v2.5",
+      model: "test-model",
       sessionId: "session_fedcba0987654321",
       cwd: "/workspace/kulmi",
       autonomy: "medium" as const,
@@ -222,7 +194,7 @@ describe("Kulmi TUI", () => {
     const view = render(
       <TuiApp
         store={store}
-        model="mimo-v2.5-pro"
+        model="test-model"
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
@@ -230,8 +202,8 @@ describe("Kulmi TUI", () => {
         onSubmit={async () => undefined}
         onCommand={async (command) => command === "/sessions" ? {
           sessions: [
-            { id: "session_1234567890abcdef", status: "idle", model: "mimo-v2.5-pro", title: "Current work", current: true },
-            { id: "session_fedcba0987654321", status: "completed", model: "mimo-v2.5", title: "Previous work", current: false },
+            { id: "session_1234567890abcdef", status: "idle", model: "test-model", title: "Current work", current: true },
+            { id: "session_fedcba0987654321", status: "completed", model: "test-model", title: "Previous work", current: false },
           ],
         } : undefined}
         onSwitchSession={switchSession}
@@ -249,7 +221,7 @@ describe("Kulmi TUI", () => {
     view.stdin.write("\r");
     await pause(100);
     expect(switchSession).toHaveBeenCalledWith("session_fedcba0987654321");
-    expect(view.lastFrame()).toContain("mimo-v2.5  ·  fedcba09");
+    expect(view.lastFrame()).toContain("test-model  ·  fedcba09");
     expect(view.lastFrame()).toContain("goal");
   });
 
@@ -260,7 +232,7 @@ describe("Kulmi TUI", () => {
     const view = render(
       <TuiApp
         store={store}
-        model="mimo-v2.5-pro"
+        model="test-model"
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
@@ -324,7 +296,7 @@ describe("Kulmi TUI", () => {
     const view = render(
       <TuiApp
         store={store}
-        model="mimo-v2.5-pro"
+        model="test-model"
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
@@ -406,7 +378,7 @@ describe("Kulmi TUI", () => {
     const view = render(
       <TuiApp
         store={store}
-        model="mimo-v2.5-pro"
+        model="test-model"
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"

@@ -7,7 +7,7 @@ describe("session forking", () => {
     const previous = process.env.XDG_DATA_HOME;
     process.env.XDG_DATA_HOME = `/tmp/kulmi-fork-${crypto.randomUUID()}`;
     try {
-      const source = await SessionStore.create({ cwd: "/tmp/project", model: "mimo-v2.5-pro", prompt: "fix it" });
+      const source = await SessionStore.create({ cwd: "/tmp/project", model: "test-model", prompt: "fix it" });
       await source.saveMessages([{ role: "user", content: "original" }]);
       const fork = await forkSession(source.id);
       const loaded = await SessionStore.open(fork.id);
@@ -24,7 +24,7 @@ describe("session forking", () => {
     const previous = process.env.XDG_DATA_HOME;
     process.env.XDG_DATA_HOME = `/tmp/kulmi-fork-${crypto.randomUUID()}`;
     try {
-      const source = await SessionStore.create({ cwd: "/tmp/project", model: "mimo-v2.5-pro" });
+      const source = await SessionStore.create({ cwd: "/tmp/project", model: "test-model" });
       await source.saveMessages([{ role: "user", content: "delegate it" }]);
       const worker: WorkerJob = {
         id: "worker_1234567890abcdef",

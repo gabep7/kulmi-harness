@@ -15,7 +15,7 @@ describe("WorktreeManager", () => {
     process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-worktrees-"));
     await exec("git", ["init", root]);
     await writeFile(join(root, "main.ts"), "export const value = 1;\n");
-    await writeFile(join(root, ".env"), "MIMO_API_KEY=secret\n");
+    await writeFile(join(root, ".env"), "OPENAI_API_KEY=secret\n");
 
     const manager = new WorktreeManager(root);
     const worker = await manager.create("worker_unborn");

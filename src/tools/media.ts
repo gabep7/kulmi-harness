@@ -6,7 +6,7 @@ import { defineTool } from "./types.js";
 
 export const attachImageTool = defineTool({
   name: "attach_image",
-  description: "Store a workspace image as a session attachment and return metadata. Prompts can also attach images to MiMo by including @image <path> when using mimo-v2.5.",
+  description: "Store a workspace image as a session attachment and return metadata. Prompts can also attach images by including @image <path>.",
   schema: z.object({ path: z.string().min(1) }),
   readOnly: true,
   async execute(context, input) {

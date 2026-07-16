@@ -20,15 +20,15 @@ describe("SessionStore", () => {
   it("persists the billing-specific model profile", async () => {
     const store = await SessionStore.create({
       cwd: process.cwd(),
-      model: "mimo-v2.5-pro",
-      modelProfile: "mimo-v2.5-pro-token-plan",
+      model: "test-model",
+      modelProfile: "test-model",
     });
     const loaded = await SessionStore.open(store.id);
-    expect(loaded.session.metadata.modelProfile).toBe("mimo-v2.5-pro-token-plan");
+    expect(loaded.session.metadata.modelProfile).toBe("test-model");
   });
 
   it("persists durable events without serializing streaming deltas", async () => {
-    const store = await SessionStore.create({ cwd: process.cwd(), model: "mimo-v2.5-pro" });
+    const store = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
     const events = new EventBus();
     store.attach(events);
     await events.emit({ type: "assistant.reasoning.delta", agentId: "agent", text: "private stream" });
@@ -43,7 +43,7 @@ describe("SessionStore", () => {
   });
 
   it("writes versioned session files", async () => {
-    const store = await SessionStore.create({ cwd: process.cwd(), model: "mimo-v2.5-pro" });
+    const store = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
     await store.saveRunState({
       agentId: "agent_test",
       mode: "task",
@@ -72,7 +72,7 @@ describe("SessionStore", () => {
     await writeFile(join(path, "session.json"), JSON.stringify({
       id,
       cwd: process.cwd(),
-      model: "mimo-v2.5-pro",
+      model: "test-model",
       status: "idle",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
@@ -94,12 +94,12 @@ describe("SessionStore", () => {
   });
 
   it("rejects malformed required and optional session files", async () => {
-    const metadataStore = await SessionStore.create({ cwd: process.cwd(), model: "mimo-v2.5-pro" });
+    const metadataStore = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
     const metadata = JSON.parse(await readFile(join(metadataStore.path, "session.json"), "utf8"));
     await writeFile(join(metadataStore.path, "session.json"), JSON.stringify({ ...metadata, status: "mystery" }));
     await expect(SessionStore.open(metadataStore.id)).rejects.toThrow("invalid session metadata");
 
-    const messageStore = await SessionStore.create({ cwd: process.cwd(), model: "mimo-v2.5-pro" });
+    const messageStore = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
     await writeFile(join(messageStore.path, "messages.json"), JSON.stringify([{
       role: "assistant",
       content: null,
@@ -107,11 +107,11 @@ describe("SessionStore", () => {
     }]));
     await expect(SessionStore.open(messageStore.id)).rejects.toThrow("invalid session messages");
 
-    const second = await SessionStore.create({ cwd: process.cwd(), model: "mimo-v2.5-pro" });
+    const second = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
     await writeFile(join(second.path, "state.json"), JSON.stringify({ broken: true }));
     await expect(SessionStore.open(second.id)).rejects.toThrow("invalid run state");
 
-    const workerStore = await SessionStore.create({ cwd: process.cwd(), model: "mimo-v2.5-pro" });
+    const workerStore = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
     await writeFile(join(workerStore.path, "workers.json"), JSON.stringify([{ id: "worker_bad" }]));
     await expect(SessionStore.open(workerStore.id)).rejects.toThrow("invalid worker state");
   });

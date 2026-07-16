@@ -14,10 +14,11 @@ import { loadInstructions } from "../config/instructions.js";
 import { discoverRules, rulesPromptInventory, loadStickyRules } from "../config/rules.js";
 import { discoverAgents, agentsPromptInventory } from "../config/agents.js";
 import { discoverSkills, skillsPromptInventory } from "../config/skills.js";
+import { discoverMemory, memoryPromptInventory } from "../config/memory.js";
 import { EventBus } from "../core/events.js";
 import { createId } from "../core/ids.js";
 import type { AgentMode, AutonomyLevel, RunState } from "../core/types.js";
-import { MiMoProvider } from "../provider/mimo.js";
+import { OpenAIProvider } from "../provider/openai.js";
 import type { ModelProvider, ProviderMessage } from "../provider/types.js";
 import { progressTools, workerProgressTools } from "../tools/progress.js";
 import { fileTools } from "../tools/files.js";
@@ -32,6 +33,7 @@ import { ArtifactStore } from "./artifacts.js";
 import { readArtifactTool } from "../tools/artifacts.js";
 import { fetchUrlTool, freeWebSearchTool } from "../tools/web-search.js";
 import { skillTools } from "../tools/skills.js";
+import { memoryTools } from "../tools/memory.js";
 import { ruleTools } from "../tools/rules.js";
 import { astGrepTool } from "../tools/ast-grep.js";
 import { gitTools } from "../tools/git.js";
@@ -153,7 +155,7 @@ export class SessionController {
       );
     }
     const search = { ...config.search, mode: options.webSearch ?? config.search.mode };
-    const provider = new MiMoProvider(resolved);
+    const provider = new OpenAIProvider(resolved);
     const events = options.events ?? new EventBus();
     const permissions: PermissionApi = {
       request: async (request) => {
@@ -181,6 +183,8 @@ export class SessionController {
     const skillsInventory = skillsPromptInventory(skills);
     const customAgents = discoverAgents(workspaceRoot);
     const agentsInventory = agentsPromptInventory(customAgents);
+    const memories = discoverMemory(workspaceRoot);
+    const memoryInventory = memoryPromptInventory(memories);
     const rules = discoverRules(workspaceRoot);
     const rulesInventory = rulesPromptInventory(rules);
     const stickyRules = await loadStickyRules(workspaceRoot, cwd);
@@ -236,8 +240,8 @@ export class SessionController {
       const readOnly = job.mode !== "implement";
       const searchTools = search.mode === "free" ? [freeWebSearchTool(search), fetchUrlTool()] : [];
       const childTools = readOnly
-        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools().filter((tool) => tool.readOnly), browserQaTool, attachImageTool, ...workerProgressTools()])
-        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools(), browserQaTool, attachImageTool, ...workerProgressTools()]);
+        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools().filter((tool) => tool.readOnly), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools().filter((tool) => tool.readOnly), browserQaTool, attachImageTool, ...workerProgressTools()])
+        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools(), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools(), browserQaTool, attachImageTool, ...workerProgressTools()]);
       const childAgent = new Agent({
         provider,
         tools: childTools,
@@ -253,6 +257,7 @@ export class SessionController {
           skillsInventory,
           rulesInventory,
           agentsInventory,
+          memoryInventory,
         })}\n${subagentReportContract}`,
         workspaceRoot: workerCwd,
         cwd: workerCwd,
@@ -322,6 +327,7 @@ export class SessionController {
       ...progressTools(),
       ...subagentTools(customAgents),
       ...skillTools(skills),
+      ...(autonomy === "read" ? memoryTools().filter((tool) => tool.readOnly) : memoryTools()),
       ...ruleTools(rules),
       astGrepTool,
       ...gitTools(),
@@ -344,6 +350,7 @@ export class SessionController {
         skillsInventory,
         rulesInventory,
         agentsInventory,
+        memoryInventory,
       }),
       workspaceRoot,
       cwd,

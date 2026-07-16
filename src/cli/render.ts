@@ -68,7 +68,7 @@ function renderText(
         const searchUsage = event.usage.webSearchCalls
           ? `, ${event.usage.webSearchCalls} searches, ${event.usage.webSearchPages ?? 0} pages`
           : "";
-        const cost = estimateCost(model ?? "mimo-v2.5-pro", event.usage);
+        const cost = estimateCost(model ?? "unknown", event.usage);
         process.stderr.write(
           pc.dim(
             `tokens ${event.usage.totalTokens} (${cacheRate}% cache, ${event.usage.reasoningTokens ?? 0} thinking${searchUsage}) ~${formatCost(cost)}\n`,

@@ -55,7 +55,7 @@ const commands = [
   ["/thinking", "expand or collapse reasoning"],
   ["/fork", "fork this session"],
   ["/undo", "revert the previous turn"],
-  ["/auth", "change MiMo credentials"],
+  ["/auth", "change API key credentials"],
   ["/workers", "inspect child agents"],
   ["/steer", "redirect a running worker"],
   ["/cancel", "cancel a worker"],
@@ -344,38 +344,11 @@ function Composer({ value, onChange, onSubmit, busy }: { value: string; onChange
 }
 
 
-const loadingMessages = [
-  "selling your data",
-  "downloading more RAM",
-  "mining bitcoin briefly",
-  "leaking telemetry just this once",
-  "blaming DNS",
-  "abusing the event loop",
-  "speedrunning a yak shave",
-  "barking up the wrong tree",
-  "spilling the beans",
-  "opening a can of worms",
-  "crying over spilled milk",
-  "beating a dead horse",
-  "letting the cat out of the bag",
-  "throwing stones in glass houses",
-  "burning the candle at both ends",
-  "crossing that bridge when we come to it",
-  "kicking the can down the road",
-  "beating around the bush",
-  "the pot calling the kettle black",
-  "counting chickens before they hatch",
-  "putting the cart before the horse",
-  "biting off more than you can chew",
-  "opening Pandora's box",
-  "biting the bullet",
-  "stepping on a rake",
-] as const;
+const loadingMessage = "thinking";
 
 const loadingFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 
 function useLoadingStatus(active: boolean): { icon: string; message: string } {
-  const [messages] = useState(() => shuffledLoadingMessages());
   const [tick, setTick] = useState(0);
   useEffect(() => {
     if (!active) return;
@@ -384,7 +357,7 @@ function useLoadingStatus(active: boolean): { icon: string; message: string } {
   }, [active]);
   return {
     icon: loadingFrames[tick % loadingFrames.length]!,
-    message: messages[Math.floor(tick / 14) % messages.length]!,
+    message: loadingMessage,
   };
 }
 
@@ -397,14 +370,6 @@ function LoadingStatus() {
       <Text color={theme.muted}>{loading.message}</Text>
     </Box>
   );
-}
-function shuffledLoadingMessages(): string[] {
-  const messages = [...loadingMessages];
-  for (let index = messages.length - 1; index > 0; index -= 1) {
-    const swap = Math.floor(Math.random() * (index + 1));
-    [messages[index], messages[swap]] = [messages[swap]!, messages[index]!];
-  }
-  return messages;
 }
 
 function Approval({ request }: { request: PermissionRequest }) {

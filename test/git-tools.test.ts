@@ -21,7 +21,7 @@ describe("git workflow tools", () => {
   it("lists, reads, resolves, and commits a local merge conflict under trusted autonomy", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "kulmi-git-tools-")));
     process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-git-data-"));
-    await exec("git", ["init", root]);
+    await exec("git", ["init", "--initial-branch", "master", root]);
     await exec("git", ["-C", root, "config", "user.email", "kulmi@example.invalid"]);
     await exec("git", ["-C", root, "config", "user.name", "Kulmi Test"]);
     await writeFile(join(root, "conflict.txt"), "base\n");
@@ -95,7 +95,7 @@ describe("git workflow tools", () => {
 });
 
 async function toolContext(root: string): Promise<ToolContext> {
-  const session = await SessionStore.create({ cwd: root, model: "mimo-v2.5-pro" });
+  const session = await SessionStore.create({ cwd: root, model: "test-model" });
   const state: RunState = {
     agentId: "agent_git_tools",
     mode: "task",

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,71 +6,54 @@ import {
   acceptCredential,
   MacKeychain,
   resolveExistingCredential,
-  validateCredential,
-  type CredentialChoice,
-  type CredentialKind,
   type Keychain,
 } from "../src/auth/credentials.js";
+import { TEST_API_KEY_ENV, TEST_MODEL_PROFILE, writeTestModelConfig } from "./helpers/test-config.js";
 
-const originalApi = process.env.MIMO_API_KEY;
-const originalPlan = process.env.MIMO_TOKEN_PLAN_API_KEY;
+const originalKey = process.env[TEST_API_KEY_ENV];
+const originalHome = process.env.HOME;
 
 afterEach(() => {
-  restore("MIMO_API_KEY", originalApi);
-  restore("MIMO_TOKEN_PLAN_API_KEY", originalPlan);
+  restore(TEST_API_KEY_ENV, originalKey);
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
 });
 
-describe("MiMo credential onboarding", () => {
-  it("validates billing-specific prefixes without accepting whitespace", () => {
-    expect(validateCredential("api", "sk-123456789")).toBe(true);
-    expect(validateCredential("token-plan", "tp-123456789")).toBe(true);
-    expect(validateCredential("api", "tp-123456789")).toBe(false);
-    expect(validateCredential("api", "sk-1234 56789")).toBe(false);
-  });
-
-  it("uses a selected Keychain credential and matching model profile", async () => {
-    delete process.env.MIMO_API_KEY;
-    delete process.env.MIMO_TOKEN_PLAN_API_KEY;
+describe("credential onboarding", () => {
+  it("uses a Keychain credential and matching model profile", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "kulmi-credentials-"));
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    await writeTestModelConfig(cwd);
+    delete process.env[TEST_API_KEY_ENV];
     const result = await resolveExistingCredential({
-      cwd: process.cwd(),
-      keychain: new FakeKeychain({ kind: "token-plan", key: "tp-123456789" }),
+      cwd,
+      keychain: new FakeKeychain("sk-123456789"),
     });
-    expect(result).toMatchObject({ kind: "token-plan", model: "mimo-v2.5-pro-token-plan", source: "keychain" });
-    expect(process.env.MIMO_TOKEN_PLAN_API_KEY).toBe("tp-123456789");
+    expect(result).toMatchObject({ model: TEST_MODEL_PROFILE, source: "keychain" });
+    expect(process.env[TEST_API_KEY_ENV]).toBe("sk-123456789");
   });
 
-  it("keeps a configured non-Pro default when its credential is available", async () => {
-    const cwd = await configuredWorkspace('default_model = "mimo-v2.5"\n');
-    process.env.MIMO_API_KEY = "sk-123456789";
-    delete process.env.MIMO_TOKEN_PLAN_API_KEY;
-
+  it("prefers the environment credential when available", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "kulmi-credentials-"));
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    await writeTestModelConfig(cwd);
+    process.env[TEST_API_KEY_ENV] = "sk-123456789";
     await expect(resolveExistingCredential({ cwd, keychain: new FakeKeychain() })).resolves.toMatchObject({
-      kind: "api",
-      model: "mimo-v2.5",
+      model: TEST_MODEL_PROFILE,
       source: "environment",
     });
   });
 
-  it("prefers the configured billing type when both credentials are available", async () => {
-    const cwd = await configuredWorkspace('default_model = "mimo-v2.5-pro-token-plan"\n');
-    process.env.MIMO_API_KEY = "sk-123456789";
-    process.env.MIMO_TOKEN_PLAN_API_KEY = "tp-123456789";
-
-    await expect(resolveExistingCredential({ cwd, keychain: new FakeKeychain() })).resolves.toMatchObject({
-      kind: "token-plan",
-      model: "mimo-v2.5-pro-token-plan",
-      source: "environment",
-    });
-  });
-
-  it("switches away from an incompatible requested profile", async () => {
+  it("accepts a new credential and stores it in the keychain", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "kulmi-credentials-"));
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    await writeTestModelConfig(cwd);
     const result = await acceptCredential({
-      cwd: process.cwd(),
-      requestedModel: "mimo-v2.5-pro",
-      choice: { kind: "token-plan", key: "tp-123456789" },
+      cwd,
+      choice: { key: "sk-123456789" },
       keychain: new FakeKeychain(),
     });
-    expect(result.model).toBe("mimo-v2.5-pro-token-plan");
+    expect(result.model).toBe(TEST_MODEL_PROFILE);
     expect(result.stored).toBe(true);
   });
 
@@ -86,32 +69,27 @@ describe("MiMo credential onboarding", () => {
         };
       },
     });
-    await expect(keychain.read("api")).resolves.toBe("sk-123456789");
-    await expect(keychain.save({ kind: "api", key: "sk-123456789" })).resolves.toBe(true);
-    expect(calls).toHaveLength(3);
-    expect(calls[0]).toEqual(["find-generic-password", "-s", "dev.kulmi.mimo", "-a", "api", "-w"]);
+    await expect(keychain.read()).resolves.toBe("sk-123456789");
+    await expect(keychain.save("sk-123456789")).resolves.toBe(true);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual(["find-generic-password", "-s", "dev.kulmi.api-key", "-a", "default", "-w"]);
     expect(calls[1]).toContain("sk-123456789");
-    expect(calls[2]).toContain("api");
   });
 });
 
 class FakeKeychain implements Keychain {
-  #choice: CredentialChoice | undefined;
+  #key: string | undefined;
 
-  constructor(choice?: CredentialChoice) {
-    this.#choice = choice;
+  constructor(key?: string) {
+    this.#key = key;
   }
 
-  async read(kind: CredentialKind): Promise<string | undefined> {
-    return this.#choice?.kind === kind ? this.#choice.key : undefined;
+  async read(): Promise<string | undefined> {
+    return this.#key;
   }
 
-  async readSelection(): Promise<CredentialKind | undefined> {
-    return this.#choice?.kind;
-  }
-
-  async save(choice: CredentialChoice): Promise<boolean> {
-    this.#choice = choice;
+  async save(key: string): Promise<boolean> {
+    this.#key = key;
     return true;
   }
 }
@@ -119,11 +97,4 @@ class FakeKeychain implements Keychain {
 function restore(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
-}
-
-async function configuredWorkspace(config: string): Promise<string> {
-  const cwd = await mkdtemp(join(tmpdir(), "kulmi-credentials-"));
-  await mkdir(join(cwd, ".kulmi"));
-  await writeFile(join(cwd, ".kulmi", "config.toml"), config, "utf8");
-  return cwd;
 }

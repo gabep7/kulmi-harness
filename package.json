@@ -1,7 +1,7 @@
 {
   "name": "kulmi-harness",
   "version": "1.0.0",
-  "description": "MiMo V2.5-native autonomous coding harness",
+  "description": "autonomous coding harness",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/gabep7/kulmi-harness.git"
@@ -20,7 +20,7 @@
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:live:mimo": "tsx scripts/mimo-smoke.ts",
+    "test:live": "tsx scripts/provider-smoke.ts",
     "test:tui": "vitest run test/tui.test.tsx",
     "test:package": "node scripts/package-smoke.mjs",
     "check:version": "node scripts/check-version.mjs",

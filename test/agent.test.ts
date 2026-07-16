@@ -23,7 +23,7 @@ describe("Agent", () => {
 
   it("restores the system contract for legacy history without a system message", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
-    const session = await SessionStore.create({ cwd: workspace, model: "mimo-v2.5-pro" });
+    const session = await SessionStore.create({ cwd: workspace, model: "test-model" });
     const state: RunState = {
       agentId: "agent_legacy",
       mode: "chat",
@@ -166,7 +166,7 @@ describe("Agent", () => {
       const previous = requests[index - 1]!.messages;
       const current = requests[index]!.messages;
       // Each turn must be a strict prefix-extension of the previous request so
-      // MiMo's automatic prefix cache keeps hitting. Rewriting earlier history
+      // the automatic prefix cache keeps hitting. Rewriting earlier history
       // (not just appending) would silently destroy the cache prefix.
       expect(current.length).toBeGreaterThan(previous.length);
       expect(current.slice(0, previous.length)).toEqual(previous);
@@ -451,7 +451,7 @@ describe("Agent", () => {
       join(workspace, "pixel.png"),
       Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/azYfHsAAAAASUVORK5CYII=", "base64"),
     );
-    const provider = new ScriptedProvider([textResponse("seen")], "mimo-v2.5");
+    const provider = new ScriptedProvider([textResponse("seen")], "test-model");
     const session = await SessionStore.create({ cwd: workspace, model: provider.model });
     const state: RunState = {
       agentId: "agent_image_prompt",
@@ -663,7 +663,7 @@ describe("Agent", () => {
     });
   });
 
-  it("restores an undo boundary and starts a new MiMo cache epoch", async () => {
+  it("restores an undo boundary and starts a new cache epoch", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "kulmi-agent-undo-"));
     const provider = new ScriptedProvider([textResponse("continued")]);
     const session = await SessionStore.create({ cwd: workspace, model: provider.model });
@@ -730,7 +730,7 @@ class ScriptedProvider implements ModelProvider {
   readonly requests: ProviderRequest[] = [];
   readonly #responses: ProviderResponse[];
 
-  constructor(responses: ProviderResponse[], model = "mimo-v2.5-pro") {
+  constructor(responses: ProviderResponse[], model = "test-model") {
     this.model = model;
     this.#responses = responses;
   }

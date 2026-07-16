@@ -18,7 +18,7 @@ import { attachRenderer } from "./cli/render.js";
 import { runRpcServer } from "./rpc/server.js";
 import type { PermissionRequest } from "./tools/types.js";
 import { runTui } from "./tui/index.js";
-import { acceptCredential, resolveExistingCredential, type CredentialKind } from "./auth/credentials.js";
+import { acceptCredential, resolveExistingCredential } from "./auth/credentials.js";
 import { CredentialSetupCancelledError, runCredentialOnboarding } from "./tui/onboarding.js";
 import { sandboxAvailability } from "./runtime/process.js";
 import { resolveToolBinary } from "./runtime/binaries.js";
@@ -28,7 +28,7 @@ type ApprovalMode = "never" | "on-request";
 const program = new Command();
 program
   .name("kulmi")
-  .description("MiMo V2.5-native autonomous coding agent")
+  .description("autonomous coding agent")
   // Program-level options (for the bare TUI) and subcommands like `exec` both
   // declare --auto/--model/etc. Without positional options the parent swallows
   // them, so `kulmi exec --auto medium` would silently run read-only.
@@ -47,8 +47,7 @@ program
     });
     let model = existing?.model;
     if (!existing) {
-      const initial = credentialKindForModel(credentialModel, process.cwd());
-      const choice = await runCredentialOnboarding(initial);
+      const choice = await runCredentialOnboarding();
       const accepted = await acceptCredential({
         choice,
         cwd: process.cwd(),
@@ -232,19 +231,29 @@ program
     const gitVersion = commandOutput("git", ["--version"]);
     const gitWorkspace = commandOutput("git", ["-C", process.cwd(), "rev-parse", "--show-toplevel"]);
     const profile = credential?.model ?? config.defaultModel;
-    const selected = config.models[profile];
+    const selected = profile ? config.models[profile] : undefined;
     const selectedKey = selected ? process.env[selected.apiKeyEnv] : undefined;
     const sandbox = sandboxAvailability();
     const astGrepBinary = await resolveToolBinary("sg");
     const lspBinary = await resolveToolBinary("typescript-language-server");
     const ripgrepBinary = await resolveToolBinary("rg");
     const chromium = resolveChromiumBinary();
+    const modelDetail = selected
+      ? profile
+      : Object.keys(config.models).length === 0
+        ? "no models configured; run kulmi init"
+        : profile || "default_model is not set";
+    const credentialDetail = selected
+      ? `${selected.apiKeyEnv} ${selectedKey ? "set" : "missing"}`
+      : Object.keys(config.models).length === 0
+        ? "configure a model profile first"
+        : "unknown profile";
     const checks = [
       ["node", Number.parseInt(process.versions.node, 10) >= 22, process.versions.node],
       ["git", Boolean(gitVersion), gitVersion || "missing"],
       ["workspace", Boolean(gitWorkspace), gitWorkspace || `${root} is not a git worktree`],
-      ["model", Boolean(selected), profile],
-      ["credential", Boolean(selectedKey), selected ? `${selected.apiKeyEnv} ${selectedKey ? "set" : "missing"}` : "unknown profile"],
+      ["model", Boolean(selected), modelDetail],
+      ["credential", Boolean(selectedKey), credentialDetail],
       ["sandbox", config.sandbox.mode === "off" || sandbox.available, config.sandbox.mode === "off" ? "disabled by configuration" : `${sandbox.backend} ${sandbox.detail}`],
       ["ast-grep", Boolean(astGrepBinary), astGrepBinary ?? "sg missing; run npm install or add sg to PATH"],
       ["lsp", Boolean(lspBinary), lspBinary ?? "typescript-language-server missing; run npm install or add it to PATH"],
@@ -260,14 +269,13 @@ program
 
 program
   .command("auth")
-  .description("change the MiMo API or Token Plan credential")
-  .option("--token-plan", "select Token Plan initially")
-  .action(async (options: { tokenPlan?: boolean }) => {
-    const choice = await runCredentialOnboarding(options.tokenPlan ? "token-plan" : "api");
+  .description("change the API key credential")
+  .action(async () => {
+    const choice = await runCredentialOnboarding();
     const accepted = await acceptCredential({ choice, cwd: process.cwd() });
     process.stdout.write(
       accepted.stored
-        ? `saved ${accepted.kind} credential in macOS Keychain\n`
+        ? `saved credential in macOS Keychain\n`
         : `credential accepted for this process; macOS Keychain was unavailable\n`,
     );
   });
@@ -363,10 +371,6 @@ function parseApprovalMode(value: string): ApprovalMode {
   throw new Error(`invalid approval mode ${value}`);
 }
 
-function credentialKindForModel(model: string | undefined, cwd: string): CredentialKind {
-  const profile = model ? loadConfig(cwd).models[model] : undefined;
-  return profile?.billing === "token-plan" ? "token-plan" : "api";
-}
 
 async function credentialModelFor(
   model: string | undefined,

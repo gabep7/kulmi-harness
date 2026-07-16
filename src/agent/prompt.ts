@@ -7,6 +7,7 @@ export function buildSystemPrompt(options: {
   skillsInventory?: string;
   rulesInventory?: string;
   agentsInventory?: string;
+  memoryInventory?: string;
 }): string {
   const mode = modeContract(options.mode);
   const authority = options.readOnly
@@ -37,7 +38,11 @@ ${options.rulesInventory?.trim() || "No rulebook rules were found."}
 Read relevant rules with read_rule before applying them.
 
 Custom agents:
-${options.agentsInventory?.trim() || "None."}`;
+${options.agentsInventory?.trim() || "None."}
+
+Memory:
+${options.memoryInventory?.trim() || "No memory files were found."}
+Read relevant memories with read_memory before relying on them. Memory holds durable facts, decisions, and preferences from prior sessions.${options.readOnly ? "" : " When you learn a durable project fact, decision, or preference worth keeping, store it with save_memory; never store ephemeral task state."}`;
 }
 
 function modeContract(mode: AgentMode): string {

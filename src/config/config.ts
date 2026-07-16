@@ -6,30 +6,20 @@ import { parse } from "smol-toml";
 import { z } from "zod";
 import type { AutonomyLevel } from "../core/types.js";
 
-export type MiMoBilling = "pay-as-you-go" | "token-plan";
 export type SearchMode = "off" | "free";
 export type FreeSearchProvider = "auto" | "searxng" | "bing-rss";
 export type SandboxMode = "required" | "off";
 export type UndoMessageHistory = "truncate" | "keep";
 
-export type ModelId = "mimo-v2.5-pro" | "mimo-v2.5";
-
 export interface ModelConfig {
-  model: ModelId;
-  billing: MiMoBilling;
+  model: string;
+  provider?: string;
   baseUrl: string;
   apiKeyEnv: string;
   thinking: boolean;
+  reasoningEffort?: string;
   contextWindow: number;
   maxOutputTokens: number;
-}
-
-const knownModels = ["mimo-v2.5-pro", "mimo-v2.5"] as const;
-const payAsYouGoBaseUrl = "https://api.xiaomimimo.com/v1";
-const tokenPlanBaseUrl = "https://token-plan-ams.xiaomimimo.com/v1";
-
-export function apiKeyEnvFor(billing: MiMoBilling): string {
-  return billing === "token-plan" ? "MIMO_TOKEN_PLAN_API_KEY" : "MIMO_API_KEY";
 }
 
 export interface SearchConfig {
@@ -78,51 +68,23 @@ export interface ResolvedModel extends ModelConfig {
   apiKey: string;
 }
 
+const modelDefaults: ModelConfig = {
+  model: "",
+  baseUrl: "",
+  apiKeyEnv: "API_KEY",
+  thinking: false,
+  contextWindow: 128_000,
+  maxOutputTokens: 16_384,
+};
+
 const defaults: KulmiConfig = {
-  defaultModel: "mimo-v2.5-pro",
+  defaultModel: "",
   defaultAutonomy: "medium",
   maxSteps: 80,
   maxSubagents: 3,
   commandTimeoutSeconds: 120,
   maxOutputBytes: 200_000,
-  models: {
-    "mimo-v2.5-pro": {
-      model: "mimo-v2.5-pro",
-      billing: "pay-as-you-go",
-      baseUrl: payAsYouGoBaseUrl,
-      apiKeyEnv: "MIMO_API_KEY",
-      thinking: true,
-      contextWindow: 1_048_576,
-      maxOutputTokens: 131_072,
-    },
-    "mimo-v2.5": {
-      model: "mimo-v2.5",
-      billing: "pay-as-you-go",
-      baseUrl: payAsYouGoBaseUrl,
-      apiKeyEnv: "MIMO_API_KEY",
-      thinking: true,
-      contextWindow: 1_048_576,
-      maxOutputTokens: 131_072,
-    },
-    "mimo-v2.5-pro-token-plan": {
-      model: "mimo-v2.5-pro",
-      billing: "token-plan",
-      baseUrl: tokenPlanBaseUrl,
-      apiKeyEnv: "MIMO_TOKEN_PLAN_API_KEY",
-      thinking: true,
-      contextWindow: 1_048_576,
-      maxOutputTokens: 131_072,
-    },
-    "mimo-v2.5-token-plan": {
-      model: "mimo-v2.5",
-      billing: "token-plan",
-      baseUrl: tokenPlanBaseUrl,
-      apiKeyEnv: "MIMO_TOKEN_PLAN_API_KEY",
-      thinking: true,
-      contextWindow: 1_048_576,
-      maxOutputTokens: 131_072,
-    },
-  },
+  models: {},
   search: {
     mode: "free",
     resultLimit: 5,
@@ -148,10 +110,8 @@ const httpUrlSchema = z.string().url().refine((value) => {
 }, "must use http or https");
 const positiveInt = z.number().int().positive();
 const modelFileSchema = z.object({
-  vendor: z.string().min(1).optional(),
   provider: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
-  billing: z.enum(["pay-as-you-go", "token-plan"]).optional(),
   base_url: httpUrlSchema.optional(),
   baseUrl: httpUrlSchema.optional(),
   api_key_env: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
@@ -272,23 +232,24 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
   const models = { ...base.models };
   for (const [name, raw] of Object.entries(file.models ?? {})) {
     const existing = models[name];
-    const previous = existing ?? defaults.models["mimo-v2.5-pro"]!;
+    const previous = existing ?? modelDefaults;
     const model = raw.model ?? previous.model;
-    if (!knownModels.includes(model as ModelId)) continue;
-    if (raw.vendor && raw.vendor !== "mimo") {
-      throw new Error(`model ${name}: vendor must be mimo`);
+    const baseUrl = raw.base_url ?? raw.baseUrl ?? previous.baseUrl;
+    const apiKeyEnv = raw.api_key_env ?? raw.apiKeyEnv ?? previous.apiKeyEnv;
+    if (!existing) {
+      if (!model) throw new Error(`model ${name}: model is required`);
+      if (!baseUrl) throw new Error(`model ${name}: base_url is required`);
+      if (!apiKeyEnv) throw new Error(`model ${name}: api_key_env is required`);
     }
-    const billing = raw.billing ?? previous.billing;
     models[name] = {
-      model: model as ModelId,
-      billing,
-      baseUrl: raw.base_url ?? raw.baseUrl ?? (
-        existing && billing === previous.billing
-          ? previous.baseUrl
-          : billing === "token-plan" ? tokenPlanBaseUrl : payAsYouGoBaseUrl
-      ),
-      apiKeyEnv: raw.api_key_env ?? raw.apiKeyEnv ?? apiKeyEnvFor(billing),
+      model,
+      ...(raw.provider ?? previous.provider ? { provider: raw.provider ?? previous.provider } : {}),
+      baseUrl,
+      apiKeyEnv,
       thinking: raw.thinking ?? previous.thinking,
+      ...(raw.reasoning_effort ?? raw.reasoningEffort ?? previous.reasoningEffort
+        ? { reasoningEffort: raw.reasoning_effort ?? raw.reasoningEffort ?? previous.reasoningEffort }
+        : {}),
       contextWindow: raw.context_window ?? raw.contextWindow ?? previous.contextWindow,
       maxOutputTokens: raw.max_output_tokens ?? raw.maxOutputTokens ?? previous.maxOutputTokens,
     };
@@ -339,20 +300,22 @@ function parseFileConfig(raw: unknown, source: string): FileConfig {
 }
 
 function validateMergedConfig(config: KulmiConfig): void {
-  if (!config.models[config.defaultModel]) throw new Error(`unknown default model ${config.defaultModel}`);
+  if (Object.keys(config.models).length === 0) {
+    if (config.defaultModel) throw new Error(`unknown default model ${config.defaultModel}`);
+  } else if (!config.defaultModel || !config.models[config.defaultModel]) {
+    throw new Error(config.defaultModel
+      ? `unknown default model ${config.defaultModel}`
+      : "default_model is required when models are configured");
+  }
   if (config.search.provider === "searxng" && !config.search.searxngUrl) {
     throw new Error("search.provider=searxng requires search.searxng_url");
   }
   for (const [name, model] of Object.entries(config.models)) {
+    if (!model.model) throw new Error(`model ${name}: model is required`);
+    if (!model.baseUrl) throw new Error(`model ${name}: base_url is required`);
+    if (!model.apiKeyEnv) throw new Error(`model ${name}: api_key_env is required`);
     if (model.maxOutputTokens > model.contextWindow) {
       throw new Error(`model ${name} max_output_tokens exceeds context_window`);
-    }
-    if (!knownModels.includes(model.model)) {
-      throw new Error(`model ${name}: only mimo-v2.5-pro and mimo-v2.5 are supported`);
-    }
-    const expectedEnv = apiKeyEnvFor(model.billing);
-    if (model.apiKeyEnv !== expectedEnv) {
-      throw new Error(`model ${name} (${model.billing}) must use ${expectedEnv}`);
     }
   }
 }
@@ -364,18 +327,15 @@ function parseHookScripts(values: z.infer<typeof hookScriptFileSchema>[]): HookS
 }
 
 export function resolveModel(config: KulmiConfig, name?: string): ResolvedModel {
+  if (Object.keys(config.models).length === 0) {
+    throw new Error("no models configured. Run `kulmi init` and define at least one [models.*] profile.");
+  }
   const modelName = name ?? config.defaultModel;
+  if (!modelName) throw new Error("default_model is not set");
   const model = config.models[modelName];
   if (!model) throw new Error(`unknown model ${modelName}`);
   const apiKey = process.env[model.apiKeyEnv];
   if (!apiKey) throw new Error(`missing ${model.apiKeyEnv} for model ${modelName}`);
-  if (model.billing === "token-plan" && !/^tp-\S{7,}$/.test(apiKey)) {
-    throw new Error(`${model.apiKeyEnv} must be a Token Plan key beginning with tp-`);
-  } else if (model.billing === "pay-as-you-go" && apiKey.startsWith("tp-")) {
-    throw new Error(`${model.apiKeyEnv} is a Token Plan key but ${modelName} uses pay-as-you-go`);
-  } else if (model.billing === "pay-as-you-go" && !/^sk-\S{7,}$/.test(apiKey)) {
-    throw new Error(`${model.apiKeyEnv} must be a pay-as-you-go key beginning with sk-`);
-  }
   return { ...model, name: modelName, apiKey };
 }
 
@@ -386,8 +346,9 @@ export function expandPath(path: string): string {
 }
 
 export function configTemplate(): string {
-  return `# Kulmi is MiMo V2.5 native. The default profile uses pay-as-you-go.
-default_model = "mimo-v2.5-pro"
+  return `# Kulmi autonomous coding harness configuration.
+# No models are built in. Define your own OpenAI-compatible profiles.
+# default_model = "my-model"
 default_autonomy = "medium"
 max_steps = 80
 max_subagents = 3
@@ -411,41 +372,14 @@ message_history = "truncate" # truncate or keep
 # tool_post = ["npm run verify:changed"]
 # tool_pre = [{ tool = "edit_file", command = "npm run lint:changed", timeout_seconds = 30 }]
 
-[models.mimo-v2.5-pro]
-model = "mimo-v2.5-pro"
-billing = "pay-as-you-go"
-base_url = "https://api.xiaomimimo.com/v1"
-api_key_env = "MIMO_API_KEY"
-thinking = true
-context_window = 1048576
-max_output_tokens = 131072
-
-[models.mimo-v2.5]
-model = "mimo-v2.5"
-billing = "pay-as-you-go"
-base_url = "https://api.xiaomimimo.com/v1"
-api_key_env = "MIMO_API_KEY"
-thinking = true
-context_window = 1048576
-max_output_tokens = 131072
-
-# Europe Token Plan. Use -sgp or -cn in base_url for another cluster.
-[models.mimo-v2.5-pro-token-plan]
-model = "mimo-v2.5-pro"
-billing = "token-plan"
-base_url = "https://token-plan-ams.xiaomimimo.com/v1"
-api_key_env = "MIMO_TOKEN_PLAN_API_KEY"
-thinking = true
-context_window = 1048576
-max_output_tokens = 131072
-
-[models.mimo-v2.5-token-plan]
-model = "mimo-v2.5"
-billing = "token-plan"
-base_url = "https://token-plan-ams.xiaomimimo.com/v1"
-api_key_env = "MIMO_TOKEN_PLAN_API_KEY"
-thinking = true
-context_window = 1048576
-max_output_tokens = 131072
+# Example profile. Replace with your provider endpoint and credentials env var.
+# default_model = "my-model"
+# [models.my-model]
+# model = "your-model-id"
+# base_url = "https://api.example.com/v1"
+# api_key_env = "MY_PROVIDER_API_KEY"
+# thinking = false
+# context_window = 128000
+# max_output_tokens = 16384
 `;
 }

@@ -1,29 +1,14 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { applyFileConfig, configTemplate, resolveModel, type KulmiConfig, type ModelConfig } from "../src/config/config.js";
+import { describe, expect, it } from "vitest";
+import { applyFileConfig, configTemplate, type KulmiConfig, type ModelConfig } from "../src/config/config.js";
 
-describe("MiMo configuration", () => {
-  const saved = { api: process.env.MIMO_API_KEY, plan: process.env.MIMO_TOKEN_PLAN_API_KEY };
-  afterEach(() => {
-    restore("MIMO_API_KEY", saved.api);
-    restore("MIMO_TOKEN_PLAN_API_KEY", saved.plan);
-  });
-
-  it("keeps pay-as-you-go and Token Plan keys separate", () => {
-    process.env.MIMO_API_KEY = "tp-wrong-profile";
-    expect(() => resolveModel(config(payg()), "api")).toThrow("Token Plan key");
-
-    process.env.MIMO_TOKEN_PLAN_API_KEY = "sk-wrong-profile";
-    expect(() => resolveModel(config(tokenPlan()), "plan")).toThrow("must be a Token Plan key");
-
-    process.env.MIMO_API_KEY = "sk-short";
-    expect(() => resolveModel(config(payg()), "api")).toThrow("pay-as-you-go key");
-  });
-
-  it("documents MiMo V2.5 (with regional Token Plan) profiles", () => {
+describe("configuration", () => {
+  it("generates a template without built-in model endpoints", () => {
     const template = configTemplate();
-    expect(template).toContain('model = "mimo-v2.5-pro"');
-    expect(template).toContain('model = "mimo-v2.5"');
-    expect(template).toContain("token-plan-ams.xiaomimimo.com/v1");
+    expect(template).toContain("No models are built in");
+    expect(template).toContain("# [models.my-model]");
+    expect(template).toContain("# base_url = \"https://api.example.com/v1\"");
+    expect(template).not.toContain("openai.com");
+    expect(template).not.toContain("xiaomimimo");
     expect(template).toContain('[sandbox]\nmode = "required"');
     expect(template).toContain('[undo]\nmessage_history = "truncate"');
   });
@@ -67,38 +52,49 @@ describe("MiMo configuration", () => {
     })).toThrow("timeout_seconds");
   });
 
-  it("rejects invalid limits, endpoints, billing environments, and removed MCP config", () => {
+  it("rejects invalid limits, endpoints, and removed MCP config", () => {
     const base = config(payg());
     expect(() => applyFileConfig(base, { max_steps: 0 })).toThrow("max_steps");
     expect(() => applyFileConfig(base, { models: { api: { base_url: "file:///tmp/model" } } })).toThrow("http or https");
-    expect(() => applyFileConfig(base, {
-      models: { api: { billing: "token-plan", api_key_env: "MIMO_API_KEY" } },
-    })).toThrow("MIMO_TOKEN_PLAN_API_KEY");
     expect(() => applyFileConfig(base, { mcp: { servers: {} } })).toThrow("MCP configuration is no longer supported");
   });
 
-  it("switches to the matching endpoint when a profile changes billing type", () => {
+  it("accepts custom model profiles with arbitrary model names", () => {
     const changed = applyFileConfig(config(payg()), {
-      models: { api: { billing: "token-plan" } },
+      models: {
+        "claude-sonnet": {
+          model: "claude-sonnet-4-20250514",
+          base_url: "https://api.anthropic.com/v1",
+          api_key_env: "ANTHROPIC_API_KEY",
+          thinking: true,
+          context_window: 200_000,
+          max_output_tokens: 64_000,
+        },
+      },
     });
-    expect(changed.models.api).toMatchObject({
-      billing: "token-plan",
-      baseUrl: "https://token-plan-ams.xiaomimimo.com/v1",
-      apiKeyEnv: "MIMO_TOKEN_PLAN_API_KEY",
+    expect(changed.models["claude-sonnet"]).toEqual({
+      model: "claude-sonnet-4-20250514",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKeyEnv: "ANTHROPIC_API_KEY",
+      thinking: true,
+      contextWindow: 200_000,
+      maxOutputTokens: 64_000,
     });
   });
 
-  it("ignores unselected legacy profiles but never activates unsupported models", () => {
-    const base = config(payg());
-    const migrated = applyFileConfig(base, {
-      models: { legacy: { vendor: "removed-provider", model: "unsupported-model" } },
-    });
-    expect(migrated.models.legacy).toBeUndefined();
-    expect(() => applyFileConfig(base, {
-      default_model: "legacy",
-      models: { legacy: { vendor: "removed-provider", model: "unsupported-model" } },
-    })).toThrow("unknown default model legacy");
+  it("requires complete model definitions when creating a profile", () => {
+    const empty = emptyConfig();
+    expect(() => applyFileConfig(empty, {
+      models: { incomplete: { model: "x" } },
+    })).toThrow("base_url is required");
   });
+
+  it("rejects an unknown default model", () => {
+    expect(() => applyFileConfig(config(payg()), {
+      default_model: "nonexistent",
+    })).toThrow("unknown default model nonexistent");
+  });
+
   it.each([
     { scope: "root", input: { surprise: true }, key: "surprise" },
     { scope: "model", input: { models: { api: { surprise: true } } }, key: "surprise" },
@@ -114,12 +110,10 @@ describe("MiMo configuration", () => {
       apiKeys: { newerLegacy: "ignored" },
       models: {
         api: {
-          vendor: "mimo",
-          provider: "mimo",
-          model: "mimo-v2.5",
-          billing: "pay-as-you-go",
-          baseUrl: "https://api.xiaomimimo.com/v1",
-          apiKeyEnv: "MIMO_API_KEY",
+          provider: "openai",
+          model: "custom-model",
+          baseUrl: "https://api.example.com/v1",
+          apiKeyEnv: "EXAMPLE_API_KEY",
           thinking: false,
           reasoning_effort: "high",
           reasoningEffort: "high",
@@ -131,27 +125,27 @@ describe("MiMo configuration", () => {
 
     expect(changed).toMatchObject({ defaultModel: "api", defaultAutonomy: "high" });
     expect(changed.models.api).toEqual({
-      model: "mimo-v2.5",
-      billing: "pay-as-you-go",
-      baseUrl: "https://api.xiaomimimo.com/v1",
-      apiKeyEnv: "MIMO_API_KEY",
+      model: "custom-model",
+      provider: "openai",
+      baseUrl: "https://api.example.com/v1",
+      apiKeyEnv: "EXAMPLE_API_KEY",
       thinking: false,
+      reasoningEffort: "high",
       contextWindow: 262_144,
       maxOutputTokens: 65_536,
     });
   });
 });
 
-function config(...models: ModelConfig[]): KulmiConfig {
-  const names = models.map((model) => model.billing === "token-plan" ? "plan" : "api");
+function emptyConfig(): KulmiConfig {
   return {
-    defaultModel: names[0]!,
+    defaultModel: "",
     defaultAutonomy: "medium",
     maxSteps: 80,
     maxSubagents: 3,
     commandTimeoutSeconds: 120,
     maxOutputBytes: 200_000,
-    models: Object.fromEntries(models.map((model, index) => [names[index], model])),
+    models: {},
     search: {
       mode: "off",
       resultLimit: 5,
@@ -164,23 +158,22 @@ function config(...models: ModelConfig[]): KulmiConfig {
   };
 }
 
-function payg(): ModelConfig {
+function config(...models: ModelConfig[]): KulmiConfig {
+  const names = models.map((_model, index) => index === 0 ? "api" : `api${index}`);
   return {
-    model: "mimo-v2.5-pro",
-    billing: "pay-as-you-go",
-    baseUrl: "https://api.xiaomimimo.com/v1",
-    apiKeyEnv: "MIMO_API_KEY",
-    thinking: true,
-    contextWindow: 1_000_000,
-    maxOutputTokens: 131_072,
+    ...emptyConfig(),
+    defaultModel: names[0]!,
+    models: Object.fromEntries(models.map((model, index) => [names[index], model])),
   };
 }
 
-function tokenPlan(): ModelConfig {
-  return { ...payg(), billing: "token-plan", apiKeyEnv: "MIMO_TOKEN_PLAN_API_KEY" };
-}
-
-function restore(name: string, value: string | undefined): void {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
+function payg(): ModelConfig {
+  return {
+    model: "custom-model",
+    baseUrl: "https://api.example.com/v1",
+    apiKeyEnv: "EXAMPLE_API_KEY",
+    thinking: false,
+    contextWindow: 400_000,
+    maxOutputTokens: 32_768,
+  };
 }

@@ -1,19 +1,19 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { MiMoProvider } from "../src/provider/mimo.js";
+import { OpenAIProvider } from "../src/provider/openai.js";
 import type { ResolvedModel } from "../src/config/config.js";
 
-describe("MiMoProvider", () => {
+describe("OpenAIProvider", () => {
   const servers: Array<ReturnType<typeof createServer>> = [];
   afterEach(async () => {
     await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   });
 
-  it("uses the MiMo-native wire contract and preserves reasoning with tool calls", async () => {
+  it("uses the OpenAI wire contract and preserves reasoning with tool calls", async () => {
     let requestBody: Record<string, unknown> = {};
-    let apiKey = "";
+    let authHeader = "";
     const url = await serve(servers, (request, response) => {
-      apiKey = String(request.headers["api-key"] ?? "");
+      authHeader = String(request.headers["authorization"] ?? "");
       collectJson(request).then((body) => {
         requestBody = body;
         response.writeHead(200, { "content-type": "text/event-stream" });
@@ -23,7 +23,7 @@ describe("MiMoProvider", () => {
         response.end('data: [DONE]\n\n');
       }).catch((error: unknown) => response.destroy(error instanceof Error ? error : new Error(String(error))));
     });
-    const provider = new MiMoProvider(model(url));
+    const provider = new OpenAIProvider(model(url));
     const result = await provider.complete({
       messages: [{ role: "system", content: "stable" }, { role: "user", content: "read it" }],
       tools: [{
@@ -42,9 +42,9 @@ describe("MiMoProvider", () => {
       signal: new AbortController().signal,
     });
 
-    expect(apiKey).toBe("test-key");
+    expect(authHeader).toBe("Bearer test-key");
     expect(requestBody).toMatchObject({
-      model: "mimo-v2.5-pro",
+      model: "test-model",
       thinking: { type: "enabled" },
       stream: true,
       max_completion_tokens: 131_072,
@@ -83,11 +83,11 @@ describe("MiMoProvider", () => {
       response.end('data: {"choices":[{"delta":{"annotations":[{"type":"url_citation","url":"https://example.com/a","title":"Example","summary":"Source"}],"content":"answer"}}]}\n\ndata: {"choices":[{"delta":{"annotations":[{"type":"url_citation","url":"https://example.com/a","title":"Duplicate"},{"type":"url_citation","url":"https://example.com/b","title":"Second"}]},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
     const seen: string[] = [];
-    const result = await new MiMoProvider(model(url)).complete({
+    const result = await new OpenAIProvider(model(url)).complete({
       messages: [{ role: "user", content: "current fact" }],
       tools: [],
       signal: new AbortController().signal,
-      onCitations: (citations) => { seen.push(...citations.map((citation) => citation.url)); },
+      onCitations: (citations: { url: string }[]) => { seen.push(...citations.map((citation) => citation.url)); },
     });
     expect(seen).toEqual(["https://example.com/a", "https://example.com/b"]);
     expect(result.citations?.map((citation) => citation.url)).toEqual([
@@ -102,7 +102,7 @@ describe("MiMoProvider", () => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_cache_hit_tokens":7,"prompt_cache_miss_tokens":3,"completion_tokens":2,"total_tokens":12}}\n\ndata: [DONE]\n\n');
     });
-    const result = await new MiMoProvider(model(url)).complete(simpleRequest());
+    const result = await new OpenAIProvider(model(url)).complete(simpleRequest());
     expect(result.usage).toMatchObject({
       promptTokens: 10,
       cacheHitTokens: 7,
@@ -115,7 +115,7 @@ describe("MiMoProvider", () => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: {"choices":[],"usage":{"web_search_usage":{"tool_usage":2,"page_usage":6}}}\n\ndata: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":8}}}\n\ndata: [DONE]\n\n');
     });
-    const result = await new MiMoProvider(model(url)).complete(simpleRequest());
+    const result = await new OpenAIProvider(model(url)).complete(simpleRequest());
     expect(result.usage).toMatchObject({
       promptTokens: 10,
       completionTokens: 2,
@@ -132,7 +132,7 @@ describe("MiMoProvider", () => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: {"choices":[],"usage":{"prompt_cache_hit_tokens":100}}\n\ndata: {"choices":[],"usage":{"prompt_cache_miss_tokens":50}}\n\ndata: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"completion_tokens":20,"total_tokens":120}}\n\ndata: [DONE]\n\n');
     });
-    const result = await new MiMoProvider(model(url)).complete(simpleRequest());
+    const result = await new OpenAIProvider(model(url)).complete(simpleRequest());
     expect(result.usage).toMatchObject({
       promptTokens: 150,
       completionTokens: 20,
@@ -149,7 +149,7 @@ describe("MiMoProvider", () => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end(requests === 1 ? "" : 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
-    const result = await new MiMoProvider(model(url)).complete(simpleRequest());
+    const result = await new OpenAIProvider(model(url)).complete(simpleRequest());
     expect(result.message.content).toBe("ok");
     expect(requests).toBe(2);
   });
@@ -167,7 +167,7 @@ describe("MiMoProvider", () => {
       response.end('data: {"choices":[{"delta":{"content":"recovered"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
 
-    const result = await new MiMoProvider(model(url), { idleTimeoutMs: 25 }).complete(simpleRequest());
+    const result = await new OpenAIProvider(model(url), { idleTimeoutMs: 25 }).complete(simpleRequest());
 
     expect(result.message.content).toBe("recovered");
     expect(requests).toBe(2);
@@ -182,7 +182,7 @@ describe("MiMoProvider", () => {
         ? 'data: {"choices":[{"delta":{"content":"discarded"}}]}\n\n'
         : 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
-    const result = await new MiMoProvider(model(url)).complete(simpleRequest());
+    const result = await new OpenAIProvider(model(url)).complete(simpleRequest());
     expect(result.message.content).toBe("ok");
     expect(requests).toBe(2);
   });
@@ -195,9 +195,9 @@ describe("MiMoProvider", () => {
       response.end('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
     });
     let visible = "";
-    await expect(new MiMoProvider(model(url)).complete({
+    await expect(new OpenAIProvider(model(url)).complete({
       ...simpleRequest(),
-      onTextDelta: (text) => { visible += text; },
+      onTextDelta: (text: string) => { visible += text; },
     })).rejects.toThrow("before [DONE]");
     expect(visible).toBe("partial");
     expect(requests).toBe(1);
@@ -210,13 +210,13 @@ describe("MiMoProvider", () => {
       response.writeHead(401, { "content-type": "application/json" });
       response.end('{"error":{"message":"invalid key"}}');
     });
-    await expect(new MiMoProvider(model(url)).complete(simpleRequest())).rejects.toThrow("MiMo HTTP 401");
+    await expect(new OpenAIProvider(model(url)).complete(simpleRequest())).rejects.toThrow("HTTP 401");
     expect(requests).toBe(1);
   });
 
   it("times out while waiting for response headers", async () => {
     const url = await serve(servers, () => undefined);
-    await expect(new MiMoProvider(model(url), { idleTimeoutMs: 100 }).complete(simpleRequest()))
+    await expect(new OpenAIProvider(model(url), { idleTimeoutMs: 100 }).complete(simpleRequest()))
       .rejects.toThrow(/stalled|aborted/i);
   });
 
@@ -235,7 +235,7 @@ describe("MiMoProvider", () => {
         }
       }).catch((error: unknown) => response.destroy(error instanceof Error ? error : new Error(String(error))));
     });
-    const provider = new MiMoProvider(model(url));
+    const provider = new OpenAIProvider(model(url));
     const first = await provider.complete(simpleRequest());
     await provider.complete({
       messages: [
@@ -258,14 +258,14 @@ describe("MiMoProvider", () => {
     });
   });
 
-  it("rejects incomplete reasoning and mispaired tool history before requesting MiMo", async () => {
+  it("rejects incomplete reasoning and mispaired tool history before requesting", async () => {
     let requests = 0;
     const url = await serve(servers, (_request, response) => {
       requests += 1;
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: {"choices":[{"delta":{"content":"unexpected"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
-    const provider = new MiMoProvider(model(url));
+    const provider = new OpenAIProvider(model(url));
     await expect(provider.complete({
       ...simpleRequest(),
       messages: [
@@ -298,32 +298,12 @@ describe("MiMoProvider", () => {
     expect(requests).toBe(0);
   });
 
-  it("rejects image content for text-only MiMo profiles before opening a request", async () => {
-    let requests = 0;
-    const url = await serve(servers, (_request, response) => {
-      requests += 1;
-      response.writeHead(200, { "content-type": "text/event-stream" });
-      response.end('data: {"choices":[{"delta":{"content":"unexpected"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
-    });
-    await expect(new MiMoProvider(model(url)).complete({
-      ...simpleRequest(),
-      messages: [{
-        role: "user",
-        content: [
-          { type: "text", text: "inspect" },
-          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
-        ],
-      }],
-    })).rejects.toThrow("image attachments require mimo-v2.5");
-    expect(requests).toBe(0);
-  });
-
   it("fails closed when a session cache prefix changes", async () => {
     const url = await serve(servers, (_request, response) => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
-    const provider = new MiMoProvider(model(url));
+    const provider = new OpenAIProvider(model(url));
     await provider.complete({ ...simpleRequest(), cacheScope: "agent_1" });
     await expect(provider.complete({
       ...simpleRequest(),
@@ -342,7 +322,7 @@ describe("MiMoProvider", () => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
-    const provider = new MiMoProvider(model(url));
+    const provider = new OpenAIProvider(model(url));
     const changedTools = [{
       type: "function" as const,
       function: { name: "changed_tool", description: "changed", parameters: { type: "object" } },
@@ -372,7 +352,7 @@ describe("MiMoProvider", () => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
-    const provider = new MiMoProvider(model(url));
+    const provider = new OpenAIProvider(model(url));
     const initial = [
       { role: "system" as const, content: "stable" },
       { role: "user" as const, content: "first" },
@@ -396,7 +376,7 @@ describe("MiMoProvider", () => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"duplicate","function":{"name":"first","arguments":"{}"}},{"index":1,"id":"duplicate","function":{"name":"second","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n');
     });
-    await expect(new MiMoProvider(model(url)).complete(simpleRequest()))
+    await expect(new OpenAIProvider(model(url)).complete(simpleRequest()))
       .rejects.toThrow("duplicate tool call id duplicate");
   });
 
@@ -406,19 +386,18 @@ describe("MiMoProvider", () => {
       response.write('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\r');
       setTimeout(() => response.end('\n\r\ndata: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":8}}}\r\n\r\ndata: [DONE]\r\n\r\n'), 5);
     });
-    const result = await new MiMoProvider(model(url)).complete(simpleRequest());
+    const result = await new OpenAIProvider(model(url)).complete(simpleRequest());
     expect(result.message.content).toBe("ok");
     expect(result.usage).toMatchObject({ promptTokens: 10, cacheHitTokens: 8, cacheMissTokens: 2 });
   });
 });
 
-function model(baseUrl: string, modelId: ResolvedModel["model"] = "mimo-v2.5-pro"): ResolvedModel {
+function model(baseUrl: string, modelId: string = "test-model"): ResolvedModel {
   return {
     name: modelId,
     model: modelId,
-    billing: "pay-as-you-go",
     baseUrl,
-    apiKeyEnv: "MIMO_API_KEY",
+    apiKeyEnv: "TEST_API_KEY",
     apiKey: "test-key",
     thinking: true,
     contextWindow: 1_000_000,

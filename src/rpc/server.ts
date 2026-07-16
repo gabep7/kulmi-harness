@@ -143,7 +143,7 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
             protocolVersion: 1,
             server: { name: "kulmi", version: VERSION },
             capabilities: {
-              models: ["mimo-v2.5-pro", "mimo-v2.5"],
+              models: Object.keys(loadConfig(defaultCwd).models),
               searchModes: ["off", "free"],
               streamingEvents: true,
               cancellation: true,

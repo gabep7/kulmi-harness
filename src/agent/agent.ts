@@ -218,22 +218,22 @@ export class Agent {
           await events.emit({
             type: "notice",
             agentId: state.agentId,
-            message: `MiMo web search: ${response.searchError}`,
+            message: `web search: ${response.searchError}`,
           });
         }
-        promptTokens = response.usage.promptTokens || estimateTokens(this.#messages, providerTools);
 
+        promptTokens = response.usage.promptTokens || estimateTokens(this.#messages, providerTools);
         if (response.finishReason === "length") {
-          throw new Error("MiMo stopped because the output limit was reached");
+          throw new Error("model stopped because the output limit was reached");
         }
         if (response.finishReason === "content_filter") {
-          throw new Error("MiMo stopped because content was filtered");
+          throw new Error("model stopped because content was filtered");
         }
         if (response.finishReason === "insufficient_system_resource") {
-          throw new Error("MiMo stopped because inference resources were unavailable");
+          throw new Error("model stopped because inference resources were unavailable");
         }
         if (response.finishReason === "repetition_truncation") {
-          throw new Error("MiMo stopped after detecting repetitive output");
+          throw new Error("model stopped after detecting repetitive output");
         }
 
         const calls = response.message.tool_calls ?? [];

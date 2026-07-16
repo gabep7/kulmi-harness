@@ -5,29 +5,24 @@ import { CredentialSetup } from "../src/tui/onboarding.js";
 afterEach(cleanup);
 
 describe("credential setup screen", () => {
-  it("chooses Token Plan and keeps the pasted key masked", async () => {
+  it("accepts a pasted key and keeps it masked", async () => {
     const complete = vi.fn();
-    const view = render(<CredentialSetup initial="api" onComplete={complete} />);
-    expect(view.lastFrame()).toContain("Connect MiMo");
-    expect(view.lastFrame()).toContain("Pay as you go");
+    const view = render(<CredentialSetup onComplete={complete} />);
+    expect(view.lastFrame()).toContain("Connect");
+    expect(view.lastFrame()).toContain("API key");
 
-    view.stdin.write("\u001B[B");
-    view.stdin.write("\r");
+    view.stdin.write("sk-123456789");
     await tick();
-    expect(view.lastFrame()).toContain("Token Plan key");
-
-    view.stdin.write("tp-123456789");
-    await tick();
-    expect(view.lastFrame()).not.toContain("tp-123456789");
+    expect(view.lastFrame()).not.toContain("sk-123456789");
     expect(view.lastFrame()).toContain("••••");
     view.stdin.write("\r");
     await tick();
-    expect(complete).toHaveBeenCalledWith({ kind: "token-plan", key: "tp-123456789" });
+    expect(complete).toHaveBeenCalledWith({ key: "sk-123456789" });
   });
 
   it("cancels cleanly with ctrl+c", async () => {
     const cancel = vi.fn();
-    const view = render(<CredentialSetup initial="api" onComplete={() => undefined} onCancel={cancel} />);
+    const view = render(<CredentialSetup onComplete={() => undefined} onCancel={cancel} />);
     view.stdin.write("\u0003");
     await tick();
     expect(cancel).toHaveBeenCalledOnce();

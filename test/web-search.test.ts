@@ -10,7 +10,7 @@ describe("free web search", () => {
     const fetchMock = vi.fn(async (input: string | URL) => {
       const url = new URL(String(input));
       expect(url.origin).toBe("https://search.internal");
-      expect(url.searchParams.get("q")).toBe("MiMo cache docs");
+      expect(url.searchParams.get("q")).toBe("cache docs");
       expect(url.searchParams.get("format")).toBe("json");
       return new Response(JSON.stringify({
         results: [
@@ -22,7 +22,7 @@ describe("free web search", () => {
     vi.stubGlobal("fetch", fetchMock);
     const tool = freeWebSearchTool(config());
     const result = await tool.execute({ signal: new AbortController().signal } as ToolContext, {
-      query: "MiMo cache docs",
+      query: "cache docs",
       limit: 1,
     });
     expect(JSON.parse(result.content)).toMatchObject({

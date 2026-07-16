@@ -8,7 +8,7 @@ Before tagging a release:
 
 1. Confirm `package.json` and `src/core/version.ts` contain the intended version. `npm run check:version` enforces this.
 2. Run `npm run check`.
-3. Run `npm run test:live:mimo` with a low-balance test credential.
+3. Run `npm run test:live` with a low-balance test credential.
 4. Run one read-only end-to-end task with the built CLI.
 5. Run `npm audit --omit=dev --audit-level=high`.
 6. Confirm `npm pack` installs into a clean temporary prefix and its `kulmi --version` output matches the release version.

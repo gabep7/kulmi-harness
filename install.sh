@@ -296,6 +296,4 @@ printf 'Run: kulmi\n'
 if [ "$path_updated" -eq 1 ]; then
   printf 'Open a new terminal first, or run: export PATH="$HOME/.local/bin:$PATH"\n'
 fi
-if [ -z "${MIMO_API_KEY:-}" ] && [ -z "${MIMO_TOKEN_PLAN_API_KEY:-}" ]; then
-  printf 'Then set MIMO_API_KEY or MIMO_TOKEN_PLAN_API_KEY.\n'
-fi
+printf 'Then run `kulmi init` and define a model profile with base_url and api_key_env.\n'
