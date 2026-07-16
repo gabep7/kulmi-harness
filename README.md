@@ -144,6 +144,7 @@ Controls:
 - `/workers` shows child agents.
 - `/steer`, `/cancel`, `/retry`, and `/integrate` control workers without leaving the TUI.
 - `/status` shows the model, autonomy, session, and workspace.
+- `/model` lists model profiles; `/model <name>` switches the session's model in place.
 - Typing while a run is active and pressing Enter steers the root agent mid-run; the message is injected at the next step boundary.
 - Custom slash commands are discovered from `.kulmi/commands/*.md` and `~/.config/kulmi/commands/*.md`; the file body is a prompt template and `$ARGUMENTS` expands to whatever follows the command name. Built-in commands take precedence.
 

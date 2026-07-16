@@ -69,14 +69,14 @@ export interface UndoResult {
 export class SessionController {
   readonly events: EventBus;
   readonly sessionId: string;
-  readonly model: string;
-  readonly modelProfile: string;
+  model: string;
+  modelProfile: string;
   readonly workspaceRoot: string;
   autonomy: AutonomyLevel;
   readonly searchMode: SearchMode;
   readonly sandbox: SandboxConfig;
   readonly undoMessageHistory: UndoMessageHistory;
-  readonly #provider: ModelProvider;
+  readonly #providerRef: { current: ModelProvider };
   readonly #session: SessionStore;
   readonly #checkpoint: CheckpointStore;
   readonly #state: RunState;
@@ -90,7 +90,7 @@ export class SessionController {
 
   private constructor(options: {
     events: EventBus;
-    provider: ModelProvider;
+    providerRef: { current: ModelProvider };
     session: SessionStore;
     state: RunState;
     agent: Agent;
@@ -105,7 +105,7 @@ export class SessionController {
     mcp: McpConnection;
   }) {
     this.events = options.events;
-    this.#provider = options.provider;
+    this.#providerRef = options.providerRef;
     this.#session = options.session;
     this.#checkpoint = options.checkpoint;
     this.undoMessageHistory = options.undoMessageHistory;
@@ -114,8 +114,8 @@ export class SessionController {
     this.#agent = options.agent;
     this.#scheduler = options.scheduler;
     this.sessionId = options.session.id;
-    this.model = options.provider.model;
-    this.modelProfile = options.provider.name;
+    this.model = options.providerRef.current.model;
+    this.modelProfile = options.providerRef.current.name;
     this.workspaceRoot = options.workspaceRoot;
     this.autonomy = options.autonomy;
     this.searchMode = options.searchMode;
@@ -166,6 +166,7 @@ export class SessionController {
     }
     const search = { ...config.search, mode: options.webSearch ?? config.search.mode };
     const provider = resolved.protocol === "anthropic" ? new AnthropicProvider(resolved) : new OpenAIProvider(resolved);
+    const providerRef = { current: provider as ModelProvider };
     const events = options.events ?? new EventBus();
     const permissions: PermissionApi = {
       request: async (request) => {
@@ -262,7 +263,7 @@ export class SessionController {
         ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools().filter((tool) => tool.readOnly), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools().filter((tool) => tool.readOnly), ...processTools(processes).filter((tool) => tool.readOnly), ...mcp.tools.filter((tool) => tool.readOnly), browserQaTool, attachImageTool, ...workerProgressTools()])
         : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools(), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools(), ...processTools(processes), ...mcp.tools, browserQaTool, attachImageTool, ...workerProgressTools()]);
       const childAgent = new Agent({
-        provider,
+        provider: providerRef.current,
         tools: childTools,
         events: childEvents,
         session: childSession,
@@ -396,7 +397,7 @@ export class SessionController {
     await session.saveRunState(state);
     return new SessionController({
       events,
-      provider,
+      providerRef,
       session,
       state,
       agent,
@@ -468,6 +469,30 @@ export class SessionController {
     if (this.#closed) throw new Error("session is closed");
     this.autonomy = autonomy;
     this.#agent.setAutonomy(autonomy);
+  }
+
+  async setModel(name: string): Promise<string> {
+    if (this.#closed) throw new Error("session is closed");
+    if (this.#running) throw new Error("cannot switch models while a run is active");
+    const config = loadConfig(this.workspaceRoot);
+    const resolved = resolveModel(config, name);
+    if (resolved.name === this.modelProfile) return `already using ${resolved.name} (${resolved.model})`;
+    const provider = resolved.protocol === "anthropic" ? new AnthropicProvider(resolved) : new OpenAIProvider(resolved);
+    this.#providerRef.current = provider;
+    this.#agent.setProvider(provider);
+    this.model = provider.model;
+    this.modelProfile = provider.name;
+    await this.#session.setModel(provider.model, provider.name);
+    return `switched to ${resolved.name} (${resolved.model})`;
+  }
+
+  listModels(): Array<{ name: string; model: string; active: boolean }> {
+    const config = loadConfig(this.workspaceRoot);
+    return Object.entries(config.models).map(([name, profile]) => ({
+      name,
+      model: profile.model,
+      active: name === this.modelProfile,
+    }));
   }
 
   workers(): WorkerJob[] {

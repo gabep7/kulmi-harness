@@ -52,6 +52,52 @@ describe("SessionController resume", () => {
     })).rejects.toThrow("belongs to");
   });
 
+  it("switches the active model profile with /model semantics", async () => {
+    process.env[TEST_API_KEY_ENV] = "sk-123456789";
+    process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-controller-data-"));
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    const root = await mkdtemp(join(tmpdir(), "kulmi-controller-model-"));
+    await exec("git", ["init", root]);
+    await writeTestModelConfig(root);
+    await writeFile(join(root, ".kulmi", "config.toml"), `default_model = "${TEST_MODEL_PROFILE}"
+
+[models.${TEST_MODEL_PROFILE}]
+model = "${TEST_MODEL}"
+base_url = "https://example.test/v1"
+api_key_env = "${TEST_API_KEY_ENV}"
+
+[models.alt]
+model = "alt-model-id"
+base_url = "https://alt.example.test/v1"
+api_key_env = "${TEST_API_KEY_ENV}"
+`, "utf8");
+
+    const controller = await SessionController.create({ cwd: root, mode: "chat", autonomy: "read" });
+    try {
+      expect(controller.modelProfile).toBe(TEST_MODEL_PROFILE);
+      expect(controller.listModels()).toEqual([
+        { name: TEST_MODEL_PROFILE, model: TEST_MODEL, active: true },
+        { name: "alt", model: "alt-model-id", active: false },
+      ]);
+
+      await expect(controller.setModel("missing")).rejects.toThrow("unknown model missing");
+      await expect(controller.setModel(TEST_MODEL_PROFILE)).resolves.toContain("already using");
+
+      const switched = await controller.setModel("alt");
+      expect(switched).toContain("switched to alt");
+      expect(controller.modelProfile).toBe("alt");
+      expect(controller.model).toBe("alt-model-id");
+      expect(controller.listModels().find((entry) => entry.active)?.name).toBe("alt");
+
+      const persisted = JSON.parse(
+        await readFile(join(process.env.XDG_DATA_HOME!, "kulmi", "sessions", controller.sessionId, "session.json"), "utf8"),
+      );
+      expect(persisted).toMatchObject({ model: "alt-model-id", modelProfile: "alt" });
+    } finally {
+      await controller.close();
+    }
+  });
+
   it("preserves task mode and its prompt when the TUI resumes an empty session", async () => {
     process.env[TEST_API_KEY_ENV] = "sk-123456789";
     process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-controller-data-"));

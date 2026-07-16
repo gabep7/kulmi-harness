@@ -75,6 +75,13 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       }
       case "/auth":
         return "Exit Kulmi and run `kulmi auth` to change credentials safely.";
+      case "/model": {
+        if (!args) {
+          const profiles = controller.listModels();
+          return profiles.map((entry) => `${entry.active ? "▸" : " "} ${entry.name.padEnd(16)} ${entry.model}`).join("\n") || "No model profiles configured";
+        }
+        return await controller.setModel(args.trim());
+      }
       case "/workers": {
         const workers = controller.workers();
         return workers.map((worker) => `${worker.id}  ${worker.status.padEnd(9)}  ${worker.description}`).join("\n") || "No workers in this session";

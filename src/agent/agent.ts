@@ -84,6 +84,13 @@ export class Agent {
     this.#options.autonomy = autonomy;
   }
 
+  setProvider(provider: ModelProvider): void {
+    if (this.#running) throw new Error("cannot change providers while the agent is running");
+    this.#options.provider.invalidateCacheScopes?.(`${this.#options.state.agentId}:`);
+    this.#options.provider = provider;
+    this.#cacheEpoch += 1;
+  }
+
   async appendRuntimeContext(message: string): Promise<void> {
     if (this.#running) throw new Error("cannot change runtime context while the agent is running");
     const context: ProviderMessage = { role: "user", content: `<runtime-context>${message}</runtime-context>` };

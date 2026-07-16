@@ -55,6 +55,7 @@ const commands = [
   ["/goal", "start a goal-oriented task"],
   ["/sessions", "switch sessions"],
   ["/status", "show runtime details"],
+  ["/model", "list or switch model profiles"],
   ["/thinking", "expand or collapse reasoning"],
   ["/fork", "fork this session"],
   ["/undo", "revert the previous turn"],

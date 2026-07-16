@@ -178,6 +178,16 @@ export class SessionStore {
     await this.#writeMetadata();
   }
 
+  async setModel(model: string, modelProfile: string): Promise<void> {
+    this.#metadata = {
+      ...this.#metadata,
+      model,
+      modelProfile,
+      updatedAt: new Date().toISOString(),
+    };
+    await this.#writeMetadata();
+  }
+
   async addUsage(tokens: {
     promptTokens: number;
     completionTokens: number;
