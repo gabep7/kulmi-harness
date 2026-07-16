@@ -38,6 +38,11 @@ export function safeChildEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.Proc
 export function disposeChildEnvironment(env: NodeJS.ProcessEnv): void {
   const root = env.KULMI_SANDBOX_ROOT;
   if (root?.startsWith(join(tmpdir(), "kulmi-sandbox-"))) {
-    rmSync(root, { recursive: true, force: true });
+    try {
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    } catch {
+      // A dying child can still be writing here; leave the dir to OS temp cleanup
+      // rather than failing an otherwise successful run.
+    }
   }
 }

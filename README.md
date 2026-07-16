@@ -249,7 +249,7 @@ npm run check
 
 With a real key, `npm run test:live` performs a low-output two-request smoke test covering thinking, tool-call reasoning replay, tool-result pairing, streaming, and cache telemetry. It is not part of `npm run check` because it incurs provider usage.
 
-`npm run eval` runs the SWE-style eval suite under `evals/`: each task copies a fixture repo to a temporary directory, runs `kulmi exec` against a prompt, and judges the result solely by the task's verify command. Use it to regression-test harness changes; `KULMI_EVAL_BIN` swaps the executable under test.
+`npm run eval` runs the SWE-style eval suite under `evals/`: each task copies a fixture repo to a temporary directory, runs `kulmi exec` against a prompt, and judges the result solely by the task's verify command. Use it to regression-test harness changes; `KULMI_EVAL_BIN` swaps the executable under test and `KULMI_EVAL_MODEL` selects the model profile.
 
 The release gate and tag procedure is in [docs/releasing.md](docs/releasing.md).
 

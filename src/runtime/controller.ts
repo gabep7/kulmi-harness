@@ -39,7 +39,7 @@ import { astGrepTool } from "../tools/ast-grep.js";
 import { gitTools } from "../tools/git.js";
 import { browserQaTool } from "../tools/browser.js";
 import { attachImageTool } from "../tools/media.js";
-import { lspTool } from "../tools/lsp.js";
+import { disposeLspClients, lspTool } from "../tools/lsp.js";
 import { processTools, ProcessManager } from "../tools/processes.js";
 import { connectMcpServers, type McpConnection } from "../mcp/client.js";
 import { AnthropicProvider } from "../provider/anthropic.js";
@@ -454,6 +454,7 @@ export class SessionController {
     await this.#running?.catch(() => undefined);
     await this.#scheduler.cancelAll();
     this.#processes.disposeAll();
+    disposeLspClients();
     await this.#mcp.dispose().catch(() => undefined);
     await this.events.emit({
       type: "session.finished",

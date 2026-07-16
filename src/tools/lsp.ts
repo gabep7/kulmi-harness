@@ -294,7 +294,7 @@ class LspClient {
   }
 
   #disposeProcess(): void {
-    this.#process?.kill();
+    this.#process?.kill("SIGKILL");
     this.#process = null;
     this.#buffer = "";
     this.#openFiles.clear();
@@ -315,6 +315,11 @@ function getClient(workspaceRoot: string): LspClient {
     clients.set(workspaceRoot, client);
   }
   return client;
+}
+
+export function disposeLspClients(): void {
+  for (const client of clients.values()) client.dispose();
+  clients.clear();
 }
 
 function formatDefinition(result: unknown): string {

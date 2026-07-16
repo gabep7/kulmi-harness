@@ -2,8 +2,9 @@
 // Eval runner for SWE-style regression tasks.
 // Usage: node evals/run.mjs [--task <name>] [--keep]
 // Env: KULMI_EVAL_BIN replaces the harness executable (receives
-// "exec --auto high <prompt>" as argv); KULMI_EVAL_TASKS_DIR overrides
-// the tasks directory (used by tests).
+// "exec --auto high <prompt>" as argv); KULMI_EVAL_MODEL appends
+// "--model <name>"; KULMI_EVAL_TASKS_DIR overrides the tasks
+// directory (used by tests).
 import { spawn } from "node:child_process";
 import { cp, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -84,14 +85,18 @@ async function runTask(name, keep) {
     }
     const evalBin = process.env.KULMI_EVAL_BIN;
     const command = evalBin ? (evalBin.includes("/") ? resolve(evalBin) : evalBin) : process.execPath;
+    const modelArgs = process.env.KULMI_EVAL_MODEL ? ["--model", process.env.KULMI_EVAL_MODEL] : [];
     const args = evalBin
-      ? ["exec", "--auto", "high", config.prompt]
-      : [join(repoRoot, "dist", "cli.js"), "exec", "--auto", "high", config.prompt];
-    const run = await runCommand(command, args, { cwd: temp, timeoutMs });
+      ? ["exec", "--auto", "high", ...modelArgs, config.prompt]
+      : [join(repoRoot, "dist", "cli.js"), "exec", "--auto", "high", ...modelArgs, config.prompt];
+    const run = await runCommand(command, args, { cwd: temp, timeoutMs, capture: true });
     if (run.code === 127) {
       process.stderr.write(`${name}: harness command ${command} failed to start\n`);
     } else if (run.timedOut) {
       process.stderr.write(`${name}: harness run timed out after ${config.timeout_seconds}s and was killed\n`);
+    } else if (run.code !== 0) {
+      const tail = run.output.trim().split("\n").slice(-15).join("\n");
+      process.stderr.write(`${name}: harness exited ${run.code}${tail ? `:\n${tail}` : ""}\n`);
     }
     const verify = await runCommand("sh", ["-c", config.verify], { cwd: temp, timeoutMs, capture: true });
     const passed = !verify.timedOut && verify.code === 0;
