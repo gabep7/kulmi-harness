@@ -475,7 +475,10 @@ export class SessionController {
     if (this.#closed) throw new Error("session is closed");
     if (this.#running) throw new Error("cannot switch models while a run is active");
     const config = loadConfig(this.workspaceRoot);
-    const resolved = resolveModel(config, name);
+    const profileName = Object.entries(config.models).find(
+      ([, profile]) => profile.model === name,
+    )?.[0] ?? name;
+    const resolved = resolveModel(config, profileName);
     if (resolved.name === this.modelProfile) return `already using ${resolved.name} (${resolved.model})`;
     const provider = resolved.protocol === "anthropic" ? new AnthropicProvider(resolved) : new OpenAIProvider(resolved);
     this.#providerRef.current = provider;
