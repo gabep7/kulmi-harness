@@ -15,7 +15,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && node scripts/source-fingerprint.mjs --write",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && chmod +x dist/cli.js && node scripts/source-fingerprint.mjs --write",
     "prepare": "npm run build",
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
