@@ -27,7 +27,7 @@ export class ToolRegistry {
         function: {
           name: tool.name,
           description: tool.description,
-          parameters: canonicalize(z.toJSONSchema(tool.schema)) as Record<string, unknown>,
+          parameters: canonicalize(tool.inputSchema ?? z.toJSONSchema(tool.schema)) as Record<string, unknown>,
         },
       }));
     for (const tool of this.#providerTools) this.#providerToolsByName.set(tool.function.name, tool);

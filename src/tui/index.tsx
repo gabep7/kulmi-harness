@@ -7,6 +7,8 @@ import type { SearchMode } from "../config/config.js";
 import { SessionController } from "../runtime/controller.js";
 import { forkSession, listSessions } from "../runtime/session-store.js";
 import { findWorkspaceRoot } from "../config/config.js";
+import { discoverCommands, expandCommand } from "../config/commands.js";
+import { allowlistEntryFor, saveAllowlistEntry } from "../security/allowlist.js";
 
 export interface RunTuiOptions {
   cwd: string;
@@ -103,8 +105,11 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
           ? { submit: args, mode: "task" }
           : { notice: "Entered goal mode. Send your goal as a prompt.", mode: "task" };
       }
-      default:
+      default: {
+        const custom = discoverCommands(controller.workspaceRoot).find((definition) => `/${definition.name}` === name);
+        if (custom) return { submit: expandCommand(custom.template, args) };
         return `Unknown command ${name}. Type /help.`;
+      }
     }
   };
   const switchSession = async (sessionId: string): Promise<TuiRuntimeInfo> => {
@@ -139,12 +144,21 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       autonomy={controller.autonomy}
       search={controller.searchMode}
       mode={controller.mode}
+      customCommands={discoverCommands(controller.workspaceRoot).map((definition) => ({ name: `/${definition.name}`, description: definition.preview }))}
       onSubmit={submit}
       onCommand={command}
       onSwitchSession={switchSession}
       onCycleAutonomy={cycleAutonomy}
       onCancel={() => activeAbort?.abort(new Error("stopped by user"))}
       onExit={close}
+      onSteer={(message) => controller.steer(message)}
+      onAlwaysAllow={(request) => {
+        const entry = allowlistEntryFor(controller.workspaceRoot, request);
+        if (!entry) return;
+        void saveAllowlistEntry(entry).catch((error: unknown) => {
+          store.addNotice(error instanceof Error ? error.message : String(error), true);
+        });
+      }}
     />,
     { exitOnCtrlC: false, patchConsole: false, maxFps: 30 },
   );

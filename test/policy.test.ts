@@ -55,13 +55,19 @@ describe("command policy", () => {
     expect(decideCommand(command, "high")).toMatchObject({ allowed: false, risk: "blocked" });
   });
 
-  it("only recognizes actual validator commands", () => {
+  it("recognizes validator commands including assertion scripts", () => {
     expect(decideCommand("echo test", "medium").verification).toBe(false);
     expect(decideCommand("npm run typecheck", "medium").verification).toBe(true);
     expect(decideCommand("npm run check", "medium").verification).toBe(true);
     expect(decideCommand("grep -q 'pattern' file.py", "medium").verification).toBe(false);
-    expect(decideCommand("python3 run_tests.py", "medium").verification).toBe(false);
-    expect(decideCommand("node dist/test.js", "medium").verification).toBe(false);
+    expect(decideCommand("python3 run_tests.py", "medium").verification).toBe(true);
+    expect(decideCommand("node dist/test.js", "medium").verification).toBe(true);
+    expect(decideCommand("node verify.mjs", "medium").verification).toBe(true);
+    expect(decideCommand("node --test test/unit", "medium").verification).toBe(true);
+    expect(decideCommand("./verify.sh", "medium").verification).toBe(true);
+    expect(decideCommand("node smoke.mjs", "medium").verification).toBe(false);
+    expect(decideCommand("node server.js", "medium").verification).toBe(false);
+    expect(decideCommand("./checkout.sh", "medium").verification).toBe(false);
   });
 
   it("allows local dev commands at trusted autonomy", () => {

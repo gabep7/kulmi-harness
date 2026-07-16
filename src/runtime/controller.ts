@@ -40,6 +40,10 @@ import { gitTools } from "../tools/git.js";
 import { browserQaTool } from "../tools/browser.js";
 import { attachImageTool } from "../tools/media.js";
 import { lspTool } from "../tools/lsp.js";
+import { processTools, ProcessManager } from "../tools/processes.js";
+import { connectMcpServers, type McpConnection } from "../mcp/client.js";
+import { AnthropicProvider } from "../provider/anthropic.js";
+import { loadAllowlist, matchesAllowlist } from "../security/allowlist.js";
 
 export interface ControllerOptions {
   cwd: string;
@@ -81,6 +85,8 @@ export class SessionController {
   #running: Promise<AgentResult> | undefined;
   #runAbort: AbortController | undefined;
   #closed = false;
+  readonly #processes: ProcessManager;
+  readonly #mcp: McpConnection;
 
   private constructor(options: {
     events: EventBus;
@@ -95,6 +101,8 @@ export class SessionController {
     checkpoint: CheckpointStore;
     undoMessageHistory: UndoMessageHistory;
     sandbox: SandboxConfig;
+    processes: ProcessManager;
+    mcp: McpConnection;
   }) {
     this.events = options.events;
     this.#provider = options.provider;
@@ -111,6 +119,8 @@ export class SessionController {
     this.workspaceRoot = options.workspaceRoot;
     this.autonomy = options.autonomy;
     this.searchMode = options.searchMode;
+    this.#processes = options.processes;
+    this.#mcp = options.mcp;
     this.events.on((envelope) => {
       if (envelope.event.type === "usage") {
         void this.#session.addUsage(envelope.event.usage).catch(() => undefined);
@@ -155,7 +165,7 @@ export class SessionController {
       );
     }
     const search = { ...config.search, mode: options.webSearch ?? config.search.mode };
-    const provider = new OpenAIProvider(resolved);
+    const provider = resolved.protocol === "anthropic" ? new AnthropicProvider(resolved) : new OpenAIProvider(resolved);
     const events = options.events ?? new EventBus();
     const permissions: PermissionApi = {
       request: async (request) => {
@@ -163,6 +173,10 @@ export class SessionController {
         await events.emit({ type: "permission.requested", agentId: "runtime", requestId, request });
         let approved = false;
         try {
+          if (request.risk !== "high" && matchesAllowlist(await loadAllowlist(), workspaceRoot, request)) {
+            approved = true;
+            return approved;
+          }
           approved = await options.requestPermission?.(request, requestId) ?? false;
           return approved;
         } finally {
@@ -178,6 +192,11 @@ export class SessionController {
     });
     session.attach(events);
     const autonomy = options.autonomy ?? config.defaultAutonomy;
+    const processes = new ProcessManager();
+    const mcp = await connectMcpServers(config.mcpServers, { cwd: workspaceRoot });
+    for (const error of mcp.errors) {
+      await events.emit({ type: "notice", message: `mcp: ${error}` });
+    }
     const instructions = await loadInstructions(workspaceRoot, cwd);
     const skills = discoverSkills(workspaceRoot);
     const skillsInventory = skillsPromptInventory(skills);
@@ -240,8 +259,8 @@ export class SessionController {
       const readOnly = job.mode !== "implement";
       const searchTools = search.mode === "free" ? [freeWebSearchTool(search), fetchUrlTool()] : [];
       const childTools = readOnly
-        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools().filter((tool) => tool.readOnly), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools().filter((tool) => tool.readOnly), browserQaTool, attachImageTool, ...workerProgressTools()])
-        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools(), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools(), browserQaTool, attachImageTool, ...workerProgressTools()]);
+        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools().filter((tool) => tool.readOnly), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools().filter((tool) => tool.readOnly), ...processTools(processes).filter((tool) => tool.readOnly), ...mcp.tools.filter((tool) => tool.readOnly), browserQaTool, attachImageTool, ...workerProgressTools()])
+        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools(), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools(), ...processTools(processes), ...mcp.tools, browserQaTool, attachImageTool, ...workerProgressTools()]);
       const childAgent = new Agent({
         provider,
         tools: childTools,
@@ -332,6 +351,8 @@ export class SessionController {
       astGrepTool,
       ...gitTools(),
       lspTool,
+      ...(autonomy === "read" ? processTools(processes).filter((tool) => tool.readOnly) : processTools(processes)),
+      ...(autonomy === "read" ? mcp.tools.filter((tool) => tool.readOnly) : mcp.tools),
       browserQaTool,
       attachImageTool,
     ];
@@ -386,6 +407,8 @@ export class SessionController {
       sandbox: config.sandbox,
       workspaceRoot,
       autonomy,
+      processes,
+      mcp,
     });
   }
 
@@ -430,6 +453,8 @@ export class SessionController {
     this.#runAbort?.abort(new Error("session closed"));
     await this.#running?.catch(() => undefined);
     await this.#scheduler.cancelAll();
+    this.#processes.disposeAll();
+    await this.#mcp.dispose().catch(() => undefined);
     await this.events.emit({
       type: "session.finished",
       sessionId: this.sessionId,
@@ -450,6 +475,12 @@ export class SessionController {
 
   steerWorker(jobId: string, message: string): Promise<string> {
     return this.#scheduler.steer(jobId, message);
+  }
+
+  steer(message: string): void {
+    if (this.#closed) throw new Error("session is closed");
+    if (!this.#running) throw new Error("no active run to steer");
+    this.#agent.steer(message);
   }
 
   cancelWorker(jobId: string): Promise<string> {

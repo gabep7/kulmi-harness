@@ -9,7 +9,8 @@ import { combineDiffs, createTextDiff } from "../core/diff.js";
 import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
 import { resolveToolBinary } from "../runtime/binaries.js";
-import { defineTool, type AnyTool } from "./types.js";
+import { lspSourceExtensions, probeDiagnostics } from "./lsp.js";
+import { defineTool, type AnyTool, type ToolContext } from "./types.js";
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
 const summarizableSourceExtensions: Record<string, true> = {
@@ -325,6 +326,7 @@ const writeFileTool = defineTool({
     context.state.modifiedFiles.add(rel);
     context.state.revision += 1;
     delete context.state.completion;
+    const diagnostics = await maybeProbeDiagnostics(context, path);
     return {
       content: JSON.stringify({
         path: rel,
@@ -332,6 +334,7 @@ const writeFileTool = defineTool({
         additions: diff?.additions ?? 0,
         deletions: diff?.deletions ?? 0,
         sha256: sha256(input.content),
+        ...(diagnostics ? { diagnostics } : {}),
       }),
       ...(diff ? { diff: diff.text } : {}),
     };
@@ -371,13 +374,27 @@ const editFileTool = defineTool({
       }
     }
     const occurrences = current.split(input.old_text).length - 1;
-    if (occurrences === 0) throw new Error(`old_text not found in ${input.path}`);
-    if (!input.replace_all && occurrences !== 1) {
-      throw new Error(`old_text occurs ${occurrences} times in ${input.path}; provide more context or use replace_all`);
+    let matchedNormalized = false;
+    let next: string;
+    if (occurrences === 0) {
+      if (input.replace_all) throw new Error(`old_text not found in ${input.path}`);
+      const fallback = applyWhitespaceNormalizedEdit(current, input.old_text, input.new_text);
+      if (fallback.next === undefined) {
+        if (fallback.count > 1) {
+          throw new Error(`old_text has no exact match in ${input.path}; a whitespace-normalized match occurs at ${fallback.count} locations; add more surrounding context to disambiguate`);
+        }
+        throw new Error(`old_text not found in ${input.path}`);
+      }
+      matchedNormalized = true;
+      next = fallback.next;
+    } else {
+      if (!input.replace_all && occurrences !== 1) {
+        throw new Error(`old_text occurs ${occurrences} times in ${input.path}; provide more context or use replace_all`);
+      }
+      next = input.replace_all
+        ? current.replaceAll(input.old_text, input.new_text)
+        : current.replace(input.old_text, input.new_text);
     }
-    const next = input.replace_all
-      ? current.replaceAll(input.old_text, input.new_text)
-      : current.replace(input.old_text, input.new_text);
     const rel = relative(context.workspaceRoot, path);
     if (next === current) {
       return {
@@ -402,7 +419,10 @@ const editFileTool = defineTool({
       deletions: diff?.deletions ?? 0,
       sha256: sha256(actualContent),
     };
+    if (matchedNormalized) resultContent.matched = "whitespace-normalized";
     if (staleRecoveryWarning) resultContent.warning = staleRecoveryWarning;
+    const diagnostics = await maybeProbeDiagnostics(context, path);
+    if (diagnostics) resultContent.diagnostics = diagnostics;
     return {
       content: JSON.stringify(resultContent),
       ...(diff ? { diff: diff.text } : {}),
@@ -436,6 +456,7 @@ const editFilesTool = defineTool({
       next: string;
       replacements: number;
       diff: ReturnType<typeof createTextDiff>;
+      normalized: boolean;
     }> = [];
 
     for (const file of input.files) {
@@ -462,6 +483,7 @@ const editFilesTool = defineTool({
         next: applied.content,
         replacements: applied.replacements,
         diff: createTextDiff(rel, current, applied.content),
+        normalized: applied.normalized,
       });
     }
 
@@ -501,6 +523,11 @@ const editFilesTool = defineTool({
     for (const file of changed) context.state.modifiedFiles.add(file.rel);
     context.state.revision += 1;
     delete context.state.completion;
+    const diagnosticsByRel = new Map<string, string>();
+    await Promise.all(changed.map(async (file) => {
+      const diagnostics = await maybeProbeDiagnostics(context, file.path);
+      if (diagnostics) diagnosticsByRel.set(file.rel, diagnostics);
+    }));
     const diffs = changed.flatMap((file) => file.diff ? [file.diff.text] : []);
     const combinedDiff = combineDiffs(diffs);
     return {
@@ -512,6 +539,8 @@ const editFilesTool = defineTool({
           additions: file.diff?.additions ?? 0,
           deletions: file.diff?.deletions ?? 0,
           sha256: sha256(file.next),
+          ...(file.normalized ? { matched: "whitespace-normalized" } : {}),
+          ...(diagnosticsByRel.has(file.rel) ? { diagnostics: diagnosticsByRel.get(file.rel) } : {}),
         })),
         changed_files: changed.length,
       }),
@@ -585,6 +614,8 @@ const replaceByLineRangeTool = defineTool({
       sha256: sha256(actualContent),
     };
     if (staleRecoveryWarning) resultContent.warning = staleRecoveryWarning;
+    const diagnostics = await maybeProbeDiagnostics(context, path);
+    if (diagnostics) resultContent.diagnostics = diagnostics;
     return {
       content: JSON.stringify(resultContent),
       ...(diff ? { diff: diff.text } : {}),
@@ -650,12 +681,27 @@ function applyReplacements(
   initial: string,
   path: string,
   edits: Array<{ old_text: string; new_text: string; replace_all: boolean }>,
-): { content: string; replacements: number } {
+): { content: string; replacements: number; normalized: boolean } {
   let content = initial;
   let replacements = 0;
+  let normalized = false;
   for (const [index, edit] of edits.entries()) {
     const occurrences = content.split(edit.old_text).length - 1;
-    if (occurrences === 0) throw new Error(`edit ${index + 1} old_text not found in ${path}`);
+    if (occurrences === 0) {
+      if (!edit.replace_all) {
+        const fallback = applyWhitespaceNormalizedEdit(content, edit.old_text, edit.new_text);
+        if (fallback.next !== undefined) {
+          content = fallback.next;
+          replacements += 1;
+          normalized = true;
+          continue;
+        }
+        if (fallback.count > 1) {
+          throw new Error(`edit ${index + 1} old_text has no exact match in ${path}; a whitespace-normalized match occurs at ${fallback.count} locations; add more surrounding context to disambiguate`);
+        }
+      }
+      throw new Error(`edit ${index + 1} old_text not found in ${path}`);
+    }
     if (!edit.replace_all && occurrences !== 1) {
       throw new Error(`edit ${index + 1} old_text occurs ${occurrences} times in ${path}; provide more context or use replace_all`);
     }
@@ -664,7 +710,71 @@ function applyReplacements(
       : content.replace(edit.old_text, edit.new_text);
     replacements += edit.replace_all ? occurrences : 1;
   }
-  return { content, replacements };
+  return { content, replacements, normalized };
+}
+
+interface WhitespaceNormalizedEdit {
+  count: number;
+  next: string | undefined;
+}
+
+function applyWhitespaceNormalizedEdit(content: string, oldText: string, newText: string): WhitespaceNormalizedEdit {
+  const pattern = oldText.split("\n").map((line) => line.trimEnd());
+  if (pattern.length > 1 && pattern[pattern.length - 1] === "") pattern.pop();
+  const patternIndent = commonLeadingIndent(pattern);
+  const dedented = pattern.map((line) => line === "" ? "" : line.slice(patternIndent.length));
+  const anchorIndex = dedented.findIndex((line) => line !== "");
+  if (anchorIndex === -1) return { count: 0, next: undefined };
+  const lines = content.split("\n");
+  const matches: Array<{ start: number; base: string }> = [];
+  outer: for (let start = 0; start + dedented.length <= lines.length; start += 1) {
+    const anchor = (lines[start + anchorIndex] ?? "").trimEnd();
+    const anchorPattern = dedented[anchorIndex] ?? "";
+    if (!anchor.endsWith(anchorPattern)) continue;
+    const base = anchor.slice(0, anchor.length - anchorPattern.length);
+    if (base.trim() !== "") continue;
+    for (let index = 0; index < dedented.length; index += 1) {
+      const expected = dedented[index] ?? "";
+      const actual = (lines[start + index] ?? "").trimEnd();
+      if (expected === "" ? actual !== "" : actual !== base + expected) continue outer;
+    }
+    matches.push({ start, base });
+  }
+  const single = matches.length === 1 ? matches[0] : undefined;
+  if (!single) return { count: matches.length, next: undefined };
+  const replacement = reindentLines(newText, single.base);
+  const next = [...lines.slice(0, single.start), ...replacement, ...lines.slice(single.start + dedented.length)].join("\n");
+  return { count: 1, next };
+}
+
+function commonLeadingIndent(lines: string[]): string {
+  let prefix: string | undefined;
+  for (const line of lines) {
+    if (line === "") continue;
+    const indent = line.slice(0, line.length - line.trimStart().length);
+    if (prefix === undefined) {
+      prefix = indent;
+      continue;
+    }
+    let shared = 0;
+    while (shared < prefix.length && shared < indent.length && prefix[shared] === indent[shared]) shared += 1;
+    prefix = prefix.slice(0, shared);
+  }
+  return prefix ?? "";
+}
+
+function reindentLines(text: string, base: string): string[] {
+  if (text === "") return [];
+  const lines = text.split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  const trimmed = lines.map((line) => line.trimEnd());
+  const indent = commonLeadingIndent(trimmed);
+  return lines.map((line) => line.trimEnd() === "" ? "" : base + line.slice(indent.length));
+}
+
+async function maybeProbeDiagnostics(context: ToolContext, path: string): Promise<string | undefined> {
+  if (lspSourceExtensions[extname(path)] === undefined) return undefined;
+  return await probeDiagnostics(context, path, 3000);
 }
 
 export async function writeAtomic(path: string, content: string): Promise<void> {

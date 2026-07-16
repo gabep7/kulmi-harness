@@ -52,11 +52,17 @@ describe("configuration", () => {
     })).toThrow("timeout_seconds");
   });
 
-  it("rejects invalid limits, endpoints, and removed MCP config", () => {
+  it("rejects invalid limits and endpoints, and parses MCP servers", () => {
     const base = config(payg());
     expect(() => applyFileConfig(base, { max_steps: 0 })).toThrow("max_steps");
     expect(() => applyFileConfig(base, { models: { api: { base_url: "file:///tmp/model" } } })).toThrow("http or https");
-    expect(() => applyFileConfig(base, { mcp: { servers: {} } })).toThrow("MCP configuration is no longer supported");
+    expect(() => applyFileConfig(base, { mcp: { servers: { "bad name": { command: "x" } } } })).toThrow();
+    const withMcp = applyFileConfig(base, {
+      mcp: { servers: { files: { command: "npx", args: ["-y", "server-filesystem"], env: { DEBUG: "1" } } } },
+    });
+    expect(withMcp.mcpServers).toEqual([
+      { name: "files", command: "npx", args: ["-y", "server-filesystem"], env: { DEBUG: "1" } },
+    ]);
   });
 
   it("accepts custom model profiles with arbitrary model names", () => {
@@ -66,6 +72,7 @@ describe("configuration", () => {
           model: "claude-sonnet-4-20250514",
           base_url: "https://api.anthropic.com/v1",
           api_key_env: "ANTHROPIC_API_KEY",
+          protocol: "anthropic",
           thinking: true,
           context_window: 200_000,
           max_output_tokens: 64_000,
@@ -76,6 +83,7 @@ describe("configuration", () => {
       model: "claude-sonnet-4-20250514",
       baseUrl: "https://api.anthropic.com/v1",
       apiKeyEnv: "ANTHROPIC_API_KEY",
+      protocol: "anthropic",
       thinking: true,
       contextWindow: 200_000,
       maxOutputTokens: 64_000,
@@ -155,6 +163,7 @@ function emptyConfig(): KulmiConfig {
     sandbox: { mode: "required", network: false },
     undo: { messageHistory: "truncate" },
     hooks: { toolPre: [], toolPost: [] },
+    mcpServers: [],
   };
 }
 

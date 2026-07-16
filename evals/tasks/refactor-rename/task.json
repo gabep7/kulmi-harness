@@ -1,0 +1,5 @@
+{
+  "prompt": "Rename the function computeTotal to sumItems everywhere in this project: its definition in math.mjs plus every import and call site in report.mjs, invoice.mjs, and smoke.mjs. Behavior must stay identical and no occurrence of the old name may remain.",
+  "timeout_seconds": 300,
+  "verify": "! grep -q computeTotal math.mjs report.mjs invoice.mjs smoke.mjs && node smoke.mjs"
+}

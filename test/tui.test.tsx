@@ -142,16 +142,131 @@ describe("Kulmi TUI", () => {
     view.stdin.write("\r");
     await pause();
     const workingFrame = view.lastFrame() ?? "";
-    expect(workingFrame).toContain("Kulmi is working. Esc to stop.");
+    expect(workingFrame).toContain("Kulmi is working. Enter to steer, Esc to stop.");
     expect(workingFrame).toContain("⠋");
     expect(workingFrame).toContain("thinking");
-    expect(workingFrame.indexOf("thinking")).toBeLessThan(workingFrame.indexOf("Kulmi is working. Esc to stop."));
-    const composerLine = workingFrame.split("\n").find((line) => line.includes("Kulmi is working. Esc to stop."));
+    expect(workingFrame.indexOf("thinking")).toBeLessThan(workingFrame.indexOf("Kulmi is working. Enter to steer, Esc to stop."));
+    const composerLine = workingFrame.split("\n").find((line) => line.includes("Kulmi is working. Enter to steer, Esc to stop."));
     expect(composerLine).not.toContain("thinking");
     view.stdin.write("\u001b");
     await pause();
     expect(cancel).toHaveBeenCalledOnce();
     finishRun?.();
+  });
+
+  it("queues composer text as steering while a run is active", async () => {
+    const store = new TuiStore();
+    const steer = vi.fn();
+    let finishRun: (() => void) | undefined;
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        search="off"
+        onSubmit={() => new Promise<void>((resolve) => { finishRun = resolve; })}
+        onCommand={async () => undefined}
+        onSteer={steer}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    view.stdin.write("first prompt");
+    await pause();
+    view.stdin.write("\r");
+    await pause();
+    view.stdin.write("focus on the cache layer");
+    await pause();
+    view.stdin.write("\r");
+    await pause();
+    expect(steer).toHaveBeenCalledExactlyOnceWith("focus on the cache layer");
+    const frame = view.frames.join("\n");
+    expect(frame).toContain("steered: focus on the cache layer");
+    const composerLine = (view.lastFrame() ?? "").split("\n").find((line) => line.includes("Kulmi is working"));
+    expect(composerLine).toBeDefined();
+    expect(composerLine).not.toContain("focus");
+    finishRun?.();
+  });
+
+  it("offers allow always for non-high risk and persists the choice", async () => {
+    const store = new TuiStore();
+    const always = vi.fn();
+    const request = { tool: "shell", risk: "medium" as const, reason: "runs tests", command: "npm test --watch", input: {} };
+    const pending = store.requestPermission(request);
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        search="off"
+        onSubmit={async () => undefined}
+        onCommand={async () => undefined}
+        onAlwaysAllow={always}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    expect(view.lastFrame()).toContain("allow always");
+    view.stdin.write("a");
+    await expect(pending).resolves.toBe(true);
+    expect(always).toHaveBeenCalledExactlyOnceWith(request);
+  });
+
+  it("never offers allow always for high risk requests", async () => {
+    const store = new TuiStore();
+    const always = vi.fn();
+    const pending = store.requestPermission({ tool: "shell", risk: "high", reason: "removes a file", command: "rm -rf build", input: {} });
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        search="off"
+        onSubmit={async () => undefined}
+        onCommand={async () => undefined}
+        onAlwaysAllow={always}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    expect(view.lastFrame()).not.toContain("allow always");
+    view.stdin.write("a");
+    await pause();
+    expect(always).not.toHaveBeenCalled();
+    view.stdin.write("y");
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it("lists discovered custom commands in help", async () => {
+    const store = new TuiStore();
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        search="off"
+        customCommands={[{ name: "/deploy", description: "Deploy the app" }, { name: "/help", description: "shadowed" }]}
+        onSubmit={async () => undefined}
+        onCommand={async () => undefined}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    view.stdin.write("?");
+    await pause();
+    const frame = view.lastFrame() ?? "";
+    expect(frame).toContain("custom commands");
+    expect(frame).toContain("/deploy");
+    expect(frame).toContain("Deploy the app");
+    expect(frame).not.toContain("shadowed");
   });
 
   it("opens a compact command palette without covering the composer", async () => {

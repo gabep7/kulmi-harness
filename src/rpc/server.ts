@@ -27,6 +27,7 @@ const sessionIdSchema = z.object({ sessionId: z.string() });
 const promptSchema = sessionIdSchema.extend({ prompt: z.string().min(1) });
 const workerIdSchema = sessionIdSchema.extend({ jobId: z.string().min(1) });
 const workerSteerSchema = workerIdSchema.extend({ message: z.string().min(1) });
+const sessionSteerSchema = sessionIdSchema.extend({ message: z.string().min(1) });
 const permissionResponseSchema = sessionIdSchema.extend({
   requestId: z.string().min(1),
   approved: z.boolean(),
@@ -150,6 +151,7 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
               undo: true,
               workers: true,
               permissions: true,
+              steering: true,
             },
           });
           return;
@@ -184,6 +186,15 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
           const managed = sessions.get(params.sessionId);
           managed?.running?.abort(new Error("cancelled by client"));
           await respond(request.id, { cancelled: managed?.running !== undefined });
+          return;
+        }
+        case "session.steer": {
+          const params = sessionSteerSchema.parse(request.params);
+          const managed = sessions.get(params.sessionId);
+          if (!managed) throw new RpcError(-32001, `session ${params.sessionId} is not open`);
+          if (!managed.running) throw new RpcError(-32002, "no active run to steer");
+          managed.controller.steer(params.message);
+          await respond(request.id, { steered: true });
           return;
         }
         case "session.undo": {

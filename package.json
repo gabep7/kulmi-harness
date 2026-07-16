@@ -23,6 +23,7 @@
     "test:live": "tsx scripts/provider-smoke.ts",
     "test:tui": "vitest run test/tui.test.tsx",
     "test:package": "node scripts/package-smoke.mjs",
+    "eval": "node evals/run.mjs",
     "check:version": "node scripts/check-version.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check": "node scripts/check.mjs"
@@ -36,6 +37,7 @@
   ],
   "dependencies": {
     "@ast-grep/cli": "^0.44.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^15.0.0",
     "fast-glob": "^3.3.3",
     "ink": "^7.1.0",

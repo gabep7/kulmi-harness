@@ -38,6 +38,7 @@ const providerMessageSchema = z.discriminatedUnion("role", [
     role: z.literal("assistant"),
     content: z.string().nullable(),
     reasoning_content: z.string().optional(),
+    reasoning_signature: z.string().optional(),
     tool_calls: z.array(toolCallSchema).optional(),
   }).strict(),
   z.object({

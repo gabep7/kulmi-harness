@@ -162,7 +162,7 @@ function analyzeArgv(input: string[], trusted: boolean): {
       return { risk: "read", blocked: "direct node -e/--eval execution is blocked; use a declared project script", verification: false };
     }
     const firstPositional = argv.slice(1).find((arg) => !arg.startsWith("-"));
-    if (firstPositional || trusted) return { risk: "medium", verification: false };
+    if (firstPositional || trusted) return { risk: "medium", verification: isValidator(argv) };
     return { risk: "read", blocked: "direct node execution is blocked; use a declared project script", verification: false };
   }
   if (["python", "python3"].includes(program)) {
@@ -171,7 +171,7 @@ function analyzeArgv(input: string[], trusted: boolean): {
       return { risk: "read", blocked: `direct ${program} execution is blocked; use a declared project script`, verification: false };
     }
     const firstPositional = argv.slice(1).find((arg) => !arg.startsWith("-"));
-    if (firstPositional || trusted) return { risk: "medium", verification: false };
+    if (firstPositional || trusted) return { risk: "medium", verification: isValidator(argv) };
     return { risk: "read", blocked: `direct ${program} execution is blocked; use a declared project script`, verification: false };
   }
   if (program === "find" && argv.some((arg) => ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(arg))) {
@@ -290,6 +290,8 @@ function isPackageMutation(argv: string[]): boolean {
   );
 }
 
+const validatorScriptPattern = /(?:^|[._-])(?:tests?|spec|verify|check)(?:$|[._-])/i;
+
 function isValidator(argv: string[]): boolean {
   const program = basename(argv[0] ?? "");
   const args = argv.slice(1);
@@ -302,7 +304,12 @@ function isValidator(argv: string[]): boolean {
   if (program === "cargo") return ["test", "check", "clippy", "build"].includes(args[0] ?? "");
   if (program === "go") return args[0] === "test";
   if (program === "make") return args.some((arg) => /^(?:test|check|lint|build)$/.test(arg));
-  return false;
+  if (["node", "python", "python3"].includes(program)) {
+    if (program === "node" && args.includes("--test")) return true;
+    const script = args.find((arg) => !arg.startsWith("-"));
+    return Boolean(script && validatorScriptPattern.test(basename(script)));
+  }
+  return validatorScriptPattern.test(program);
 }
 
 function riskNumber(risk: Exclude<CommandRisk, "blocked">): number {

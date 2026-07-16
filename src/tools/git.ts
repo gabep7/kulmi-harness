@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { resolveToolBinary } from "../runtime/binaries.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
 import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
 import { defineTool, type AnyTool, type ToolContext } from "./types.js";
@@ -10,7 +11,7 @@ import { defineTool, type AnyTool, type ToolContext } from "./types.js";
 const execFileAsync = promisify(execFile);
 
 export function gitTools(): AnyTool[] {
-  return [listConflictsTool, readConflictTool, resolveConflictTool, commitChangesTool];
+  return [listConflictsTool, readConflictTool, resolveConflictTool, commitChangesTool, createPullRequestTool];
 }
 
 const listConflictsTool = defineTool({
@@ -91,6 +92,85 @@ const commitChangesTool = defineTool({
   },
 });
 
+const createPullRequestTool = defineTool({
+  name: "create_pull_request",
+  description: "Push the current branch to origin and open a GitHub pull request via the gh CLI. Always requires explicit approval.",
+  schema: z.object({
+    title: z.string().min(1).max(120),
+    body: z.string().max(20000).optional(),
+    base: z.string().min(1).optional(),
+    draft: z.boolean().optional(),
+  }),
+  readOnly: false,
+  async execute(context, input) {
+    const root = context.workspaceRoot;
+    const gh = await resolveToolBinary("gh");
+    if (!gh) throw new Error("gh CLI not found on PATH: install GitHub CLI (https://cli.github.com) and run `gh auth login`");
+    const branch = (await git(root, ["branch", "--show-current"])).trim();
+    if (!branch) throw new Error("HEAD is detached: check out a branch before creating a pull request");
+    try {
+      await git(root, ["remote", "get-url", "origin"]);
+    } catch {
+      throw new Error("no origin remote is configured: add one with `git remote add origin <url>`");
+    }
+    if (input.base === branch) throw new Error(`current branch ${branch} is the base branch: check out a feature branch first`);
+    const baseRef = await resolveBaseRef(root, input.base);
+    if (baseRef) {
+      const ahead = (await git(root, ["rev-list", "--count", `${baseRef}..HEAD`])).trim();
+      if (ahead === "0") throw new Error(`branch ${branch} has no commits ahead of ${baseRef}: commit changes before creating a pull request`);
+    }
+    const ghArgs = ["pr", "create", "--title", input.title, "--body", input.body ?? "", "--head", branch];
+    if (input.base) ghArgs.push("--base", input.base);
+    if (input.draft) ghArgs.push("--draft");
+    if (!context.permissions) {
+      throw new Error("create_pull_request publishes to a remote and always requires approval: no permission prompt is available in this session");
+    }
+    const approved = await context.permissions.request({
+      tool: "git",
+      risk: "high",
+      reason: `push ${branch} to origin and create a pull request`,
+      command: `gh ${ghArgs.join(" ")}`,
+      input,
+    });
+    if (!approved) throw new Error("pull request creation was denied by the user");
+    const env = safeChildEnvironment({
+      GH_TOKEN: process.env.GH_TOKEN,
+      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+      GH_CONFIG_DIR: process.env.GH_CONFIG_DIR ?? (process.env.HOME ? join(process.env.HOME, ".config", "gh") : undefined),
+      SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK,
+    });
+    let output: string;
+    try {
+      try {
+        await execFileAsync("git", ["-C", root, "push", "-u", "origin", "HEAD"], {
+          env,
+          cwd: root,
+          encoding: "utf8",
+          maxBuffer: 2 * 1024 * 1024,
+        });
+      } catch (error) {
+        throw new Error(`git push -u origin HEAD failed: ${childProcessFailure(error)}`);
+      }
+      try {
+        const { stdout, stderr } = await execFileAsync(gh, ghArgs, {
+          env,
+          cwd: root,
+          encoding: "utf8",
+          maxBuffer: 2 * 1024 * 1024,
+        });
+        output = `${stdout}\n${stderr}`;
+      } catch (error) {
+        throw new Error(`gh pr create failed: ${childProcessFailure(error)}`);
+      }
+    } finally {
+      disposeChildEnvironment(env);
+    }
+    const url = output.match(/https:\/\/\S+/)?.[0];
+    if (!url) throw new Error(`gh did not report a pull request URL: ${output.trim() || "empty output"}`);
+    return { content: JSON.stringify({ branch, url }, null, 2), mutated: false };
+  },
+});
+
 async function conflictFiles(root: string): Promise<string[]> {
   const output = await git(root, ["diff", "--name-only", "--diff-filter=U"]);
   return output.split("\n").map((line) => line.trim()).filter(Boolean).sort();
@@ -100,6 +180,28 @@ async function requireGitMutationApproval(context: ToolContext, reason: string):
   if (context.autonomy === "trusted") return;
   const approved = await context.permissions?.request({ tool: "git", risk: "high", reason, input: {} });
   if (!approved) throw new Error(`${reason} requires trusted autonomy or approval`);
+}
+
+async function resolveBaseRef(root: string, base: string | undefined): Promise<string | undefined> {
+  const candidates = base
+    ? [`refs/remotes/origin/${base}`, `refs/heads/${base}`]
+    : ["refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/remotes/origin/master", "refs/heads/main", "refs/heads/master"];
+  for (const candidate of candidates) {
+    try {
+      await git(root, ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`]);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function childProcessFailure(error: unknown): string {
+  if (error && typeof error === "object" && "stderr" in error && typeof error.stderr === "string" && error.stderr.trim()) {
+    return error.stderr.trim();
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 function relativeConflictPath(root: string, path: string): string {

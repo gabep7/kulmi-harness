@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -226,6 +227,71 @@ describe("SessionController resume", () => {
     expect(persisted.messages).toHaveLength(fixture.messagesAfter.length + 1);
     await controller.close();
   });
+});
+
+describe("SessionController steering", () => {
+  it("rejects steering when no run is active", async () => {
+    process.env[TEST_API_KEY_ENV] = "sk-123456789";
+    process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-steer-data-"));
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    const root = await mkdtemp(join(tmpdir(), "kulmi-steer-idle-"));
+    await writeTestModelConfig(root);
+    const controller = await SessionController.create({ cwd: root, mode: "chat", autonomy: "medium" });
+    expect(() => controller.steer("focus on the cache layer")).toThrow("no active run to steer");
+    await controller.close();
+  });
+
+  it("queues steering into the root agent while a run is active", async () => {
+    process.env[TEST_API_KEY_ENV] = "sk-123456789";
+    process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-steer-data-"));
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    const root = await mkdtemp(join(tmpdir(), "kulmi-steer-run-"));
+    let requestCount = 0;
+    let firstRequestArrived: () => void = () => undefined;
+    const arrived = new Promise<void>((resolve) => { firstRequestArrived = resolve; });
+    const server = createServer((request, response) => {
+      request.on("error", () => undefined);
+      response.on("error", () => undefined);
+      requestCount += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      if (requestCount === 1) {
+        firstRequestArrived();
+        return;
+      }
+      response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\ndata: [DONE]\n\n');
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("mock model server has no port");
+    await mkdir(join(root, ".kulmi"), { recursive: true });
+    await writeFile(join(root, ".kulmi", "config.toml"), `default_model = "${TEST_MODEL_PROFILE}"
+
+[models.${TEST_MODEL_PROFILE}]
+model = "${TEST_MODEL}"
+base_url = "http://127.0.0.1:${address.port}/v1"
+api_key_env = "${TEST_API_KEY_ENV}"
+thinking = false
+context_window = 128000
+max_output_tokens = 16384
+`, "utf8");
+    const controller = await SessionController.create({ cwd: root, mode: "chat", autonomy: "medium" });
+    try {
+      const abort = new AbortController();
+      const firstRun = controller.run("first prompt", abort.signal);
+      await arrived;
+      controller.steer("focus on the cache layer");
+      abort.abort(new Error("stopped by test"));
+      await expect(firstRun).rejects.toThrow();
+      const second = await controller.run("second prompt", new AbortController().signal);
+      expect(second.text).toContain("ok");
+      const steering = controller.messages.find((message) =>
+        typeof message.content === "string" && message.content.includes("<parent-steering>"));
+      expect(steering?.content).toContain("focus on the cache layer");
+    } finally {
+      await controller.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 15_000);
 });
 
 async function createUndoFixture(root: string): Promise<{

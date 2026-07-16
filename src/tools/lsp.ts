@@ -1,10 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { type ChildProcess, spawn } from "node:child_process";
+import { extname, relative } from "node:path";
 import { z } from "zod";
 import { resolveToolBinary } from "../runtime/binaries.js";
 import { resolveWorkspacePath } from "../security/paths.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
-import { defineTool } from "./types.js";
+import { defineTool, type ToolContext } from "./types.js";
 
 interface LspMessage {
   jsonrpc: "2.0";
@@ -14,6 +15,23 @@ interface LspMessage {
   result?: unknown;
   error?: { code: number; message: string };
 }
+
+interface PublishedDiagnostic {
+  range?: { start?: { line?: number } };
+  severity?: number;
+  message?: string;
+}
+
+export const lspSourceExtensions: Record<string, string> = {
+  ".ts": "typescript",
+  ".mts": "typescript",
+  ".cts": "typescript",
+  ".tsx": "typescriptreact",
+  ".js": "javascript",
+  ".mjs": "javascript",
+  ".cjs": "javascript",
+  ".jsx": "javascriptreact",
+};
 
 const SYMBOL_KIND_NAME: Record<number, string> = {
   1: "File", 2: "Module", 3: "Namespace", 4: "Package", 5: "Class",
@@ -31,6 +49,8 @@ class LspClient {
   #buffer = "";
   #initialized = false;
   #openFiles = new Set<string>();
+  #documentVersions = new Map<string, number>();
+  #diagnosticsListeners = new Set<(uri: string, diagnostics: PublishedDiagnostic[]) => void>();
   #starting: Promise<void> | undefined;
   #env: NodeJS.ProcessEnv | undefined;
   readonly #workspaceRoot: string;
@@ -102,7 +122,7 @@ class LspClient {
     await this.#sendRequest("initialize", {
       processId: process.pid,
       rootUri: `file://${this.#workspaceRoot}`,
-      capabilities: {},
+      capabilities: { textDocument: { publishDiagnostics: {} } },
     });
     this.#sendNotification("initialized", {});
     this.#initialized = true;
@@ -159,7 +179,15 @@ class LspClient {
         continue;
       }
 
-      if (msg.id === undefined) continue;
+      if (msg.id === undefined) {
+        if (msg.method === "textDocument/publishDiagnostics") {
+          const params = msg.params as { uri?: string; diagnostics?: PublishedDiagnostic[] } | undefined;
+          if (typeof params?.uri === "string" && Array.isArray(params.diagnostics)) {
+            for (const listener of this.#diagnosticsListeners) listener(params.uri, params.diagnostics);
+          }
+        }
+        continue;
+      }
 
       const handler = this.#pending.get(msg.id);
       if (!handler) continue;
@@ -175,11 +203,57 @@ class LspClient {
 
   async openFile(filePath: string): Promise<void> {
     if (this.#openFiles.has(filePath)) return;
-    const content = await readFile(filePath, "utf-8");
+    await this.#syncFile(filePath);
+  }
+
+  async #syncFile(filePath: string): Promise<void> {
+    const text = await readFile(filePath, "utf-8");
+    const uri = `file://${filePath}`;
+    const version = (this.#documentVersions.get(filePath) ?? 0) + 1;
+    this.#documentVersions.set(filePath, version);
+    if (this.#openFiles.has(filePath)) {
+      this.#sendNotification("textDocument/didChange", {
+        textDocument: { uri, version },
+        contentChanges: [{ text }],
+      });
+      return;
+    }
     this.#sendNotification("textDocument/didOpen", {
-      textDocument: { uri: `file://${filePath}`, languageId: "typescript", version: 1, content },
+      textDocument: {
+        uri,
+        languageId: lspSourceExtensions[extname(filePath)] ?? "typescript",
+        version,
+        text,
+      },
     });
     this.#openFiles.add(filePath);
+  }
+
+  async diagnostics(filePath: string, timeoutMs: number): Promise<PublishedDiagnostic[] | undefined> {
+    const uri = `file://${filePath}`;
+    const { promise, resolve } = Promise.withResolvers<PublishedDiagnostic[] | undefined>();
+    let latest: PublishedDiagnostic[] | undefined;
+    let settle: NodeJS.Timeout | undefined;
+    const finish = () => {
+      clearTimeout(deadline);
+      clearTimeout(settle);
+      this.#diagnosticsListeners.delete(listener);
+      resolve(latest);
+    };
+    const deadline = setTimeout(finish, timeoutMs);
+    const listener = (publishedUri: string, diagnostics: PublishedDiagnostic[]) => {
+      if (publishedUri !== uri) return;
+      latest = diagnostics;
+      if (diagnostics.some((diagnostic) => diagnostic.severity === 1)) {
+        finish();
+        return;
+      }
+      clearTimeout(settle);
+      settle = setTimeout(finish, 300);
+    };
+    this.#diagnosticsListeners.add(listener);
+    this.#syncFile(filePath).catch(() => finish());
+    return await promise;
   }
 
   async definition(file: string, line: number, column: number): Promise<unknown> {
@@ -224,6 +298,7 @@ class LspClient {
     this.#process = null;
     this.#buffer = "";
     this.#openFiles.clear();
+    this.#documentVersions.clear();
     if (this.#env) {
       disposeChildEnvironment(this.#env);
       this.#env = undefined;
@@ -358,3 +433,31 @@ export const lspTool = defineTool({
     }
   },
 });
+
+export async function probeDiagnostics(context: ToolContext, absolutePath: string, timeoutMs: number): Promise<string | undefined> {
+  const started = Date.now();
+  let expiry: NodeJS.Timeout | undefined;
+  try {
+    const client = getClient(context.workspaceRoot);
+    const probe = (async () => {
+      await client.ensureRunning();
+      const remaining = timeoutMs - (Date.now() - started);
+      if (remaining <= 0) return undefined;
+      return await client.diagnostics(absolutePath, remaining);
+    })().catch(() => undefined);
+    const { promise: expired, resolve: expire } = Promise.withResolvers<undefined>();
+    expiry = setTimeout(() => expire(undefined), timeoutMs);
+    const diagnostics = await Promise.race([probe, expired]);
+    if (!diagnostics) return undefined;
+    const errors = diagnostics.filter((diagnostic) => diagnostic.severity === 1);
+    if (errors.length === 0) return undefined;
+    const rel = relative(context.workspaceRoot, absolutePath);
+    const lines = errors.slice(0, 5).map((error) => `${rel}:${(error.range?.start?.line ?? 0) + 1} ${error.message ?? "unknown error"}`);
+    if (errors.length > 5) lines.push(`plus ${errors.length - 5} more errors`);
+    return lines.join("\n");
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(expiry);
+  }
+}

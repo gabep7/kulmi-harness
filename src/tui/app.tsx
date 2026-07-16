@@ -15,7 +15,10 @@ export interface TuiAppProps {
   autonomy: AutonomyLevel;
   search: "off" | "free";
   mode?: AgentMode;
+  customCommands?: ReadonlyArray<{ name: string; description: string }>;
   onSubmit: (prompt: string) => Promise<void>;
+  onSteer?: (message: string) => void;
+  onAlwaysAllow?: (request: PermissionRequest) => void;
   onCommand: (command: string, args: string) => Promise<TuiCommandResult>;
   onSwitchSession?: (sessionId: string) => Promise<TuiRuntimeInfo>;
   onCycleAutonomy?: () => Promise<TuiRuntimeInfo>;
@@ -91,7 +94,12 @@ export function TuiApp(props: TuiAppProps) {
 
   useInput((value, key) => {
     if (snapshot.pendingApproval) {
+      const request = snapshot.pendingApproval.request;
       if (value.toLowerCase() === "y") props.store.resolvePermission(true);
+      if (value.toLowerCase() === "a" && request.risk !== "high" && props.onAlwaysAllow) {
+        props.onAlwaysAllow(request);
+        props.store.resolvePermission(true);
+      }
       if (value.toLowerCase() === "n" || key.escape || key.return) props.store.resolvePermission(false);
       return;
     }
@@ -160,7 +168,18 @@ export function TuiApp(props: TuiAppProps) {
 
   const submit = async (raw: string) => {
     const value = raw.trim();
-    if (!value || busy) return;
+    if (!value) return;
+    if (busy) {
+      if (value.startsWith("/") || !props.onSteer) return;
+      setInput("");
+      try {
+        props.onSteer(value);
+        props.store.addNotice(`steered: ${value}`);
+      } catch (error) {
+        props.store.addNotice(error instanceof Error ? error.message : String(error), true);
+      }
+      return;
+    }
     setInput("");
     if (value.startsWith("/")) {
       const [command = "", ...parts] = value.split(/\s+/);
@@ -236,7 +255,7 @@ export function TuiApp(props: TuiAppProps) {
         {snapshot.plan.length > 0 && <PlanBlock plan={snapshot.plan} />}
         {snapshot.completion && <CompletionBlock completion={snapshot.completion} />}
 
-        {help && <Help onClose={() => setHelp(false)} />}
+        {help && <Help onClose={() => setHelp(false)} custom={props.customCommands ?? []} />}
         {!help && !snapshot.pendingApproval && !sessions && input.startsWith("/") && <CommandPalette query={input} columns={size.columns} />}
 
         {!snapshot.pendingApproval && !sessions && busy && <LoadingStatus />}
@@ -338,7 +357,7 @@ function Composer({ value, onChange, onSubmit, busy }: { value: string; onChange
   return (
     <Box marginTop={busy ? 0 : 1} borderStyle="round" borderColor={busy ? theme.faint : theme.cocoa} paddingX={1}>
       <Text color={busy ? theme.faint : theme.caramel}>{glyph.user} </Text>
-      <TextInput value={value} onChange={onChange} onSubmit={onSubmit} focus={!busy} placeholder={busy ? "Kulmi is working. Esc to stop." : "What should we build?"} />
+      <TextInput value={value} onChange={onChange} onSubmit={onSubmit} placeholder={busy ? "Kulmi is working. Enter to steer, Esc to stop." : "What should we build?"} />
     </Box>
   );
 }
@@ -378,7 +397,7 @@ function Approval({ request }: { request: PermissionRequest }) {
       <Text color={theme.rose} bold>approval required  <Text color={theme.muted}>{request.risk} risk</Text></Text>
       <Text color={theme.ink}>{request.reason}</Text>
       {request.command && <Text color={theme.sand}>$ {request.command}</Text>}
-      <Text color={theme.muted}><Text color={theme.sage}>y</Text> allow once   <Text color={theme.rose}>n</Text> deny</Text>
+      <Text color={theme.muted}><Text color={theme.sage}>y</Text> allow once   {request.risk !== "high" && <><Text color={theme.sage}>a</Text> allow always   </>}<Text color={theme.rose}>n</Text> deny</Text>
     </Box>
   );
 }
@@ -397,14 +416,21 @@ function SessionPicker({ sessions, cursor }: { sessions: TuiSessionOption[]; cur
   );
 }
 
-function Help({ onClose }: { onClose: () => void }) {
+function Help({ onClose, custom }: { onClose: () => void; custom: ReadonlyArray<{ name: string; description: string }> }) {
   useInput((input, key) => { if (input === "?" || key.escape) onClose(); });
+  const customShown = custom.filter((entry) => !commands.some(([builtin]) => builtin === entry.name));
   return (
     <Box marginTop={1} borderStyle="round" borderColor={theme.cocoa} paddingX={1} flexDirection="column">
       <Text color={theme.cream} bold>commands</Text>
       <Box flexDirection="row" flexWrap="wrap">
         {commands.map(([command, detail]) => <Box key={command} width={32}><Text color={theme.sand}>{command.padEnd(12)}</Text><Text color={theme.muted}>{detail}</Text></Box>)}
       </Box>
+      {customShown.length > 0 && <Text color={theme.cream} bold>custom commands</Text>}
+      {customShown.length > 0 && (
+        <Box flexDirection="row" flexWrap="wrap">
+          {customShown.map((entry) => <Box key={entry.name} width={32}><Text color={theme.sand}>{entry.name.padEnd(12)}</Text><Text color={theme.muted}>{entry.description}</Text></Box>)}
+        </Box>
+      )}
       <Text color={theme.faint}>esc stop  ·  ctrl+o thinking  ·  shift+tab autonomy  ·  ctrl+c exit  ·  ? close</Text>
     </Box>
   );

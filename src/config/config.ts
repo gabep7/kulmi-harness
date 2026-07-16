@@ -11,15 +11,25 @@ export type FreeSearchProvider = "auto" | "searxng" | "bing-rss";
 export type SandboxMode = "required" | "off";
 export type UndoMessageHistory = "truncate" | "keep";
 
+export type ModelProtocol = "openai" | "anthropic";
+
 export interface ModelConfig {
   model: string;
   provider?: string;
+  protocol?: ModelProtocol;
   baseUrl: string;
   apiKeyEnv: string;
   thinking: boolean;
   reasoningEffort?: string;
   contextWindow: number;
   maxOutputTokens: number;
+}
+
+export interface McpServerConfig {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
 }
 
 export interface SearchConfig {
@@ -61,6 +71,7 @@ export interface KulmiConfig {
   sandbox: SandboxConfig;
   undo: UndoConfig;
   hooks: HooksConfig;
+  mcpServers: McpServerConfig[];
 }
 
 export interface ResolvedModel extends ModelConfig {
@@ -102,6 +113,7 @@ const defaults: KulmiConfig = {
     toolPre: [],
     toolPost: [],
   },
+  mcpServers: [],
 };
 
 const httpUrlSchema = z.string().url().refine((value) => {
@@ -109,8 +121,14 @@ const httpUrlSchema = z.string().url().refine((value) => {
   return protocol === "http:" || protocol === "https:";
 }, "must use http or https");
 const positiveInt = z.number().int().positive();
+const mcpServerFileSchema = z.object({
+  command: z.string().min(1),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()).optional(),
+}).strict();
 const modelFileSchema = z.object({
   provider: z.string().min(1).optional(),
+  protocol: z.enum(["openai", "anthropic"]).optional(),
   model: z.string().min(1).optional(),
   base_url: httpUrlSchema.optional(),
   baseUrl: httpUrlSchema.optional(),
@@ -177,6 +195,9 @@ const fileConfigSchema = z.object({
   sandbox: sandboxFileSchema.optional(),
   undo: undoFileSchema.optional(),
   hooks: hooksFileSchema.optional(),
+  mcp: z.object({
+    servers: z.record(z.string().min(1).max(32).regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/), mcpServerFileSchema).optional(),
+  }).strict().optional(),
   models: z.record(z.string().min(1), modelFileSchema).optional(),
 }).strict();
 type FileConfig = z.infer<typeof fileConfigSchema>;
@@ -244,6 +265,7 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
     models[name] = {
       model,
       ...(raw.provider ?? previous.provider ? { provider: raw.provider ?? previous.provider } : {}),
+      ...(raw.protocol ?? previous.protocol ? { protocol: raw.protocol ?? previous.protocol } : {}),
       baseUrl,
       apiKeyEnv,
       thinking: raw.thinking ?? previous.thinking,
@@ -285,15 +307,20 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
         toolPost: parseHookScripts(hooks.tool_post ?? hooks.toolPost ?? []),
       }
       : base.hooks,
+    mcpServers: file.mcp?.servers
+      ? Object.entries(file.mcp.servers).map(([name, server]) => ({
+        name,
+        command: server.command,
+        ...(server.args ? { args: server.args } : {}),
+        ...(server.env ? { env: server.env } : {}),
+      }))
+      : base.mcpServers,
   };
   validateMergedConfig(merged);
   return merged;
 }
 
 function parseFileConfig(raw: unknown, source: string): FileConfig {
-  if (raw && typeof raw === "object" && "mcp" in raw) {
-    throw new Error(`${source}: MCP configuration is no longer supported`);
-  }
   const parsed = fileConfigSchema.safeParse(raw);
   if (!parsed.success) throw new Error(`${source}: ${z.prettifyError(parsed.error)}`);
   return parsed.data;
@@ -372,12 +399,18 @@ message_history = "truncate" # truncate or keep
 # tool_post = ["npm run verify:changed"]
 # tool_pre = [{ tool = "edit_file", command = "npm run lint:changed", timeout_seconds = 30 }]
 
+# MCP servers expose extra tools to the agent over stdio.
+# [mcp.servers.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
 # Example profile. Replace with your provider endpoint and credentials env var.
 # default_model = "my-model"
 # [models.my-model]
 # model = "your-model-id"
 # base_url = "https://api.example.com/v1"
 # api_key_env = "MY_PROVIDER_API_KEY"
+# protocol = "openai" # openai (chat completions) or anthropic (messages api)
 # thinking = false
 # context_window = 128000
 # max_output_tokens = 16384
