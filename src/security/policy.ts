@@ -142,9 +142,6 @@ function analyzeArgv(input: string[], trusted: boolean): {
   blocked?: string;
   verification: boolean;
 } {
-  if (input.some((arg) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(arg))) {
-    return { risk: "read", blocked: "shell environment assignments are blocked", verification: false };
-  }
   const argv = unwrapEnvironment(input);
   const program = basename(argv[0] ?? "");
   if (!program) return { risk: "read", blocked: "missing program", verification: false };

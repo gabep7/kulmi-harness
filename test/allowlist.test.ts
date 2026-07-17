@@ -48,6 +48,23 @@ describe("permission allowlist", () => {
     expect(matchesAllowlist(entries, "/repo", request({ tool: "shell" }))).toBe(false);
   });
 
+  it("does not allowlist or match compound commands from a permitted head", async () => {
+    expect(allowlistEntryFor("/repo", request({ command: "npm test && rm -rf /" }))).toBeUndefined();
+    expect(allowlistEntryFor("/repo", request({ command: "npm test || evil" }))).toBeUndefined();
+    expect(allowlistEntryFor("/repo", request({ command: "npm test | cat" }))).toBeUndefined();
+    expect(allowlistEntryFor("/repo", request({ command: "npm test; evil" }))).toBeUndefined();
+
+    const path = await allowlistFile();
+    await saveAllowlistEntry({ workspaceRoot: "/repo", tool: "shell", commandPrefix: "npm test" }, path);
+    const entries = await loadAllowlist(path);
+    expect(matchesAllowlist(entries, "/repo", request({ command: "npm test" }))).toBe(true);
+    expect(matchesAllowlist(entries, "/repo", request({ command: "npm test --watch" }))).toBe(true);
+    expect(matchesAllowlist(entries, "/repo", request({ command: "npm test && evil" }))).toBe(false);
+    expect(matchesAllowlist(entries, "/repo", request({ command: "npm test || evil" }))).toBe(false);
+    expect(matchesAllowlist(entries, "/repo", request({ command: "npm test | head" }))).toBe(false);
+    expect(matchesAllowlist(entries, "/repo", request({ command: "npm test; evil" }))).toBe(false);
+  });
+
   it("matches non-command tools by name and workspace", async () => {
     const path = await allowlistFile();
     await saveAllowlistEntry({ workspaceRoot: "/repo", tool: "write_file" }, path);

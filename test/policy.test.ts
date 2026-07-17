@@ -41,7 +41,6 @@ describe("command policy", () => {
     "python3 -m http.server",
     "git -c alias.x='!rm -rf src' x",
     "npm exec sh",
-    "DANGER=1 git status",
     "git commit -am done",
     "git branch new-branch",
     "echo bad >/etc/passwd",
@@ -87,5 +86,15 @@ describe("command policy", () => {
     expect(decideCommand("npm publish", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
     expect(decideCommand("npm run deploy", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
     expect(decideCommand("gh pr merge 12", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
+  it("allows mid-argv assignment words while still unwrapping leading env", () => {
+    expect(decideCommand("make CFLAGS=-O2", "medium").allowed).toBe(true);
+    expect(decideCommand("grep foo=bar file.txt", "read").allowed).toBe(true);
+    expect(decideCommand("FOO=bar git status", "read").allowed).toBe(true);
+    expect(decideCommand("DANGER=1 git status", "read").allowed).toBe(true);
+    expect(decideCommand("env FOO=bar git status", "read").allowed).toBe(true);
+    expect(decideCommand("FOO=bar git clean -fdx", "high")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("env FOO=bar git clean -fdx", "high")).toMatchObject({ allowed: false, risk: "blocked" });
   });
 });

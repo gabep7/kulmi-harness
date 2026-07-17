@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { parse } from "shell-quote";
 import type { PermissionRequest } from "../tools/types.js";
 
 export interface AllowlistEntry {
@@ -18,10 +19,11 @@ export function allowlistPath(): string {
 
 export function allowlistEntryFor(workspaceRoot: string, request: PermissionRequest): AllowlistEntry | undefined {
   if (request.risk === "high") return undefined;
-  const words = request.command?.trim().split(/\s+/).filter(Boolean) ?? [];
-  return words.length > 0
-    ? { workspaceRoot, tool: request.tool, commandPrefix: words.slice(0, 2).join(" ") }
-    : { workspaceRoot, tool: request.tool };
+  const command = request.command?.trim();
+  if (!command) return { workspaceRoot, tool: request.tool };
+  const commandPrefix = commandPrefixFor(command);
+  if (commandPrefix === undefined) return undefined;
+  return { workspaceRoot, tool: request.tool, commandPrefix };
 }
 
 export async function loadAllowlist(path = allowlistPath()): Promise<AllowlistEntry[]> {
@@ -68,6 +70,46 @@ export function matchesAllowlist(
     entry.tool === candidate.tool &&
     entry.commandPrefix === candidate.commandPrefix
   );
+}
+
+/** First ≤2 argv words of the sole parsed shell command; undefined if multi-command or unparseable. */
+function commandPrefixFor(command: string): string | undefined {
+  let entries;
+  try {
+    entries = parse(command, (key) => `$${key}`);
+  } catch {
+    return undefined;
+  }
+
+  const argv: string[] = [];
+  let skipNext = false;
+  for (const entry of entries) {
+    if (typeof entry === "string") {
+      if (skipNext) {
+        skipNext = false;
+        continue;
+      }
+      argv.push(entry);
+      continue;
+    }
+    if ("comment" in entry) break;
+    if (entry.op === "glob") {
+      if (skipNext) {
+        skipNext = false;
+        continue;
+      }
+      argv.push(entry.pattern);
+      continue;
+    }
+    if ([">", ">>", ">&", "<"].includes(entry.op)) {
+      skipNext = true;
+      continue;
+    }
+    // Any control operator (&&, ||, |, ;, …) means a compound/chained command.
+    return undefined;
+  }
+  if (argv.length === 0) return undefined;
+  return argv.slice(0, 2).join(" ");
 }
 
 function isAllowlistEntry(value: unknown): value is AllowlistEntry {
