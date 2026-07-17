@@ -1,10 +1,9 @@
-import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { SessionStore } from "../src/runtime/session-store.js";
+import { pruneSessions, SessionStore } from "../src/runtime/session-store.js";
 import { EventBus } from "../src/core/events.js";
-
 describe("SessionStore", () => {
   beforeEach(async () => {
     process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-session-data-"));
@@ -114,5 +113,43 @@ describe("SessionStore", () => {
     const workerStore = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
     await writeFile(join(workerStore.path, "workers.json"), JSON.stringify([{ id: "worker_bad" }]));
     await expect(SessionStore.open(workerStore.id)).rejects.toThrow("invalid worker state");
+  });
+
+  it("prunes sessions by max count and max age while keeping protected ids", async () => {
+    const keep = await SessionStore.create({ cwd: process.cwd(), model: "keep-model" });
+    const oldA = await SessionStore.create({ cwd: process.cwd(), model: "old-a" });
+    const oldB = await SessionStore.create({ cwd: process.cwd(), model: "old-b" });
+    const recent = await SessionStore.create({ cwd: process.cwd(), model: "recent" });
+
+    const ancient = new Date(Date.now() - 40 * 24 * 60 * 60 * 1_000).toISOString();
+    for (const store of [oldA, oldB]) {
+      const meta = JSON.parse(await readFile(join(store.path, "session.json"), "utf8")) as Record<string, unknown>;
+      meta.updatedAt = ancient;
+      meta.createdAt = ancient;
+      await writeFile(join(store.path, "session.json"), `${JSON.stringify(meta, null, 2)}\n`);
+    }
+
+    const removedByAge = await pruneSessions({
+      maxCount: 100,
+      maxAgeMs: 30 * 24 * 60 * 60 * 1_000,
+      keepIds: [keep.id],
+    });
+    expect(removedByAge.sort()).toEqual([oldA.id, oldB.id].sort());
+    await expect(access(oldA.path)).rejects.toThrow();
+    await expect(access(keep.path)).resolves.toBeUndefined();
+    await expect(access(recent.path)).resolves.toBeUndefined();
+
+    const extras = await Promise.all(
+      Array.from({ length: 3 }, () => SessionStore.create({ cwd: process.cwd(), model: "extra" })),
+    );
+    const removedByCount = await pruneSessions({
+      maxCount: 2,
+      maxAgeMs: 365 * 24 * 60 * 60 * 1_000,
+      keepIds: [keep.id],
+    });
+    expect(removedByCount.length).toBeGreaterThan(0);
+    await expect(access(keep.path)).resolves.toBeUndefined();
+    const survivors = [keep, recent, ...extras].filter((store) => !removedByCount.includes(store.id));
+    expect(survivors.length).toBeGreaterThanOrEqual(2);
   });
 });

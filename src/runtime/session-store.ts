@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile, appendFile, unlink } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile, appendFile, unlink, rm, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -93,6 +93,7 @@ export class SessionStore {
     const store = new SessionStore(path, metadata);
     await store.#writeMetadata();
     await store.saveMessages([]);
+    await pruneSessions({ keepIds: [id] }).catch(() => undefined);
     return store;
   }
 
@@ -228,25 +229,42 @@ export class SessionStore {
   }
 }
 
+export const DEFAULT_SESSION_MAX_COUNT = 100;
+export const DEFAULT_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
+
 export async function listSessions(limit = 20): Promise<SessionMetadata[]> {
-  const root = join(dataRoot(), "sessions");
-  if (!existsSync(root)) return [];
-  const { readdir } = await import("node:fs/promises");
-  const entries = await readdir(root, { withFileTypes: true });
-  const sessions: SessionMetadata[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    try {
-      sessions.push(
-        decodeMetadata(JSON.parse(await readFile(join(root, entry.name, "session.json"), "utf8"))).value,
-      );
-    } catch {
-      continue;
-    }
-  }
+  await pruneSessions().catch(() => undefined);
+  const sessions = await loadAllSessionMetadata();
   return sessions
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     .slice(0, limit);
+}
+
+export async function pruneSessions(options: {
+  maxCount?: number;
+  maxAgeMs?: number;
+  keepIds?: Iterable<string>;
+  now?: number;
+} = {}): Promise<string[]> {
+  const maxCount = options.maxCount ?? DEFAULT_SESSION_MAX_COUNT;
+  const maxAgeMs = options.maxAgeMs ?? DEFAULT_SESSION_MAX_AGE_MS;
+  const now = options.now ?? Date.now();
+  const keep = new Set(options.keepIds ?? []);
+  const sessions = await loadAllSessionMetadata();
+  sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
+  const removed: string[] = [];
+  for (let index = 0; index < sessions.length; index += 1) {
+    const session = sessions[index]!;
+    if (keep.has(session.id)) continue;
+    const ageMs = now - Date.parse(session.updatedAt);
+    const tooOld = Number.isFinite(ageMs) && ageMs > maxAgeMs;
+    const overCount = index >= maxCount;
+    if (!tooOld && !overCount) continue;
+    await rm(join(dataRoot(), "sessions", session.id), { recursive: true, force: true });
+    removed.push(session.id);
+  }
+  return removed;
 }
 
 export async function forkSession(id: string): Promise<SessionMetadata> {
@@ -275,6 +293,24 @@ export async function forkSession(id: string): Promise<SessionMetadata> {
   }
   await store.close("idle");
   return (await SessionStore.open(store.id)).session.metadata;
+}
+
+async function loadAllSessionMetadata(): Promise<SessionMetadata[]> {
+  const root = join(dataRoot(), "sessions");
+  if (!existsSync(root)) return [];
+  const entries = await readdir(root, { withFileTypes: true });
+  const sessions: SessionMetadata[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    try {
+      sessions.push(
+        decodeMetadata(JSON.parse(await readFile(join(root, entry.name, "session.json"), "utf8"))).value,
+      );
+    } catch {
+      continue;
+    }
+  }
+  return sessions;
 }
 
 function dataRoot(): string {
