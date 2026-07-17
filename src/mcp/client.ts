@@ -54,9 +54,19 @@ export async function connectMcpServers(
       errors.push(`mcp server ${config.name}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }));
+  const seen = new Set<string>();
+  const uniqueTools: AnyTool[] = [];
+  for (const tool of tools) {
+    if (seen.has(tool.name)) {
+      errors.push(`skipped duplicate tool name ${tool.name}`);
+      continue;
+    }
+    seen.add(tool.name);
+    uniqueTools.push(tool);
+  }
   let disposed: Promise<void> | undefined;
   return {
-    tools,
+    tools: uniqueTools,
     errors,
     dispose(): Promise<void> {
       disposed ??= Promise.allSettled(clients.map((client) => client.close())).then(() => undefined);
