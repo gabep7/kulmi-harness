@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SubagentScheduler } from "../src/agent/scheduler.js";
-
+import { SubagentScheduler, type WorkerJob } from "../src/agent/scheduler.js";
 describe("SubagentScheduler", () => {
   it("runs background workers and returns durable job state", async () => {
     const scheduler = new SubagentScheduler(2, async (job) => `result:${job.prompt}`);
@@ -180,5 +179,57 @@ describe("SubagentScheduler", () => {
         resultArtifactId: "artifact_worker_result",
       }),
     ]);
+  });
+
+  it("reclaims worktrees from failed and cancelled workers but keeps pending integrate worktrees", async () => {
+    const failed: WorkerJob = {
+      id: "worker_failed",
+      parentAgentId: "parent",
+      description: "failed job",
+      prompt: "fail",
+      mode: "implement",
+      status: "failed",
+      createdAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      collectedAt: new Date().toISOString(),
+      worktree: {
+        id: "worker_failed",
+        path: "/tmp/kulmi-worktree-failed",
+        branch: "kulmi/worker_failed",
+        baseCommit: "abc",
+      },
+    };
+    const pendingIntegrate: WorkerJob = {
+      id: "worker_pending",
+      parentAgentId: "parent",
+      description: "needs integrate",
+      prompt: "ship",
+      mode: "implement",
+      status: "completed",
+      createdAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      collectedAt: new Date().toISOString(),
+      worktree: {
+        id: "worker_pending",
+        path: "/tmp/kulmi-worktree-pending",
+        branch: "kulmi/worker_pending",
+        baseCommit: "def",
+      },
+    };
+    const restored = new SubagentScheduler(1, async () => "ok", undefined, undefined, [failed, pendingIntegrate]);
+    const reclaimed: string[] = [];
+    await restored.reclaimTerminalWorktrees(async (job, worktree) => {
+      reclaimed.push(`${job.id}:${worktree.path}`);
+    });
+    expect(reclaimed).toEqual(["worker_failed:/tmp/kulmi-worktree-failed"]);
+    expect(restored.jobs().find((job) => job.id === "worker_failed")?.worktree).toBeUndefined();
+    expect(restored.jobs().find((job) => job.id === "worker_pending")?.worktree?.path).toBe("/tmp/kulmi-worktree-pending");
+
+    const retryPaths: string[] = [];
+    await restored.reclaimJobWorktree("worker_pending", async (_job, worktree) => {
+      retryPaths.push(worktree.path);
+    });
+    expect(retryPaths).toEqual(["/tmp/kulmi-worktree-pending"]);
+    expect(restored.jobs().find((job) => job.id === "worker_pending")?.worktree).toBeUndefined();
   });
 });

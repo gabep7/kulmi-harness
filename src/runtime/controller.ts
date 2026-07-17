@@ -87,6 +87,7 @@ export class SessionController {
   #closed = false;
   readonly #processes: ProcessManager;
   readonly #mcp: McpConnection;
+  readonly #worktrees: WorktreeManager;
 
   private constructor(options: {
     events: EventBus;
@@ -103,6 +104,7 @@ export class SessionController {
     sandbox: SandboxConfig;
     processes: ProcessManager;
     mcp: McpConnection;
+    worktrees: WorktreeManager;
   }) {
     this.events = options.events;
     this.#providerRef = options.providerRef;
@@ -121,6 +123,7 @@ export class SessionController {
     this.searchMode = options.searchMode;
     this.#processes = options.processes;
     this.#mcp = options.mcp;
+    this.#worktrees = options.worktrees;
     this.events.on((envelope) => {
       if (envelope.event.type === "usage") {
         void this.#session.addUsage(envelope.event.usage).catch(() => undefined);
@@ -229,6 +232,30 @@ export class SessionController {
     const worktrees = new WorktreeManager(workspaceRoot);
     const activeWorkers = new Map<string, Agent>();
     let scheduler: SubagentScheduler;
+    const disposeJobWorktree = async (job: WorkerJob, reason: string): Promise<void> => {
+      const worktree = job.worktree;
+      if (!worktree) return;
+      delete job.worktree;
+      await worktrees.dispose(worktree).catch((error: unknown) =>
+        events.emit({
+          type: "notice",
+          agentId: job.parentAgentId,
+          message: `worker ${job.id} ${reason}: worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+        }).then(() => undefined)
+      );
+      await scheduler.persist();
+    };
+    const pruneTerminalWorkerWorktrees = async (): Promise<void> => {
+      await scheduler.reclaimTerminalWorktrees(async (job, worktree) => {
+        await worktrees.dispose(worktree).catch((error: unknown) =>
+          events.emit({
+            type: "notice",
+            agentId: job.parentAgentId,
+            message: `worker ${job.id} terminal cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+          }).then(() => undefined)
+        );
+      });
+    };
     const runWorker = async (job: WorkerJob, signal: AbortSignal): Promise<string> => {
       const worktree = job.mode === "implement" ? await worktrees.create(job.id) : undefined;
       if (worktree) {
@@ -294,11 +321,16 @@ export class SessionController {
       try {
         const result = await childAgent.run(job.prompt, signal);
         await childSession.close(result.status);
+        if (result.status === "failed" || result.status === "cancelled") {
+          await disposeJobWorktree(job, "finished without success");
+          return result.text;
+        }
         return worktree
           ? `${result.text}\n\nWorktree ready for integration: ${worktree.path}`
           : result.text;
       } catch (error) {
         await childSession.close(signal.aborted ? "cancelled" : "failed");
+        await disposeJobWorktree(job, signal.aborted ? "cancelled" : "failed");
         throw error;
       } finally {
         activeWorkers.delete(job.id);
@@ -309,6 +341,7 @@ export class SessionController {
       const worktree = job.worktree;
       if (!worktree) throw new Error(`worker ${job.id} has no worktree`);
       const integrated = await worktrees.integrate(worktree, rootCheckpoint);
+      delete job.worktree;
       await worktrees.dispose(worktree).catch((error: unknown) =>
         events.emit({
           type: "notice",
@@ -338,6 +371,7 @@ export class SessionController {
       (job, result) => rootArtifacts.materialize("worker", job.id, result),
     );
     await scheduler.persist();
+    await pruneTerminalWorkerWorktrees();
 
     const rootTools: AnyTool[] = [
       ...(autonomy === "read" ? fileTools().filter((tool) => tool.readOnly) : fileTools()),
@@ -410,6 +444,7 @@ export class SessionController {
       autonomy,
       processes,
       mcp,
+      worktrees,
     });
   }
 
@@ -443,6 +478,7 @@ export class SessionController {
       return result;
     } catch (error) {
       await this.#scheduler.cancelAll("parent agent failed");
+      await this.#reclaimTerminalWorktrees();
       await this.#session.setStatus(signal.aborted ? "cancelled" : "failed");
       throw error;
     }
@@ -454,6 +490,7 @@ export class SessionController {
     this.#runAbort?.abort(new Error("session closed"));
     await this.#running?.catch(() => undefined);
     await this.#scheduler.cancelAll();
+    await this.#reclaimTerminalWorktrees();
     this.#processes.disposeAll();
     disposeLspClients();
     await this.#mcp.dispose().catch(() => undefined);
@@ -512,11 +549,22 @@ export class SessionController {
     this.#agent.steer(message);
   }
 
-  cancelWorker(jobId: string): Promise<string> {
-    return this.#scheduler.cancel(jobId);
+  async cancelWorker(jobId: string): Promise<string> {
+    const result = await this.#scheduler.cancel(jobId);
+    await this.#reclaimTerminalWorktrees();
+    return result;
   }
 
-  retryWorker(jobId: string, signal: AbortSignal): Promise<string> {
+  async retryWorker(jobId: string, signal: AbortSignal): Promise<string> {
+    await this.#scheduler.reclaimJobWorktree(jobId, async (job, worktree) => {
+      await this.#worktrees.dispose(worktree).catch((error: unknown) =>
+        this.events.emit({
+          type: "notice",
+          agentId: job.parentAgentId,
+          message: `worker ${job.id} retry cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+        }).then(() => undefined)
+      );
+    });
     return this.#scheduler.retry(jobId, signal);
   }
 
@@ -606,5 +654,17 @@ export class SessionController {
 
   integrateWorker(jobId: string): Promise<string> {
     return this.#scheduler.integrate(jobId);
+  }
+
+  async #reclaimTerminalWorktrees(): Promise<void> {
+    await this.#scheduler.reclaimTerminalWorktrees(async (job, worktree) => {
+      await this.#worktrees.dispose(worktree).catch((error: unknown) =>
+        this.events.emit({
+          type: "notice",
+          agentId: job.parentAgentId,
+          message: `worker ${job.id} terminal cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+        }).then(() => undefined)
+      );
+    });
   }
 }

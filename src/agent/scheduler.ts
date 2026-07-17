@@ -183,6 +183,34 @@ export class SubagentScheduler implements SubagentApi {
     });
   }
 
+  async reclaimJobWorktree(
+    jobId: string,
+    dispose: (job: WorkerJob, worktree: NonNullable<WorkerJob["worktree"]>) => Promise<void>,
+  ): Promise<void> {
+    const job = this.#jobs.get(jobId);
+    if (!job?.worktree) return;
+    const worktree = job.worktree;
+    delete job.worktree;
+    await dispose(job, worktree);
+    await this.persist();
+  }
+
+  async reclaimTerminalWorktrees(
+    dispose: (job: WorkerJob, worktree: NonNullable<WorkerJob["worktree"]>) => Promise<void>,
+  ): Promise<void> {
+    let changed = false;
+    for (const job of this.#jobs.values()) {
+      if (!job.worktree) continue;
+      if (job.status === "queued" || job.status === "running") continue;
+      if (job.mode === "implement" && job.status === "completed" && !job.integratedAt) continue;
+      const worktree = job.worktree;
+      delete job.worktree;
+      changed = true;
+      await dispose(job, worktree);
+    }
+    if (changed) await this.persist();
+  }
+
   async steer(jobId: string, message: string): Promise<string> {
     const job = this.#jobs.get(jobId);
     if (!job) throw new Error(`unknown worker ${jobId}`);
