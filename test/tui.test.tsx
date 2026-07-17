@@ -7,7 +7,7 @@ import { TuiStore } from "../src/tui/store.js";
 afterEach(cleanup);
 
 describe("Kulmi TUI", () => {
-  it("renders a focused working view with plan, tools, and telemetry", async () => {
+  it("renders a focused working view with plan and tools", async () => {
     const bus = new EventBus();
     const store = new TuiStore();
     store.attach(bus);
@@ -18,7 +18,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="free"
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -55,15 +54,14 @@ describe("Kulmi TUI", () => {
     });
     await pause();
     const frame = view.frames.join("\n");
-    expect(frame).toContain("◆ kulmi");
+    expect(frame).toContain("test-model");
     expect(frame).toContain("Improve the cache layer");
     expect(frame).toContain("Read file");
     expect(frame).toContain("Audit cache behavior");
-    expect(frame).toContain("1.1k processed");
-    expect(frame).toContain("200 fresh");
-    expect(frame).toContain("800 cached");
-    expect(frame).toContain("80%");
-    expect(frame).toContain("100 out");
+    expect(frame).toContain("chat");
+    expect(frame).not.toContain("processed");
+    expect(frame).not.toContain("fresh");
+    expect(frame).not.toContain("cached");
     expect(frame).toContain("1 changed file");
     expect(frame).toContain("src/cache.ts");
     expect(frame).toContain("npm test");
@@ -85,7 +83,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="off"
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -108,7 +105,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="off"
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -130,7 +126,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="free"
         onSubmit={() => new Promise<void>((resolve) => { finishRun = resolve; })}
         onCommand={async () => undefined}
         onCancel={cancel}
@@ -165,7 +160,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="off"
         onSubmit={() => new Promise<void>((resolve) => { finishRun = resolve; })}
         onCommand={async () => undefined}
         onSteer={steer}
@@ -202,7 +196,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="off"
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onAlwaysAllow={always}
@@ -227,7 +220,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="off"
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onAlwaysAllow={always}
@@ -252,7 +244,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="off"
         customCommands={[{ name: "/deploy", description: "Deploy the app" }, { name: "/help", description: "shadowed" }]}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
@@ -278,7 +269,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="free"
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -303,7 +293,6 @@ describe("Kulmi TUI", () => {
       sessionId: "session_fedcba0987654321",
       cwd: "/workspace/kulmi",
       autonomy: "medium" as const,
-      search: "free" as const,
       mode: "task" as const,
     }));
     const view = render(
@@ -313,7 +302,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="free"
         onSubmit={async () => undefined}
         onCommand={async (command) => command === "/sessions" ? {
           sessions: [
@@ -336,7 +324,7 @@ describe("Kulmi TUI", () => {
     view.stdin.write("\r");
     await pause(100);
     expect(switchSession).toHaveBeenCalledWith("session_fedcba0987654321");
-    expect(view.lastFrame()).toContain("test-model  ·  fedcba09");
+    expect(view.lastFrame()).toContain("test-model");
     expect(view.lastFrame()).toContain("goal");
   });
 
@@ -351,7 +339,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="free"
         onSubmit={submit}
         onCommand={command}
         onCancel={() => undefined}
@@ -400,6 +387,56 @@ describe("Kulmi TUI", () => {
     expect(store.getSnapshot().live.some((item) => item.kind === "worker")).toBe(true);
   });
 
+  it("surfaces worker activity instead of flooding the parent tool feed", async () => {
+    const bus = new EventBus();
+    const store = new TuiStore();
+    store.attach(bus);
+    await bus.emit({ type: "agent.started", agentId: "root", prompt: "parent" });
+    await bus.emit({
+      type: "agent.started",
+      agentId: "worker_1",
+      parentAgentId: "root",
+      prompt: "Worker preset: security.\n- Inspect scope.\n\nAudit auth.ts",
+    });
+    await bus.emit({
+      type: "tool.started",
+      agentId: "worker_1",
+      callId: "call_w1",
+      tool: "read_file",
+      input: { path: "src/auth.ts" },
+    });
+    await pause();
+    const live = store.getSnapshot().live;
+    expect(live.some((item) => item.kind === "tool")).toBe(false);
+    const worker = live.find((item) => item.kind === "worker" && item.id === "worker_1");
+    expect(worker?.kind).toBe("worker");
+    if (worker?.kind !== "worker") throw new Error("expected worker");
+    expect(worker.title).toContain("Audit auth.ts");
+    expect(worker.activity).toContain("Read file");
+    expect(worker.activity).toContain("src/auth.ts");
+
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        onSubmit={async () => undefined}
+        onCommand={async () => undefined}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    await pause();
+    const frame = view.lastFrame() ?? "";
+    expect(frame).toContain("agents");
+    expect(frame).toContain("1/1 running");
+    expect(frame).toContain("agent");
+    expect(frame).toContain("Read file");
+    expect(frame).toContain("1 agent");
+  });
+
   it("renders a long assistant message in full without truncating", async () => {
     const bus = new EventBus();
     const store = new TuiStore();
@@ -415,7 +452,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="free"
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -497,7 +533,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="free"
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -536,7 +571,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="off"
         onSubmit={() => new Promise<void>((resolve) => { finishRun = resolve; })}
         onCommand={async () => undefined}
         onCancel={cancel}
@@ -566,7 +600,6 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
-        search="off"
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}

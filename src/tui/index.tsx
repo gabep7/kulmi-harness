@@ -155,7 +155,6 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       sessionId={controller.sessionId}
       cwd={controller.workspaceRoot}
       autonomy={controller.autonomy}
-      search={controller.searchMode}
       mode={controller.mode}
       customCommands={discoverCommands(controller.workspaceRoot).map((definition) => ({ name: `/${definition.name}`, description: definition.preview }))}
       onSubmit={submit}
@@ -211,7 +210,6 @@ function runtimeInfo(controller: SessionController): TuiRuntimeInfo {
     sessionId: controller.sessionId,
     cwd: controller.workspaceRoot,
     autonomy: controller.autonomy,
-    search: controller.searchMode,
     mode: controller.mode,
   };
 }

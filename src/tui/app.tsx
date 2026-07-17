@@ -11,7 +11,6 @@ export interface TuiAppProps {
   sessionId: string;
   cwd: string;
   autonomy: AutonomyLevel;
-  search: "off" | "free";
   mode?: AgentMode;
   customCommands?: ReadonlyArray<{ name: string; description: string }>;
   onSubmit: (prompt: string) => Promise<void>;
@@ -46,7 +45,6 @@ export interface TuiRuntimeInfo {
   sessionId: string;
   cwd: string;
   autonomy: AutonomyLevel;
-  search: "off" | "free";
   mode: AgentMode;
 }
 
@@ -93,7 +91,6 @@ export function TuiApp(props: TuiAppProps) {
     sessionId: props.sessionId,
     cwd: props.cwd,
     autonomy: props.autonomy,
-    search: props.search,
     mode: props.mode ?? "chat",
   });
 
@@ -303,8 +300,25 @@ export function TuiApp(props: TuiAppProps) {
       <Box flexDirection="column" paddingX={1}>
         {idle && <Welcome width={width} />}
 
-        {snapshot.live.length > 8 && <Text color={theme.faint}>  +{snapshot.live.length - 8} more running…</Text>}
-        {snapshot.live.slice(-8).map((item) => <FeedRow key={item.id} item={item} width={width} />)}
+        {(() => {
+          const tools = snapshot.live.filter((item) => item.kind === "tool");
+          const workers = snapshot.live.filter((item): item is Extract<FeedItem, { kind: "worker" }> => item.kind === "worker");
+          const runningAgents = workers.filter((item) => item.status === "running").length;
+          return (
+            <>
+              {tools.length > 8 && <Text color={theme.faint}>  +{tools.length - 8} more tools…</Text>}
+              {tools.slice(-8).map((item) => <FeedRow key={item.id} item={item} width={width} />)}
+              {workers.length > 0 && (
+                <Box marginTop={1} flexDirection="column">
+                  <Text color={theme.sand} bold>
+                    agents  <Text color={theme.faint}>{runningAgents}/{workers.length} running</Text>
+                  </Text>
+                  {workers.map((item) => <FeedRow key={item.id} item={item} width={width} />)}
+                </Box>
+              )}
+            </>
+          );
+        })()}
 
         {snapshot.reasoning && <Thinking text={snapshot.reasoning} expanded={snapshot.expandedThinking} width={width} />}
 
@@ -331,7 +345,7 @@ export function TuiApp(props: TuiAppProps) {
               ? <ModelPicker models={models} cursor={modelCursor} />
               : <Composer value={input} onChange={setInput} onSubmit={submit} busy={busy} />}
 
-        <Footer runtime={runtime} status={snapshot.status} usage={snapshot.usage} busy={busy} />
+        <Footer runtime={runtime} status={snapshot.status} busy={busy} agents={snapshot.live.filter((item) => item.kind === "worker").length} />
       </Box>
     </Box>
   );
@@ -372,9 +386,20 @@ function FeedRow({ item, width }: { item: FeedItem; width: number }) {
     </Box>
   );
   if (item.kind === "worker") return (
-    <Box paddingLeft={2}>
-      <Text color={statusColor(item.status)}>{item.status === "running" ? glyph.active : item.status === "completed" ? glyph.success : glyph.error} </Text>
-      <Text color={theme.muted}>worker</Text><Text color={theme.faint}>  {clampLine(item.title, width - 12)}</Text>
+    <Box paddingLeft={2} flexDirection="column">
+      <Box>
+        <Text color={statusColor(item.status)}>
+          {item.status === "running" ? glyph.active : item.status === "completed" ? glyph.success : glyph.error}
+          {" "}
+        </Text>
+        <Text color={theme.muted}>agent</Text>
+        <Text color={theme.faint}>  {clampLine(item.title, Math.max(16, width - 14))}</Text>
+      </Box>
+      {item.activity && (
+        <Text color={item.status === "running" ? theme.caramel : theme.faint}>
+          {"    "}{clampLine(item.activity, Math.max(16, width - 8))}
+        </Text>
+      )}
     </Box>
   );
   return <Box paddingLeft={2}><Text color={item.kind === "error" ? theme.rose : theme.faint}>{item.kind === "error" ? "×" : "·"} {item.text.trim()}</Text></Box>;
@@ -585,18 +610,14 @@ function MarkdownBlock({ text, width }: { text: string; width: number }) {
   );
 }
 
-function Footer({ runtime, status, usage, busy }: { runtime: TuiRuntimeInfo; status: string; usage: ReturnType<TuiStore["getSnapshot"]>["usage"]; busy: boolean }) {
-  const cacheInput = usage.cacheHitTokens + usage.cacheMissTokens;
-  const cacheRate = cacheInput > 0 ? Math.round(usage.cacheHitTokens / cacheInput * 100) : 0;
+function Footer({ runtime, status, busy, agents }: { runtime: TuiRuntimeInfo; status: string; busy: boolean; agents: number }) {
   return (
-    <Box flexDirection="column">
-      <Box justifyContent="space-between">
-        <Text color={theme.faint} wrap="truncate-end">{glyph.brand} kulmi  ·  <Text color={statusColor(status)}>{status}</Text>  ·  {runtime.mode === "task" ? "goal" : "chat"}  ·  {busy ? "esc stop" : "? help"}  ·  {autonomyLabel(runtime.autonomy)}  ·  search {runtime.search}</Text>
-      </Box>
-      <Box justifyContent="space-between">
-        <Text color={theme.faint} wrap="truncate-end">{runtime.model}  ·  {runtime.sessionId.replace("session_", "").slice(0, 8)}</Text>
-        <Text color={theme.faint}>{compactNumber(usage.totalTokens)} processed  ·  <Text color={theme.ink}>{compactNumber(usage.cacheMissTokens)} fresh</Text>  ·  <Text color={usage.cacheHitTokens > 0 ? theme.sage : theme.muted}>{compactNumber(usage.cacheHitTokens)} cached ({cacheRate}%)</Text>  ·  {compactNumber(usage.completionTokens)} out</Text>
-      </Box>
+    <Box>
+      <Text color={theme.faint} wrap="truncate-end">
+        {runtime.model}  ·  <Text color={statusColor(status)}>{status}</Text>  ·  {runtime.mode === "task" ? "goal" : "chat"}  ·  {autonomyLabel(runtime.autonomy)}
+        {agents > 0 ? `  ·  ${agents} agent${agents === 1 ? "" : "s"}` : ""}
+        {"  ·  "}{busy ? "esc stop" : "? help"}
+      </Text>
     </Box>
   );
 }
@@ -653,11 +674,6 @@ function formatDuration(milliseconds: number): string {
   return milliseconds < 1_000 ? `${milliseconds}ms` : `${(milliseconds / 1_000).toFixed(1)}s`;
 }
 
-function compactNumber(value: number): string {
-  if (value < 1_000) return String(value);
-  if (value < 1_000_000) return `${(value / 1_000).toFixed(1)}k`;
-  return `${(value / 1_000_000).toFixed(1)}m`;
-}
 
 function autonomyLabel(value: AutonomyLevel): string {
   if (value === "read") return "inspect";

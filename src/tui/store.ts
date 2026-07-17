@@ -6,7 +6,7 @@ import type { PermissionRequest } from "../tools/types.js";
 export type FeedItem =
   | { id: string; kind: "user" | "assistant" | "notice" | "error"; text: string }
   | { id: string; kind: "tool"; title: string; detail: string; diff?: string; status: "running" | "done" | "error"; durationMs?: number }
-  | { id: string; kind: "worker"; title: string; status: AgentStatus };
+  | { id: string; kind: "worker"; title: string; status: AgentStatus; activity?: string };
 
 export interface PendingApproval {
   request: PermissionRequest;
@@ -144,7 +144,13 @@ export class TuiStore {
     switch (event.type) {
       case "agent.started":
         if (event.parentAgentId) {
-          this.#startLive({ id: event.agentId, kind: "worker", title: shortPrompt(event.prompt), status: "running" });
+          this.#startLive({
+            id: event.agentId,
+            kind: "worker",
+            title: shortPrompt(event.prompt),
+            status: "running",
+            activity: "starting",
+          });
         } else {
           this.#rootAgentId = event.agentId;
           const last = this.#snapshot.transcript.at(-1);
@@ -157,39 +163,66 @@ export class TuiStore {
         break;
       case "agent.finished":
         if (this.#snapshot.live.some((item) => item.id === event.agentId && item.kind === "worker")) {
-          this.#finalizeLive(event.agentId, (item) => item.kind === "worker" ? { ...item, status: event.status } : item);
+          this.#finalizeLive(event.agentId, (item) => {
+            if (item.kind !== "worker") return item;
+            const { activity: _activity, ...rest } = item;
+            return { ...rest, status: event.status };
+          });
         } else if (this.#isRoot(event.agentId)) {
           this.#update({ status: event.status });
         }
         break;
       case "assistant.reasoning.delta":
-        if (!this.#isRoot(event.agentId)) break;
+        if (!this.#isRoot(event.agentId)) {
+          this.#patchWorker(event.agentId, { activity: "thinking" });
+          break;
+        }
         this.#update({ reasoning: this.#snapshot.reasoning + event.text });
         break;
       case "assistant.text.delta":
-        if (!this.#isRoot(event.agentId)) break;
+        if (!this.#isRoot(event.agentId)) {
+          this.#patchWorker(event.agentId, { activity: "writing" });
+          break;
+        }
         this.#update({ streaming: this.#snapshot.streaming + event.text });
         break;
       case "assistant.message": {
-        if (!this.#isRoot(event.agentId)) break;
+        if (!this.#isRoot(event.agentId)) {
+          this.#patchWorker(event.agentId, { activity: "working" });
+          break;
+        }
         const text = event.text || this.#snapshot.streaming;
         if (text) this.#commit({ id: `assistant-${envelope.sequence}`, kind: "assistant", text }, { streaming: "", reasoning: "" });
         else this.#update({ streaming: "", reasoning: "" });
         break;
       }
-      case "tool.started":
+      case "tool.started": {
+        const detail = toolDetail(event.input);
+        const activity = detail ? `${friendlyTool(event.tool)}  ${detail}` : friendlyTool(event.tool);
+        if (!this.#isRoot(event.agentId)) {
+          this.#patchWorker(event.agentId, { activity });
+          break;
+        }
         this.#startLive({
           id: event.callId,
           kind: "tool",
           title: friendlyTool(event.tool),
-          detail: toolDetail(event.input),
+          detail,
           status: "running",
         });
         break;
+      }
       case "tool.finished":
-        if (event.tool === "complete_task" && !event.isError) {
+        if (event.tool === "complete_task" && !event.isError && this.#isRoot(event.agentId)) {
           const completion = parseCompletion(event.output);
           if (completion) this.#update({ completion });
+        }
+        if (!this.#isRoot(event.agentId)) {
+          const label = friendlyTool(event.tool);
+          this.#patchWorker(event.agentId, {
+            activity: event.isError ? `failed  ${label}` : `done  ${label}`,
+          });
+          break;
         }
         if (this.#snapshot.live.some((item) => item.id === event.callId)) {
           this.#finalizeLive(event.callId, (item) => item.kind === "tool"
@@ -236,6 +269,20 @@ export class TuiStore {
       ...patch,
       transcript: [...this.#snapshot.transcript, item],
     }, immediate);
+  }
+
+  #patchWorker(agentId: string, patch: { activity?: string; status?: AgentStatus }): void {
+    let changed = false;
+    const live = this.#snapshot.live.map((item) => {
+      if (item.kind !== "worker" || item.id !== agentId) return item;
+      changed = true;
+      return {
+        ...item,
+        ...(patch.status ? { status: patch.status } : {}),
+        ...(patch.activity !== undefined ? { activity: patch.activity } : {}),
+      };
+    });
+    if (changed) this.#update({ live });
   }
 
   #startLive(item: FeedItem): void {
@@ -370,7 +417,11 @@ function toolDetail(input: unknown): string {
 }
 
 function shortPrompt(value: string): string {
-  return value.replace(/\s+/g, " ").slice(0, 72);
+  const cleaned = value
+    .replace(/^Worker preset:\s*\w+\.[\s\S]*?(?=\n\n|\n[A-Z]|$)/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (cleaned || value.replace(/\s+/g, " ").trim()).slice(0, 72);
 }
 
 function compactError(value: string): string {
