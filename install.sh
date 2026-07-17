@@ -48,7 +48,7 @@ download_url() {
   url="$1"
   destination="$2"
   partial="$destination.part"
-  http_code="$(curl --fail --location --silent --show-error --output "$partial" --write-out '%{http_code}' "$url")" && {
+  http_code="$(curl --proto '=https' --fail --location --silent --show-error --output "$partial" --write-out '%{http_code}' "$url")" && {
     mv "$partial" "$destination"
     return 0
   }
@@ -151,7 +151,16 @@ major="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$major" -ge 22 ] || fail "Node.js 22 or newer is required, found $(node --version)"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/kulmi-install.XXXXXX")"
+backup=""
 cleanup() {
+  # If the old install was moved aside but the new one never landed, restore it
+  # before deleting the temp dir (which holds the backup). Ctrl-C mid-swap must
+  # not destroy both copies.
+  if [ -n "${backup:-}" ] && { [ -e "$backup" ] || [ -L "$backup" ]; }; then
+    if [ ! -e "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ]; then
+      mv "$backup" "$INSTALL_DIR" 2>/dev/null || true
+    fi
+  fi
   if [ "${KULMI_KEEP_INSTALL_TEMP:-0}" != "1" ]; then
     rm -rf "$work"
   fi
@@ -271,7 +280,14 @@ fi
 
 ln -sfn "$INSTALL_DIR/dist/cli.js" "$BIN_DIR/kulmi"
 
-path_line='export PATH="$HOME/.local/bin:$PATH"'
+case "$BIN_DIR" in
+  "$HOME"/*)
+    path_line="export PATH=\"\$HOME${BIN_DIR#"$HOME"}:\$PATH\""
+    ;;
+  *)
+    path_line="export PATH=\"$BIN_DIR:\$PATH\""
+    ;;
+esac
 path_updated=0
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
@@ -294,6 +310,6 @@ esac
 printf 'Kulmi %s in %s\n' "$install_kind" "$INSTALL_DIR"
 printf 'Run: kulmi\n'
 if [ "$path_updated" -eq 1 ]; then
-  printf 'Open a new terminal first, or run: export PATH="$HOME/.local/bin:$PATH"\n'
+  printf 'Open a new terminal first, or run: %s\n' "$path_line"
 fi
 printf 'Then run `kulmi init` and define a model profile with base_url and api_key_env.\n'

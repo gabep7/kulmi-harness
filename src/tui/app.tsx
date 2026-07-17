@@ -1,6 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
-import TextInput from "ink-text-input";
 import type { AgentMode, AutonomyLevel, PlanStep } from "../core/types.js";
 import type { PermissionRequest } from "../tools/types.js";
 import type { CompletionSummary, TuiStore, FeedItem } from "./store.js";
@@ -190,15 +189,26 @@ export function TuiApp(props: TuiAppProps) {
       }
       return;
     }
-    if (key.escape && busy) props.onCancel();
+    if (key.escape) {
+      if (help) {
+        setHelp(false);
+        return;
+      }
+      if (busy) props.onCancel();
+      return;
+    }
     if (key.ctrl && value === "c") {
       if (busy) props.onCancel();
       else {
         props.onExit();
         exit();
       }
+      return;
     }
-    if (key.ctrl && value === "o") props.store.toggleThinking();
+    if (key.ctrl && value === "o") {
+      props.store.toggleThinking();
+      return;
+    }
     if (key.shift && key.tab && !busy && props.onCycleAutonomy) {
       setBusy(true);
       void props.onCycleAutonomy().then((next) => {
@@ -209,7 +219,10 @@ export function TuiApp(props: TuiAppProps) {
       }).finally(() => setBusy(false));
       return;
     }
-    if (value === "?" && input.length === 0) setHelp((shown) => !shown);
+    if (value === "?" && input.length === 0) {
+      setHelp((shown) => !shown);
+      return;
+    }
   });
 
   const submit = async (raw: string) => {
@@ -406,14 +419,31 @@ function CompletionBlock({ completion }: { completion: CompletionSummary }) {
 }
 
 function Composer({ value, onChange, onSubmit, busy }: { value: string; onChange: (value: string) => void; onSubmit: (value: string) => void; busy: boolean }) {
+  useInput((input, key) => {
+    if (key.ctrl || key.meta || key.tab || key.escape || key.upArrow || key.downArrow) return;
+    if (key.return) {
+      onSubmit(value);
+      return;
+    }
+    if (key.backspace || key.delete) {
+      if (value.length > 0) onChange(value.slice(0, -1));
+      return;
+    }
+    if (!input) return;
+    // Parent owns the empty-"?" help hotkey; never insert it into the composer.
+    if (input === "?" && value.length === 0) return;
+    onChange(value + input);
+  });
+  const placeholder = busy ? "Kulmi is working. Enter to steer, Esc to stop." : "What should we build?";
   return (
     <Box marginTop={busy ? 0 : 1} borderStyle="round" borderColor={busy ? theme.faint : theme.cocoa} paddingX={1}>
       <Text color={busy ? theme.faint : theme.caramel}>{glyph.user} </Text>
-      <TextInput value={value} onChange={onChange} onSubmit={onSubmit} placeholder={busy ? "Kulmi is working. Enter to steer, Esc to stop." : "What should we build?"} />
+      {value.length > 0
+        ? <Text>{value}</Text>
+        : <Text color={theme.faint}>{placeholder}</Text>}
     </Box>
   );
 }
-
 
 const loadingMessage = "thinking";
 
@@ -423,7 +453,7 @@ function useLoadingStatus(active: boolean): { icon: string; message: string } {
   const [tick, setTick] = useState(0);
   useEffect(() => {
     if (!active) return;
-    const timer = setInterval(() => setTick((value) => value + 1), 140);
+    const timer = setInterval(() => setTick((value) => value + 1), 80);
     return () => clearInterval(timer);
   }, [active]);
   return {

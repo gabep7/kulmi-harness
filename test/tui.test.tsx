@@ -510,6 +510,82 @@ describe("Kulmi TUI", () => {
     expect(frame).toContain("--- a/src/10.ts");
     expect(frame).toContain("+new");
   });
+
+  it("keeps the transcript append-only past the former static cap", async () => {
+    const bus = new EventBus();
+    const store = new TuiStore();
+    store.attach(bus);
+    for (let index = 0; index < 1_005; index += 1) {
+      await bus.emit({ type: "notice", message: `notice-${index}` });
+    }
+    await pause();
+    const transcript = store.getSnapshot().transcript;
+    expect(transcript).toHaveLength(1_005);
+    expect(transcript[0]).toMatchObject({ kind: "notice", text: "notice-0" });
+    expect(transcript.at(-1)).toMatchObject({ kind: "notice", text: "notice-1004" });
+  });
+
+  it("closes help with escape without cancelling a busy run", async () => {
+    const store = new TuiStore();
+    const cancel = vi.fn();
+    let finishRun: (() => void) | undefined;
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        search="off"
+        onSubmit={() => new Promise<void>((resolve) => { finishRun = resolve; })}
+        onCommand={async () => undefined}
+        onCancel={cancel}
+        onExit={() => undefined}
+      />,
+    );
+    view.stdin.write("inspect this repo");
+    await pause();
+    view.stdin.write("\r");
+    await pause();
+    view.stdin.write("?");
+    await pause();
+    expect(view.lastFrame() ?? "").toContain("commands");
+    view.stdin.write("\u001b");
+    await pause();
+    expect(cancel).not.toHaveBeenCalled();
+    expect(view.lastFrame() ?? "").not.toContain("commands");
+    finishRun?.();
+  });
+
+  it("does not leak help or thinking hotkeys into the composer", async () => {
+    const store = new TuiStore();
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        search="off"
+        onSubmit={async () => undefined}
+        onCommand={async () => undefined}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    view.stdin.write("?");
+    await pause();
+    expect(view.lastFrame() ?? "").toContain("commands");
+    view.stdin.write("?");
+    await pause();
+    expect(view.lastFrame() ?? "").toContain("What should we build?");
+    expect(view.lastFrame() ?? "").not.toMatch(/› \?/);
+    view.stdin.write("\u000f");
+    await pause();
+    expect(store.getSnapshot().expandedThinking).toBe(true);
+    expect(view.lastFrame() ?? "").toContain("What should we build?");
+    expect(view.lastFrame() ?? "").not.toMatch(/› o/);
+  });
 });
 
 function pause(ms = 50): Promise<void> {

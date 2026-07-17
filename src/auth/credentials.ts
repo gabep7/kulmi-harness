@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig } from "../config/config.js";
 
@@ -22,15 +22,61 @@ export interface Keychain {
 type SecurityRunner = (
   file: string,
   args: string[],
-  options: { encoding: "utf8"; timeout: number },
+  options: { encoding: "utf8"; timeout: number; input?: string },
 ) => Promise<{ stdout: string; stderr: string }>;
+
+function defaultSecurityRunner(
+  file: string,
+  args: string[],
+  options: { encoding: "utf8"; timeout: number; input?: string },
+): Promise<{ stdout: string; stderr: string }> {
+  if (options.input === undefined) {
+    return execFileAsync(file, args, { encoding: options.encoding, timeout: options.timeout });
+  }
+  const { promise, resolve, reject } = Promise.withResolvers<{ stdout: string; stderr: string }>();
+  const child = spawn(file, args, { stdio: ["pipe", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  let settled = false;
+  const timer = setTimeout(() => {
+    child.kill("SIGTERM");
+  }, options.timeout);
+  child.stdout.setEncoding(options.encoding);
+  child.stderr.setEncoding(options.encoding);
+  child.stdout.on("data", (chunk: string) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  child.on("error", (error) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    reject(error);
+  });
+  child.on("close", (code, signal) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    if (code === 0) {
+      resolve({ stdout, stderr });
+      return;
+    }
+    const error = new Error(`Command failed: ${file} ${args.join(" ")}`);
+    Object.assign(error, { code, signal, stdout, stderr });
+    reject(error);
+  });
+  child.stdin.end(options.input);
+  return promise;
+}
 
 export class MacKeychain implements Keychain {
   readonly #run: SecurityRunner;
   readonly #platform: NodeJS.Platform;
 
   constructor(options: { run?: SecurityRunner; platform?: NodeJS.Platform } = {}) {
-    this.#run = options.run ?? (execFileAsync as SecurityRunner);
+    this.#run = options.run ?? defaultSecurityRunner;
     this.#platform = options.platform ?? process.platform;
   }
 
@@ -58,8 +104,8 @@ export class MacKeychain implements Keychain {
         "-U",
         "-s", keychainService,
         "-a", account,
-        "-w", key,
-      ], { encoding: "utf8", timeout: 5_000 });
+        "-w",
+      ], { encoding: "utf8", timeout: 5_000, input: `${key}\n${key}\n` });
       return true;
     } catch {
       return false;

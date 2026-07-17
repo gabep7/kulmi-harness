@@ -51,15 +51,16 @@ beforeAll(async () => {
     "destination=",
     "write_out=0",
     "url=",
+    "printf '%s\\n' \"$*\" >> \"$FAKE_CURL_LOG\"",
     "while [ \"$#\" -gt 0 ]; do",
     "  case \"$1\" in",
     "    --output|-o) destination=$2; shift 2 ;;",
     "    --write-out) write_out=1; shift 2 ;;",
+    "    --proto) shift 2 ;;",
     "    --fail|--location|--silent|--show-error) shift ;;",
     "    *) url=$1; shift ;;",
     "  esac",
     "done",
-    "printf '%s\\n' \"$url\" >> \"$FAKE_CURL_LOG\"",
     "if [ \"$url\" = \"$KULMI_RELEASE_URL\" ]; then",
     "  if [ \"$FAKE_RELEASE_STATUS\" = missing ]; then [ \"$write_out\" -eq 0 ] || printf 404; exit 22; fi",
     "  cp \"$FAKE_RELEASE_ARCHIVE\" \"$destination\"",
@@ -114,6 +115,61 @@ describe.sequential("remote installer release integrity", () => {
       await rm(result.root, { recursive: true, force: true });
     }
   });
+
+  it("forces https on curl downloads", async () => {
+    const result = await runInstaller({ checksumStatus: "present", checksum: validChecksum });
+    try {
+      expect(result.ok, result.stderr).toBe(true);
+      expect(await readFile(result.log, "utf8")).toContain("--proto =https");
+    } finally {
+      await rm(result.root, { recursive: true, force: true });
+    }
+  });
+
+  it("writes a PATH line for the configured KULMI_BIN_DIR", async () => {
+    const result = await runInstaller({
+      checksumStatus: "present",
+      checksum: validChecksum,
+      updatePath: true,
+      binUnderHome: true,
+    });
+    try {
+      expect(result.ok, result.stderr).toBe(true);
+      const profile = await readFile(join(result.root, "home", ".profile"), "utf8");
+      expect(profile).toContain('export PATH="$HOME/.local/bin:$PATH"');
+    } finally {
+      await rm(result.root, { recursive: true, force: true });
+    }
+  });
+
+  it("restores the previous install if cleanup runs mid-swap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-installer-swap-"));
+    const work = join(root, "work");
+    const install = join(root, "install");
+    const backup = join(work, "previous");
+    await mkdir(backup, { recursive: true });
+    await writeFile(join(backup, "marker"), "previous\n", "utf8");
+    const q = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+    try {
+      await exec("/bin/sh", ["-c", [
+        `work=${q(work)}`,
+        `backup=${q(backup)}`,
+        `INSTALL_DIR=${q(install)}`,
+        "cleanup() {",
+        '  if [ -n "${backup:-}" ] && { [ -e "$backup" ] || [ -L "$backup" ]; }; then',
+        '    if [ ! -e "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ]; then',
+        '      mv "$backup" "$INSTALL_DIR" 2>/dev/null || true',
+        "    fi",
+        "  fi",
+        '  rm -rf "$work"',
+        "}",
+        "cleanup",
+      ].join("\n")]);
+      expect(await readFile(join(install, "marker"), "utf8")).toBe("previous\n");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 async function executable(name: string, content: string): Promise<void> {
@@ -126,9 +182,13 @@ async function runInstaller(options: {
   releaseStatus?: "present" | "missing";
   checksumStatus: "present" | "missing";
   checksum: string;
+  updatePath?: boolean;
+  binUnderHome?: boolean;
 }): Promise<{ root: string; install: string; log: string; ok: boolean; stdout: string; stderr: string }> {
   const root = await mkdtemp(join(tmpdir(), "kulmi-installer-case-"));
+  const home = join(root, "home");
   const install = join(root, "install");
+  const binDir = options.binUnderHome ? join(home, ".local", "bin") : join(root, "bin");
   const log = join(root, "curl.log");
   await writeFile(log, "", "utf8");
   try {
@@ -137,13 +197,14 @@ async function runInstaller(options: {
       env: {
         ...process.env,
         PATH: `${binaries}:${process.env.PATH ?? ""}`,
-        HOME: join(root, "home"),
+        HOME: home,
+        SHELL: "/bin/sh",
         KULMI_INSTALL_REMOTE: "1",
         KULMI_INSTALL_MODE: "copy",
         KULMI_INSTALL_VERSION: "v-test",
         KULMI_INSTALL_DIR: install,
-        KULMI_BIN_DIR: join(root, "bin"),
-        KULMI_NO_PATH_UPDATE: "1",
+        KULMI_BIN_DIR: binDir,
+        KULMI_NO_PATH_UPDATE: options.updatePath ? "0" : "1",
         KULMI_RELEASE_URL: "https://fixtures.test/kulmi-node.tar.gz",
         KULMI_RELEASE_CHECKSUM_URL: "https://fixtures.test/kulmi-node.tar.gz.sha256",
         FAKE_CURL_LOG: log,

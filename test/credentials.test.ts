@@ -58,11 +58,11 @@ describe("credential onboarding", () => {
   });
 
   it("reads and updates macOS Keychain entries through the security tool", async () => {
-    const calls: string[][] = [];
+    const calls: Array<{ args: string[]; input?: string }> = [];
     const keychain = new MacKeychain({
       platform: "darwin",
-      run: async (_file, args) => {
-        calls.push(args);
+      run: async (_file, args, options) => {
+        calls.push(options.input === undefined ? { args } : { args, input: options.input });
         return {
           stdout: args[0] === "find-generic-password" ? "sk-123456789\n" : "",
           stderr: "",
@@ -72,17 +72,23 @@ describe("credential onboarding", () => {
     await expect(keychain.read("SOME_ENV")).resolves.toBe("sk-123456789");
     await expect(keychain.save("SOME_ENV", "sk-123456789")).resolves.toBe(true);
     expect(calls).toHaveLength(2);
-    expect(calls[0]).toEqual(["find-generic-password", "-s", "dev.kulmi.api-key", "-a", "SOME_ENV", "-w"]);
-    expect(calls[1]).toEqual([
-      "add-generic-password",
-      "-U",
-      "-s",
-      "dev.kulmi.api-key",
-      "-a",
-      "SOME_ENV",
-      "-w",
-      "sk-123456789",
-    ]);
+    expect(calls[0]).toEqual({
+      args: ["find-generic-password", "-s", "dev.kulmi.api-key", "-a", "SOME_ENV", "-w"],
+      input: undefined,
+    });
+    expect(calls[1]).toEqual({
+      args: [
+        "add-generic-password",
+        "-U",
+        "-s",
+        "dev.kulmi.api-key",
+        "-a",
+        "SOME_ENV",
+        "-w",
+      ],
+      input: "sk-123456789\nsk-123456789\n",
+    });
+    expect(calls[1]!.args).not.toContain("sk-123456789");
   });
 
   it("does not return a key saved for a different api_key_env account", async () => {

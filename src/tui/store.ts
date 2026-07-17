@@ -14,8 +14,8 @@ export interface PendingApproval {
 }
 
 export interface TuiSnapshot {
-  // Finalized history is bounded in memory and rendered once into the
-  // terminal's native scrollback via Ink <Static>.
+  // Finalized history is append-only so Ink <Static> can render each row once
+  // into the terminal's native scrollback without reshuffling a capped window.
   transcript: FeedItem[];
   // In-flight rows (running tools and workers) shown in the live bottom region
   // until they finalize and move into the transcript.
@@ -43,8 +43,6 @@ const emptyUsage: TokenUsage = {
   cacheHitTokens: 0,
   cacheMissTokens: 0,
 };
-
-const TRANSCRIPT_LIMIT = 1_000;
 
 export class TuiStore {
   #snapshot: TuiSnapshot;
@@ -236,7 +234,7 @@ export class TuiStore {
   #commit(item: FeedItem, patch: Partial<TuiSnapshot> = {}, immediate = false): void {
     this.#update({
       ...patch,
-      transcript: [...this.#snapshot.transcript, item].slice(-TRANSCRIPT_LIMIT),
+      transcript: [...this.#snapshot.transcript, item],
     }, immediate);
   }
 
@@ -253,7 +251,7 @@ export class TuiStore {
     }
     this.#update({
       live,
-      transcript: [...this.#snapshot.transcript, transform(finalized)].slice(-TRANSCRIPT_LIMIT),
+      transcript: [...this.#snapshot.transcript, transform(finalized)],
     });
   }
 
