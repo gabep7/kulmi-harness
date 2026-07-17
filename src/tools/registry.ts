@@ -50,9 +50,13 @@ export class ToolRegistry {
     const tool = this.#tools.get(name);
     if (!tool || !tool.readOnly) return false;
     if (!tool.isParallelSafe) return true;
-    const parsed = parseArguments(argumentsJson);
-    const validated = tool.schema.safeParse(parsed);
-    return validated.success && tool.isParallelSafe(validated.data);
+    try {
+      const parsed = parseArguments(argumentsJson);
+      const validated = tool.schema.safeParse(parsed);
+      return validated.success && tool.isParallelSafe(validated.data);
+    } catch {
+      return false;
+    }
   }
 
   async execute(options: {
@@ -155,7 +159,7 @@ export class ToolRegistry {
       callId: options.callId,
       tool: tool.name,
       output: execution.content,
-      ...(result.diff ? { diff: result.diff } : {}),
+      ...(result.diff ? { diff: redactKnownSecrets(result.diff) } : {}),
       isError: execution.isError,
       durationMs: Math.round(performance.now() - started),
     });
