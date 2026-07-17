@@ -5,7 +5,6 @@ import type { AgentMode, AutonomyLevel, PlanStep } from "../core/types.js";
 import type { PermissionRequest } from "../tools/types.js";
 import type { CompletionSummary, TuiStore, FeedItem } from "./store.js";
 import { glyph, theme } from "./theme.js";
-import { estimateCost, formatCost } from "../provider/pricing.js";
 
 export interface TuiAppProps {
   store: TuiStore;
@@ -559,7 +558,6 @@ function MarkdownBlock({ text, width }: { text: string; width: number }) {
 function Footer({ runtime, status, usage, busy }: { runtime: TuiRuntimeInfo; status: string; usage: ReturnType<TuiStore["getSnapshot"]>["usage"]; busy: boolean }) {
   const cacheInput = usage.cacheHitTokens + usage.cacheMissTokens;
   const cacheRate = cacheInput > 0 ? Math.round(usage.cacheHitTokens / cacheInput * 100) : 0;
-  const cost = estimateCost(runtime.model, usage);
   return (
     <Box flexDirection="column">
       <Box justifyContent="space-between">
@@ -567,7 +565,7 @@ function Footer({ runtime, status, usage, busy }: { runtime: TuiRuntimeInfo; sta
       </Box>
       <Box justifyContent="space-between">
         <Text color={theme.faint} wrap="truncate-end">{runtime.model}  ·  {runtime.sessionId.replace("session_", "").slice(0, 8)}</Text>
-        <Text color={theme.faint}>{compactNumber(usage.totalTokens)} processed  ·  <Text color={theme.ink}>{compactNumber(usage.cacheMissTokens)} fresh</Text>  ·  <Text color={usage.cacheHitTokens > 0 ? theme.sage : theme.muted}>{compactNumber(usage.cacheHitTokens)} cached ({cacheRate}%)</Text>  ·  {compactNumber(usage.completionTokens)} out  ·  <Text color={theme.muted}>~{formatCost(cost)}</Text></Text>
+        <Text color={theme.faint}>{compactNumber(usage.totalTokens)} processed  ·  <Text color={theme.ink}>{compactNumber(usage.cacheMissTokens)} fresh</Text>  ·  <Text color={usage.cacheHitTokens > 0 ? theme.sage : theme.muted}>{compactNumber(usage.cacheHitTokens)} cached ({cacheRate}%)</Text>  ·  {compactNumber(usage.completionTokens)} out</Text>
       </Box>
     </Box>
   );

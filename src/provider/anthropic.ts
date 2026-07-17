@@ -15,8 +15,13 @@ const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const DEFAULT_THINKING_BUDGET_TOKENS = 4_096;
 const MIN_THINKING_BUDGET_TOKENS = 1_024;
 
+export type AnthropicThinkingBlock =
+  | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; data: string };
+
 export interface AnthropicAssistantMessage extends Extract<ProviderMessage, { role: "assistant" }> {
   reasoning_signature?: string;
+  thinking_blocks?: AnthropicThinkingBlock[];
 }
 
 interface CacheControl {
@@ -31,6 +36,7 @@ type WireBlock =
       cache_control?: CacheControl;
     }
   | { type: "thinking"; thinking: string; signature: string }
+  | { type: "redacted_thinking"; data: string }
   | { type: "tool_use"; id: string; name: string; input: unknown; cache_control?: CacheControl }
   | { type: "tool_result"; tool_use_id: string; content: string; cache_control?: CacheControl };
 
@@ -66,6 +72,7 @@ const wireEventSchema = z.object({
     text: z.string().optional(),
     thinking: z.string().optional(),
     signature: z.string().optional(),
+    data: z.string().optional(),
   }).passthrough().optional(),
   delta: z.object({
     type: z.string().optional(),
@@ -249,7 +256,19 @@ export class AnthropicProvider implements ModelProvider {
     let stopReason: string | null = null;
     let wireUsage: WireUsage = {};
     const calls = new Map<number, FunctionToolCall>();
+    const thinkingBlocks: AnthropicThinkingBlock[] = [];
+    let openThinking: { thinking: string; signature: string } | null = null;
     let sawStop = false;
+
+    const flushThinking = (): void => {
+      if (!openThinking) return;
+      thinkingBlocks.push({
+        type: "thinking",
+        thinking: openThinking.thinking,
+        signature: openThinking.signature,
+      });
+      openThinking = null;
+    };
 
     resetIdleTimer();
     for await (const data of parseSse(response.body, signal, resetIdleTimer)) {
@@ -279,6 +298,7 @@ export class AnthropicProvider implements ModelProvider {
       if (event.type === "content_block_start" && event.content_block) {
         const block = event.content_block;
         if (block.type === "tool_use") {
+          flushThinking();
           const call: FunctionToolCall = {
             id: block.id ?? `toolu_${event.index ?? calls.size}`,
             type: "function",
@@ -289,13 +309,21 @@ export class AnthropicProvider implements ModelProvider {
             markEmitted();
             await request.onToolCallStart(call);
           }
-        } else if (block.type === "text" && block.text) {
-          content += block.text;
-          if (request.onTextDelta) {
-            markEmitted();
-            await request.onTextDelta(block.text);
+        } else if (block.type === "text") {
+          flushThinking();
+          if (block.text) {
+            content += block.text;
+            if (request.onTextDelta) {
+              markEmitted();
+              await request.onTextDelta(block.text);
+            }
           }
         } else if (block.type === "thinking") {
+          flushThinking();
+          openThinking = {
+            thinking: block.thinking ?? "",
+            signature: block.signature ?? "",
+          };
           if (block.thinking) {
             reasoning += block.thinking;
             if (request.onReasoningDelta) {
@@ -304,6 +332,9 @@ export class AnthropicProvider implements ModelProvider {
             }
           }
           if (block.signature) signature += block.signature;
+        } else if (block.type === "redacted_thinking") {
+          flushThinking();
+          thinkingBlocks.push({ type: "redacted_thinking", data: block.data ?? "" });
         }
         continue;
       }
@@ -316,12 +347,14 @@ export class AnthropicProvider implements ModelProvider {
             await request.onTextDelta(delta.text);
           }
         } else if (delta.type === "thinking_delta" && delta.thinking) {
+          if (openThinking) openThinking.thinking += delta.thinking;
           reasoning += delta.thinking;
           if (request.onReasoningDelta) {
             markEmitted();
             await request.onReasoningDelta(delta.thinking);
           }
         } else if (delta.type === "signature_delta" && delta.signature) {
+          if (openThinking) openThinking.signature += delta.signature;
           signature += delta.signature;
         } else if (delta.type === "input_json_delta" && delta.partial_json !== undefined) {
           const call = calls.get(event.index ?? -1);
@@ -331,6 +364,7 @@ export class AnthropicProvider implements ModelProvider {
     }
 
     if (!sawStop) throw new Error(`stream ended before message_stop`);
+    flushThinking();
     const toolCalls = [...calls.entries()]
       .sort(([left], [right]) => left - right)
       .map(([, call]) => call);
@@ -342,6 +376,7 @@ export class AnthropicProvider implements ModelProvider {
     if ((request.thinking ?? this.#config.thinking) && toolCalls.length > 0) {
       message.reasoning_content = reasoning;
       if (signature) message.reasoning_signature = signature;
+      if (thinkingBlocks.length > 0) message.thinking_blocks = thinkingBlocks;
     }
     if (toolCalls.length > 0) message.tool_calls = toolCalls;
     return {
@@ -405,12 +440,27 @@ function toWireConversation(
     }
     const blocks: WireBlock[] = [];
     const hasToolCalls = (message.tool_calls?.length ?? 0) > 0;
-    if (thinking && hasToolCalls && message.reasoning_content !== undefined) {
-      blocks.push({
-        type: "thinking",
-        thinking: message.reasoning_content,
-        signature: (message as AnthropicAssistantMessage).reasoning_signature ?? "",
-      });
+    if (thinking && hasToolCalls) {
+      const anthropicMessage = message as AnthropicAssistantMessage;
+      if (anthropicMessage.thinking_blocks?.length) {
+        for (const block of anthropicMessage.thinking_blocks) {
+          if (block.type === "thinking") {
+            blocks.push({
+              type: "thinking",
+              thinking: block.thinking,
+              signature: block.signature,
+            });
+          } else {
+            blocks.push({ type: "redacted_thinking", data: block.data });
+          }
+        }
+      } else if (message.reasoning_content !== undefined) {
+        blocks.push({
+          type: "thinking",
+          thinking: message.reasoning_content,
+          signature: anthropicMessage.reasoning_signature ?? "",
+        });
+      }
     }
     if (message.content) blocks.push({ type: "text", text: message.content });
     for (const call of message.tool_calls ?? []) {
@@ -460,7 +510,7 @@ function parseToolInput(call: FunctionToolCall): unknown {
 function placeCacheBreakpoint(blocks: WireBlock[]): void {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
-    if (!block || block.type === "thinking") continue;
+    if (!block || block.type === "thinking" || block.type === "redacted_thinking") continue;
     block.cache_control = { type: "ephemeral" };
     return;
   }
@@ -474,7 +524,11 @@ function validateConversation(messages: readonly ProviderMessage[], thinking: bo
       throw new Error(`tool result ${message.tool_call_id} has no preceding assistant tool call`);
     }
     if (message.role !== "assistant" || !message.tool_calls?.length) continue;
-    if (thinking && !("reasoning_content" in message)) {
+    if (
+      thinking
+      && !("reasoning_content" in message)
+      && !((message as AnthropicAssistantMessage).thinking_blocks?.length)
+    ) {
       throw new Error(`assistant tool-call history is missing reasoning_content`);
     }
     for (const [offset, call] of message.tool_calls.entries()) {

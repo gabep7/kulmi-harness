@@ -39,6 +39,17 @@ const providerMessageSchema = z.discriminatedUnion("role", [
     content: z.string().nullable(),
     reasoning_content: z.string().optional(),
     reasoning_signature: z.string().optional(),
+    thinking_blocks: z.array(z.discriminatedUnion("type", [
+      z.object({
+        type: z.literal("thinking"),
+        thinking: z.string(),
+        signature: z.string(),
+      }).strict(),
+      z.object({
+        type: z.literal("redacted_thinking"),
+        data: z.string(),
+      }).strict(),
+    ])).optional(),
     tool_calls: z.array(toolCallSchema).optional(),
   }).strict(),
   z.object({
