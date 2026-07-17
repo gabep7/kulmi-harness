@@ -330,6 +330,76 @@ describe("ToolRegistry", () => {
       },
     });
   });
+
+  it("treats malformed arguments as not parallel-safe instead of throwing", () => {
+    const tool = defineTool({
+      name: "parallel_probe",
+      description: "probe parallel safety",
+      schema: z.object({ path: z.string() }),
+      readOnly: true,
+      isParallelSafe: () => true,
+      async execute() {
+        return { content: "ok" };
+      },
+    });
+    const registry = new ToolRegistry([tool]);
+
+    expect(registry.isParallelSafe("parallel_probe", "{")).toBe(false);
+    expect(registry.isParallelSafe("parallel_probe", "not-json")).toBe(false);
+    expect(registry.isParallelSafe("parallel_probe", JSON.stringify({ path: 1 }))).toBe(false);
+    expect(registry.isParallelSafe("parallel_probe", JSON.stringify({ path: "src/a.ts" }))).toBe(true);
+    expect(registry.isParallelSafe("missing_tool", "{}")).toBe(false);
+  });
+
+  it("redacts secrets from tool result diffs before emitting tool.finished", async () => {
+    const secret = "sk-registry-diff-secret";
+    const previous = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = secret;
+    try {
+      const tool = defineTool({
+        name: "diff_tool",
+        description: "returns a diff with a secret",
+        schema: z.object({}),
+        readOnly: false,
+        async execute() {
+          return {
+            content: `wrote key=${secret}`,
+            diff: `--- a\n+++ b\n+api_key=${secret}\n`,
+          };
+        },
+      });
+      const registry = new ToolRegistry([tool]);
+      const events: RuntimeEvent[] = [];
+      const context = fakeToolContext(fakeSubagents(), "medium");
+      context.events.on((envelope) => {
+        events.push(envelope.event);
+      }, { critical: true });
+
+      const result = await registry.execute({
+        name: "diff_tool",
+        argumentsJson: "{}",
+        callId: "diff_1",
+        context,
+      });
+
+      expect(result.content).toBe("wrote key=[redacted:OPENAI_API_KEY]");
+      expect(result.content).not.toContain(secret);
+
+      const finished = events.find((event) => event.type === "tool.finished");
+      expect(finished).toMatchObject({
+        type: "tool.finished",
+        output: "wrote key=[redacted:OPENAI_API_KEY]",
+        diff: "--- a\n+++ b\n+api_key=[redacted:OPENAI_API_KEY]\n",
+      });
+      if (finished?.type === "tool.finished") {
+        expect(finished.diff).not.toContain(secret);
+        expect(finished.output).not.toContain(secret);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = previous;
+    }
+  });
 });
 
 function descriptionFor(registry: ToolRegistry, name: string): string {
