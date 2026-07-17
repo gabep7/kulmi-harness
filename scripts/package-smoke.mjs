@@ -28,13 +28,26 @@ try {
   const bin = join(appDir, "node_modules", ".bin", "kulmi");
   const version = await execFileAsync(bin, ["--version"], { cwd: root, maxBuffer: 1024 * 1024 });
   if (!version.stdout.trim()) throw new Error("kulmi --version returned empty output");
-  const doctor = await execFileAsync(bin, ["doctor"], {
-    cwd: root,
-    env: { ...process.env, OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? "sk-package-smoke-00000000" },
-    maxBuffer: 1024 * 1024,
-  });
-  if (!doctor.stdout.includes("ok\tnode") || !doctor.stdout.includes("ok\tgit")) {
-    throw new Error(`doctor output missing required checks:\n${doctor.stdout}`);
+  // doctor exits 1 when any check warns (missing key, sandbox, models). That is
+  // host config, not packaging. Accept non-zero when the binary still runs and
+  // reports the required ok lines.
+  let doctorStdout = "";
+  try {
+    const doctor = await execFileAsync(bin, ["doctor"], {
+      cwd: root,
+      env: { ...process.env, OPENAI_API_KEY: process.env.OPENAI_API_KEY ?? "sk-package-smoke-00000000" },
+      maxBuffer: 1024 * 1024,
+    });
+    doctorStdout = doctor.stdout;
+  } catch (error) {
+    if (error && typeof error === "object" && "stdout" in error && typeof error.stdout === "string") {
+      doctorStdout = error.stdout;
+    } else {
+      throw error;
+    }
+  }
+  if (!doctorStdout.includes("ok\tnode") || !doctorStdout.includes("ok\tgit")) {
+    throw new Error(`doctor output missing required checks:\n${doctorStdout}`);
   }
   process.stdout.write(`ok package ${tarball}\n`);
 } finally {
