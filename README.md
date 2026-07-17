@@ -18,7 +18,7 @@ The default provider adapter talks to any OpenAI-compatible `/v1/chat/completion
 From a public release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/gabep7/kulmi-harness/master/install.sh | KULMI_INSTALL_REMOTE=1 sh
+curl -fsSL https://raw.githubusercontent.com/gabep7/kulmi-harness/main/install.sh | KULMI_INSTALL_REMOTE=1 sh
 ```
 
 From this checkout, install Kulmi into `~/.local/lib/kulmi` with a `kulmi` command in `~/.local/bin`:

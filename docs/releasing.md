@@ -13,15 +13,15 @@ Before tagging a release:
 5. Run `npm audit --omit=dev --audit-level=high`.
 6. Confirm `npm pack` installs into a clean temporary prefix and its `kulmi --version` output matches the release version.
 7. Confirm `LICENSE` and the `package.json` `license` field match the intended open-source license before changing visibility to public.
-8. Review the complete diff and commit it on `master`.
+8. Review the complete diff and commit it on `main`.
 
 ## Publish
 
-For version `0.5.0`, create and push `v0.5.0` only after the `master` checks pass:
+For version `0.5.0`, create and push `v0.5.0` only after the `main` checks pass:
 
 ```sh
 git tag -a v0.5.0 -m "v0.5.0"
-git push origin master
+git push origin main
 git push origin v0.5.0
 ```
 
@@ -37,7 +37,7 @@ The workflow rejects a tag that does not match `package.json` or the built CLI v
 Install the published bundle in a clean shell:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/gabep7/kulmi-harness/master/install.sh | KULMI_INSTALL_REMOTE=1 sh
+curl -fsSL https://raw.githubusercontent.com/gabep7/kulmi-harness/main/install.sh | KULMI_INSTALL_REMOTE=1 sh
 kulmi --version
 kulmi doctor
 ```
