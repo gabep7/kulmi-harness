@@ -87,6 +87,21 @@ describe("mcp client", () => {
     expect(connection.tools.map((tool) => tool.name).sort()).toEqual(["mcp_echo_add", "mcp_echo_echo"]);
   });
 
+  it("skips duplicate bridged tool names without throwing", { timeout: 30_000 }, async () => {
+    const connection = await connectMcpServers(
+      [
+        fixtureServer("echo", randomUUID()),
+        fixtureServer("echo", randomUUID()),
+      ],
+      { cwd: process.cwd(), timeoutMs: 20_000 },
+    );
+    connections.push(connection);
+
+    expect(connection.tools.map((tool) => tool.name).sort()).toEqual(["mcp_echo_add", "mcp_echo_echo"]);
+    expect(connection.errors.filter((error) => error.includes("skipped duplicate tool name"))).toHaveLength(2);
+    expect(() => new ToolRegistry(connection.tools)).not.toThrow();
+  });
+
   it("dispose terminates the child and is safe to call twice", { timeout: 30_000 }, async () => {
     const marker = randomUUID();
     const connection = await connectFixture("echo", marker);

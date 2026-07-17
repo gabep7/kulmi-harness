@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { resolveToolBinary } from "../runtime/binaries.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
 import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
+import { writeAtomic } from "./files.js";
 import { defineTool, type AnyTool, type ToolContext } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -54,7 +55,11 @@ const resolveConflictTool = defineTool({
     const conflicts = await conflictFiles(context.workspaceRoot);
     if (!conflicts.includes(rel)) throw new Error(`${rel} is not an unresolved conflict`);
     if (/^<<<<<<< |^=======\s*$|^>>>>>>> /m.test(input.content)) throw new Error("resolved content still contains conflict markers");
-    await writeFile(path, input.content);
+    await context.checkpoint.capture(path);
+    await writeAtomic(path, input.content);
+    context.state.modifiedFiles.add(rel);
+    context.state.revision += 1;
+    delete context.state.completion;
     await git(context.workspaceRoot, ["add", "--", rel]);
     return { content: `resolved and staged ${rel}`, mutated: true };
   },

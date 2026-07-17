@@ -71,6 +71,8 @@ describe("git workflow tools", () => {
       context,
     });
     expect(resolved).toEqual({ content: "resolved and staged conflict.txt", isError: false });
+    expect([...context.state.modifiedFiles]).toEqual(["conflict.txt"]);
+    expect(context.state.revision).toBe(1);
 
     const empty = await registry.execute({
       name: "list_conflicts",
@@ -235,6 +237,8 @@ async function toolContext(root: string, permissions?: PermissionApi): Promise<T
     verifications: [],
     revision: 0,
   };
+  const checkpoint = new CheckpointStore(session.path, root);
+  await checkpoint.beginTurn(1, state.agentId, state);
   return {
     workspaceRoot: root,
     cwd: root,
@@ -242,7 +246,7 @@ async function toolContext(root: string, permissions?: PermissionApi): Promise<T
     signal: new AbortController().signal,
     events: new EventBus(),
     state,
-    checkpoint: new CheckpointStore(session.path, root),
+    checkpoint,
     artifacts: new ArtifactStore(session.path),
     commandTimeoutMs: 10_000,
     maxOutputBytes: 100_000,
