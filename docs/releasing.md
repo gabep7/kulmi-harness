@@ -12,7 +12,7 @@ Before tagging a release:
 4. Run one read-only end-to-end task with the built CLI.
 5. Run `npm audit --omit=dev --audit-level=high`.
 6. Confirm `npm pack` installs into a clean temporary prefix and its `kulmi --version` output matches the release version.
-7. Confirm the repository has the intended open-source license before changing its visibility to public. A private release can remain unlicensed.
+7. Confirm `LICENSE` and the `package.json` `license` field match the intended open-source license before changing visibility to public.
 8. Review the complete diff and commit it on `master`.
 
 ## Publish
@@ -34,20 +34,20 @@ The workflow rejects a tag that does not match `package.json` or the built CLI v
 
 ## Verify the release
 
-Install the published private bundle in a clean shell with an authenticated GitHub CLI:
+Install the published bundle in a clean shell:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gabep7/kulmi-harness/master/install.sh | KULMI_INSTALL_REMOTE=1 sh
+kulmi --version
+kulmi doctor
+```
+
+For a private repository, use an authenticated GitHub CLI instead:
 
 ```sh
 gh api --hostname github.com repos/gabep7/kulmi-harness/contents/install.sh \
   -H "Accept: application/vnd.github.raw+json" \
   | KULMI_INSTALL_REMOTE=1 sh
-kulmi --version
-kulmi doctor
-```
-
-If the repository is public, verify the unauthenticated path too:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/gabep7/kulmi-harness/master/install.sh | KULMI_INSTALL_REMOTE=1 sh
 kulmi --version
 kulmi doctor
 ```

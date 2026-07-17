@@ -15,6 +15,12 @@ The default provider adapter talks to any OpenAI-compatible `/v1/chat/completion
 
 ## Install
 
+From a public release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gabep7/kulmi-harness/master/install.sh | KULMI_INSTALL_REMOTE=1 sh
+```
+
 From this checkout, install Kulmi into `~/.local/lib/kulmi` with a `kulmi` command in `~/.local/bin`:
 
 ```sh
@@ -29,20 +35,6 @@ For a clean, independent production-style copy instead:
 ./install.sh --copy
 ```
 
-After the first tagged release, an authenticated GitHub CLI can install from the private repository:
-
-```sh
-gh api --hostname github.com repos/gabep7/kulmi-harness/contents/install.sh \
-  -H "Accept: application/vnd.github.raw+json" \
-  | KULMI_INSTALL_REMOTE=1 sh
-```
-
-If the repository becomes public later, the unauthenticated install command is:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/gabep7/kulmi-harness/master/install.sh | KULMI_INSTALL_REMOTE=1 sh
-```
-
 Copy mode installs from the lockfile, builds in a temporary directory, prunes development dependencies, and atomically replaces the previous installation. It is intentionally slower. Use it for a durable release installation rather than the edit-build-run loop.
 
 To install a different local checkout explicitly:
@@ -51,7 +43,15 @@ To install a different local checkout explicitly:
 KULMI_INSTALL_SOURCE="$PWD" ./install.sh
 ```
 
-The repository is not published at the package URL yet, so the installer intentionally uses the checkout when invoked as `./install.sh`. Tagged releases include a prebuilt `kulmi-node.tar.gz`, containing `dist` and production dependencies, plus `kulmi-node.tar.gz.sha256`. Remote installs verify the checksum before extraction and fail closed if it is missing, malformed, or mismatched. They use an authenticated `gh` session for private repositories and fall back to a source archive only when the prebuilt asset is unavailable. Public repositories can use plain `curl`. Select releases through `KULMI_REPOSITORY` and `KULMI_INSTALL_VERSION`. Custom mirrors use `KULMI_RELEASE_URL`; its checksum defaults to the same URL plus `.sha256` and can be overridden with `KUL
+For a private fork or private repository, an authenticated GitHub CLI can fetch the installer:
+
+```sh
+gh api --hostname github.com repos/gabep7/kulmi-harness/contents/install.sh \
+  -H "Accept: application/vnd.github.raw+json" \
+  | KULMI_INSTALL_REMOTE=1 sh
+```
+
+Kulmi is not published to npm yet, so `./install.sh` uses the local checkout when invoked from a source tree. Tagged releases include a prebuilt `kulmi-node.tar.gz` containing `dist` and production dependencies, plus `kulmi-node.tar.gz.sha256`. Remote installs verify the checksum before extraction and fail closed if it is missing, malformed, or mismatched. They use plain `curl` for public repositories and an authenticated `gh` session for private ones, and fall back to a source archive only when the prebuilt asset is unavailable. Select releases through `KULMI_REPOSITORY` and `KULMI_INSTALL_VERSION`. Custom mirrors use `KULMI_RELEASE_URL`; its checksum defaults to the same URL plus `.sha256` and can be overridden with `KULMI_RELEASE_CHECKSUM_URL`.
 
 Then start Kulmi:
 

@@ -2,6 +2,10 @@ node_modules/
 dist/
 target/
 .codegraph/
+.claude/
+.pi/
+apps/
+crates/
 
 coverage/
 *.tgz

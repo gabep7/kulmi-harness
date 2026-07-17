@@ -2,6 +2,7 @@
   "name": "kulmi-harness",
   "version": "1.0.0",
   "description": "autonomous coding harness",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/gabep7/kulmi-harness.git"
@@ -12,7 +13,9 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
   ],
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json && chmod +x dist/cli.js && node scripts/source-fingerprint.mjs --write",
