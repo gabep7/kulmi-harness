@@ -26,9 +26,15 @@ export function discoverAgents(workspaceRoot: string): AgentDefinition[] {
       if (!entry.name.endsWith(".md")) continue;
       const path = join(root.path, entry.name);
       if (!isContainedFile(root.path, path)) continue;
-      const content = readAgentFile(path);
-      const metadata = parseAgentMetadata(content, basename(entry.name, ".md"));
-      agents.set(metadata.name, { ...metadata, path, source: root.source });
+      let agent: AgentDefinition | undefined;
+      try {
+        const content = readAgentFile(path);
+        const metadata = parseAgentMetadata(content, basename(entry.name, ".md"));
+        if (metadata) agent = { ...metadata, path, source: root.source };
+      } catch {
+        agent = undefined;
+      }
+      if (agent) agents.set(agent.name, agent);
     }
   }
   return [...agents.values()].sort((a, b) => a.name.localeCompare(b.name));

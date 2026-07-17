@@ -42,11 +42,43 @@ const SYMBOL_KIND_NAME: Record<number, string> = {
   25: "Operator", 26: "TypeParameter",
 };
 
+export function extractLspFrames(buffer: Buffer): { frames: string[]; rest: Buffer } {
+  const frames: string[] = [];
+  let remaining = buffer;
+
+  while (true) {
+    const headerEnd = remaining.indexOf("\r\n\r\n");
+    if (headerEnd === -1) break;
+
+    const headers = remaining.subarray(0, headerEnd).toString("latin1");
+    const contentLengthMatch = headers.match(/Content-Length:\s*(\d+)/i);
+    if (!contentLengthMatch) {
+      remaining = remaining.subarray(headerEnd + 4);
+      continue;
+    }
+
+    const lenStr = contentLengthMatch[1];
+    if (lenStr === undefined) {
+      remaining = remaining.subarray(headerEnd + 4);
+      continue;
+    }
+
+    const len = parseInt(lenStr, 10);
+    const bodyStart = headerEnd + 4;
+    if (remaining.length < bodyStart + len) break;
+
+    frames.push(remaining.subarray(bodyStart, bodyStart + len).toString("utf8"));
+    remaining = remaining.subarray(bodyStart + len);
+  }
+
+  return { frames, rest: Buffer.concat([remaining]) };
+}
+
 class LspClient {
   #process: ChildProcess | null = null;
   #nextId = 1;
   #pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-  #buffer = "";
+  #buffer: Buffer = Buffer.alloc(0);
   #initialized = false;
   #openFiles = new Set<string>();
   #documentVersions = new Map<string, number>();
@@ -104,7 +136,7 @@ class LspClient {
     });
 
     this.#process.stdout?.on("data", (chunk: Buffer | string) => {
-      this.#buffer += typeof chunk === "string" ? chunk : chunk.toString();
+      this.#buffer = Buffer.concat([this.#buffer, typeof chunk === "string" ? Buffer.from(chunk) : chunk]);
       this.#parseResponses();
     });
 
@@ -155,23 +187,10 @@ class LspClient {
   }
 
   #parseResponses(): void {
-    while (true) {
-      const headerEnd = this.#buffer.indexOf("\r\n\r\n");
-      if (headerEnd === -1) return;
+    const { frames, rest } = extractLspFrames(this.#buffer);
+    this.#buffer = rest;
 
-      const contentLengthMatch = this.#buffer.slice(0, headerEnd).match(/Content-Length:\s*(\d+)/i);
-      if (!contentLengthMatch) return;
-
-      const lenStr = contentLengthMatch[1];
-      if (lenStr === undefined) return;
-
-      const len = parseInt(lenStr, 10);
-      const bodyStart = headerEnd + 4;
-      if (this.#buffer.length < bodyStart + len) return;
-
-      const body = this.#buffer.slice(bodyStart, bodyStart + len);
-      this.#buffer = this.#buffer.slice(bodyStart + len);
-
+    for (const body of frames) {
       let msg: LspMessage;
       try {
         msg = JSON.parse(body) as LspMessage;
@@ -296,7 +315,7 @@ class LspClient {
   #disposeProcess(): void {
     this.#process?.kill("SIGKILL");
     this.#process = null;
-    this.#buffer = "";
+    this.#buffer = Buffer.alloc(0);
     this.#openFiles.clear();
     this.#documentVersions.clear();
     if (this.#env) {

@@ -1,3 +1,9 @@
+const registeredSecretEnvNames = new Set<string>();
+
+export function registerSecretEnvNames(names: Iterable<string>): void {
+  for (const name of names) registeredSecretEnvNames.add(name);
+}
+
 export function redactKnownSecrets(value: string): string;
 export function redactKnownSecrets<T>(value: T): T;
 export function redactKnownSecrets<T>(value: T): T {
@@ -10,7 +16,8 @@ function knownSecrets(): Array<[string, string]> {
     .filter((entry): entry is [string, string] =>
       typeof entry[1] === "string" &&
       entry[1].length >= 8 &&
-      /(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY)/i.test(entry[0])
+      (/(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY)/i.test(entry[0]) ||
+        registeredSecretEnvNames.has(entry[0]))
     )
     .sort((left, right) => right[1].length - left[1].length);
 }

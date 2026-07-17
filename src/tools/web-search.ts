@@ -201,11 +201,14 @@ async function fetchPublicText(rawUrl: string, maxChars: number, signal: AbortSi
 // public address here and a private one to the fetch. Closing this fully requires a
 // custom undici dispatcher that connects to the exact validated IP while preserving
 // the Host header and TLS servername.
-async function assertPublicUrl(url: URL): Promise<void> {
+export async function assertPublicUrl(url: URL, options: { allowLoopback?: boolean } = {}): Promise<void> {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("only HTTP and HTTPS URLs are allowed");
   if (url.username || url.password) throw new Error("URL credentials are blocked");
-  if (url.port && !["80", "443"].includes(url.port)) throw new Error("nonstandard URL ports are blocked");
   const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (options.allowLoopback && (host === "localhost" || isLoopbackAddress(host))) {
+    return;
+  }
+  if (url.port && !["80", "443"].includes(url.port)) throw new Error("nonstandard URL ports are blocked");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) {
     throw new Error("local network URLs are blocked");
   }
@@ -213,6 +216,16 @@ async function assertPublicUrl(url: URL): Promise<void> {
   if (addresses.length === 0 || addresses.some(({ address }) => isPrivateAddress(address))) {
     throw new Error("private or unresolved network address is blocked");
   }
+}
+
+function isLoopbackAddress(address: string): boolean {
+  const value = address.toLowerCase();
+  if (value === "::1") return true;
+  const mapped = mappedIpv4(value);
+  const ipv4 = mapped ?? (isIP(value) === 4 ? value : undefined);
+  if (!ipv4) return false;
+  const [a = 0] = ipv4.split(".").map(Number);
+  return a === 127;
 }
 
 function isPrivateAddress(address: string): boolean {

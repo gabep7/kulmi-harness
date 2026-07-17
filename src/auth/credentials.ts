@@ -15,8 +15,8 @@ export interface CredentialResolution {
 }
 
 export interface Keychain {
-  read(): Promise<string | undefined>;
-  save(key: string): Promise<boolean>;
+  read(account: string): Promise<string | undefined>;
+  save(account: string, key: string): Promise<boolean>;
 }
 
 type SecurityRunner = (
@@ -34,13 +34,13 @@ export class MacKeychain implements Keychain {
     this.#platform = options.platform ?? process.platform;
   }
 
-  async read(): Promise<string | undefined> {
+  async read(account: string): Promise<string | undefined> {
     if (this.#platform !== "darwin") return undefined;
     try {
       const { stdout } = await this.#run("/usr/bin/security", [
         "find-generic-password",
         "-s", keychainService,
-        "-a", "default",
+        "-a", account,
         "-w",
       ], { encoding: "utf8", timeout: 5_000 });
       const key = stdout.trim();
@@ -50,14 +50,14 @@ export class MacKeychain implements Keychain {
     }
   }
 
-  async save(key: string): Promise<boolean> {
+  async save(account: string, key: string): Promise<boolean> {
     if (this.#platform !== "darwin") return false;
     try {
       await this.#run("/usr/bin/security", [
         "add-generic-password",
         "-U",
         "-s", keychainService,
-        "-a", "default",
+        "-a", account,
         "-w", key,
       ], { encoding: "utf8", timeout: 5_000 });
       return true;
@@ -86,7 +86,7 @@ export async function resolveExistingCredential(options: {
     return { model: modelName, source: "environment" };
   }
   const keychain = options.keychain ?? new MacKeychain();
-  const key = await keychain.read();
+  const key = await keychain.read(model.apiKeyEnv);
   if (!key) return undefined;
   process.env[model.apiKeyEnv] = key;
   return { model: modelName, source: "keychain" };
@@ -103,7 +103,7 @@ export async function acceptCredential(options: {
   const model = config.models[modelName];
   if (!model) throw new Error(`unknown model ${modelName}`);
   process.env[model.apiKeyEnv] = options.choice.key;
-  const stored = await (options.keychain ?? new MacKeychain()).save(options.choice.key);
+  const stored = await (options.keychain ?? new MacKeychain()).save(model.apiKeyEnv, options.choice.key);
   return {
     model: modelName,
     source: "prompt",

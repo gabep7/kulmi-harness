@@ -27,7 +27,7 @@ describe("credential onboarding", () => {
     delete process.env[TEST_API_KEY_ENV];
     const result = await resolveExistingCredential({
       cwd,
-      keychain: new FakeKeychain("sk-123456789"),
+      keychain: new FakeKeychain(TEST_API_KEY_ENV, "sk-123456789"),
     });
     expect(result).toMatchObject({ model: TEST_MODEL_PROFILE, source: "keychain" });
     expect(process.env[TEST_API_KEY_ENV]).toBe("sk-123456789");
@@ -69,27 +69,58 @@ describe("credential onboarding", () => {
         };
       },
     });
-    await expect(keychain.read()).resolves.toBe("sk-123456789");
-    await expect(keychain.save("sk-123456789")).resolves.toBe(true);
+    await expect(keychain.read("SOME_ENV")).resolves.toBe("sk-123456789");
+    await expect(keychain.save("SOME_ENV", "sk-123456789")).resolves.toBe(true);
     expect(calls).toHaveLength(2);
-    expect(calls[0]).toEqual(["find-generic-password", "-s", "dev.kulmi.api-key", "-a", "default", "-w"]);
-    expect(calls[1]).toContain("sk-123456789");
+    expect(calls[0]).toEqual(["find-generic-password", "-s", "dev.kulmi.api-key", "-a", "SOME_ENV", "-w"]);
+    expect(calls[1]).toEqual([
+      "add-generic-password",
+      "-U",
+      "-s",
+      "dev.kulmi.api-key",
+      "-a",
+      "SOME_ENV",
+      "-w",
+      "sk-123456789",
+    ]);
+  });
+
+  it("does not return a key saved for a different api_key_env account", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "kulmi-credentials-"));
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    await writeTestModelConfig(cwd, { apiKeyEnv: "B_KEY" });
+    const originalB = process.env.B_KEY;
+    const originalA = process.env.A_KEY;
+    delete process.env.B_KEY;
+    delete process.env.A_KEY;
+    try {
+      const keychain = new FakeKeychain("A_KEY", "sk-provider-a");
+      const result = await resolveExistingCredential({ cwd, keychain });
+      expect(result).toBeUndefined();
+      expect(process.env.B_KEY).toBeUndefined();
+      expect(process.env.A_KEY).toBeUndefined();
+    } finally {
+      restore("B_KEY", originalB);
+      restore("A_KEY", originalA);
+    }
   });
 });
 
 class FakeKeychain implements Keychain {
-  #key: string | undefined;
+  #keys = new Map<string, string>();
 
-  constructor(key?: string) {
-    this.#key = key;
+  constructor(account?: string, key?: string) {
+    if (account !== undefined && key !== undefined) {
+      this.#keys.set(account, key);
+    }
   }
 
-  async read(): Promise<string | undefined> {
-    return this.#key;
+  async read(account: string): Promise<string | undefined> {
+    return this.#keys.get(account);
   }
 
-  async save(key: string): Promise<boolean> {
-    this.#key = key;
+  async save(account: string, key: string): Promise<boolean> {
+    this.#keys.set(account, key);
     return true;
   }
 }

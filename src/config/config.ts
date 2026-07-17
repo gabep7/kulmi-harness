@@ -5,6 +5,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { parse } from "smol-toml";
 import { z } from "zod";
 import type { AutonomyLevel } from "../core/types.js";
+import { registerSecretEnvNames } from "../core/redact.js";
 
 export type SearchMode = "off" | "free";
 export type FreeSearchProvider = "auto" | "searxng" | "bing-rss";
@@ -242,6 +243,7 @@ export function loadConfig(cwd: string): KulmiConfig {
     if (!existsSync(path)) continue;
     config = mergeConfig(config, parseFileConfig(parse(readFileSync(path, "utf8")), path));
   }
+  registerSecretEnvNames(Object.values(config.models).map((model) => model.apiKeyEnv));
   return config;
 }
 

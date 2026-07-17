@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SearchConfig } from "../src/config/config.js";
-import { fetchUrlTool, freeWebSearchTool } from "../src/tools/web-search.js";
+import { assertPublicUrl, fetchUrlTool, freeWebSearchTool } from "../src/tools/web-search.js";
 import type { ToolContext } from "../src/tools/types.js";
+
 
 describe("free web search", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -62,6 +63,28 @@ describe("free web search", () => {
       provider: "bing-rss",
       results: [{ title: "Primary & source", url: "https://example.com/docs", snippet: "Current documentation." }],
     });
+  });
+});
+
+describe("assertPublicUrl", () => {
+  it("rejects non-http schemes and link-local addresses", async () => {
+    await expect(assertPublicUrl(new URL("file:///etc/passwd"))).rejects.toThrow("only HTTP and HTTPS");
+    await expect(assertPublicUrl(new URL("http://169.254.169.254/"))).rejects.toThrow("private");
+  });
+
+  it("blocks localhost without allowLoopback and accepts it with the carve-out", async () => {
+    await expect(assertPublicUrl(new URL("http://localhost"))).rejects.toThrow("local network");
+    await expect(assertPublicUrl(new URL("http://localhost:5173"))).rejects.toThrow();
+    await expect(assertPublicUrl(new URL("http://127.0.0.1:5173"))).rejects.toThrow();
+    await expect(assertPublicUrl(new URL("http://localhost:5173"), { allowLoopback: true })).resolves.toBeUndefined();
+    await expect(assertPublicUrl(new URL("http://127.0.0.1:5173"), { allowLoopback: true })).resolves.toBeUndefined();
+    await expect(assertPublicUrl(new URL("http://[::1]:5173"), { allowLoopback: true })).resolves.toBeUndefined();
+  });
+
+  it("still rejects .local hostnames even with allowLoopback", async () => {
+    await expect(assertPublicUrl(new URL("http://some-name.local/"), { allowLoopback: true })).rejects.toThrow(
+      "local network",
+    );
   });
 });
 

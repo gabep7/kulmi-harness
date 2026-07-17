@@ -29,6 +29,23 @@ describe("local skills", () => {
     expect(discoverSkills(root).filter((skill) => skill.path.startsWith(root))).toEqual([]);
   });
 
+  it("skips malformed skill files without throwing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-skills-"));
+    const badDir = join(root, ".kulmi", "skills", "bad-skill");
+    const goodDir = join(root, ".kulmi", "skills", "good");
+    await mkdir(badDir, { recursive: true });
+    await mkdir(goodDir, { recursive: true });
+    await writeFile(join(badDir, "SKILL.md"), `# Bad Skill Name\n\nThis heading has spaces.\n`);
+    await writeFile(
+      join(goodDir, "SKILL.md"),
+      `---\nname: good\ndescription: Valid skill\n---\n# Good\n\nDo the thing.\n`,
+    );
+
+    const skills = discoverSkills(root).filter((skill) => skill.path.startsWith(root));
+    expect(skills).toHaveLength(1);
+    expect(skills[0]).toMatchObject({ name: "good", description: "Valid skill", source: "project" });
+  });
+
   it("does not expose a read tool when no skills exist", () => {
     expect(skillTools([])).toEqual([]);
   });

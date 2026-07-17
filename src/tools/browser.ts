@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { z } from "zod";
 import { defineTool } from "./types.js";
+import { assertPublicUrl } from "./web-search.js";
 
 const chromiumCandidates = [
   process.env.KULMI_CHROMIUM,
@@ -13,7 +14,7 @@ const chromiumCandidates = [
 
 export const browserQaTool = defineTool({
   name: "browser_qa",
-  description: "Open a URL in a real headless Chromium browser, return page title/text, and optionally store a screenshot attachment. Requires Chrome/Chromium or KULMI_CHROMIUM.",
+  description: "Open a URL in a real headless Chromium browser, return page title/text, and optionally store a screenshot attachment. Only public http/https URLs and localhost are reachable. Requires Chrome/Chromium or KULMI_CHROMIUM.",
   schema: z.object({
     url: z.string().url(),
     wait_until: z.enum(["domcontentloaded", "load", "networkidle"]).default("domcontentloaded"),
@@ -22,6 +23,7 @@ export const browserQaTool = defineTool({
   }),
   readOnly: true,
   async execute(context, input) {
+    await assertPublicUrl(new URL(input.url), { allowLoopback: true });
     const executablePath = chromiumCandidates.find((path) => existsSync(path));
     if (!executablePath) throw new Error("Chromium not found. Install Chrome/Chromium or set KULMI_CHROMIUM to the executable path.");
     const { chromium } = await import("playwright-core");

@@ -27,9 +27,15 @@ export function discoverRules(workspaceRoot: string): RuleDefinition[] {
       if (!entry.name.endsWith(".md")) continue;
       const path = join(root.path, entry.name);
       if (!isContainedFile(root.path, path)) continue;
-      const content = readRuleFile(path);
-      const metadata = parseRuleMetadata(content, basename(entry.name, ".md"));
-      rules.set(metadata.name, { ...metadata, path, source: root.source });
+      let rule: RuleDefinition | undefined;
+      try {
+        const content = readRuleFile(path);
+        const metadata = parseRuleMetadata(content, basename(entry.name, ".md"));
+        if (metadata) rule = { ...metadata, path, source: root.source };
+      } catch {
+        rule = undefined;
+      }
+      if (rule) rules.set(rule.name, rule);
     }
   }
   return [...rules.values()].sort((a, b) => a.name.localeCompare(b.name));

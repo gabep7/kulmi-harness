@@ -24,9 +24,15 @@ export function discoverSkills(workspaceRoot: string): SkillDefinition[] {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
       const path = join(root.path, entry.name, "SKILL.md");
       if (!isContainedFile(root.path, path)) continue;
-      const content = readSkillFile(path);
-      const metadata = parseMetadata(content, entry.name);
-      skills.set(metadata.name, { ...metadata, path, source: root.source });
+      let skill: SkillDefinition | undefined;
+      try {
+        const content = readSkillFile(path);
+        const metadata = parseMetadata(content, entry.name);
+        if (metadata) skill = { ...metadata, path, source: root.source };
+      } catch {
+        skill = undefined;
+      }
+      if (skill) skills.set(skill.name, skill);
     }
   }
   return [...skills.values()].sort((a, b) => a.name.localeCompare(b.name));
