@@ -74,6 +74,9 @@ describe("AnthropicProvider", () => {
       content: null,
       reasoning_content: "inspect ",
       reasoning_signature: "sig-abc",
+      thinking_blocks: [
+        { type: "thinking", thinking: "inspect ", signature: "sig-abc" },
+      ],
       tool_calls: [{
         id: "toolu_1",
         type: "function",
@@ -148,6 +151,93 @@ describe("AnthropicProvider", () => {
     ]);
     expect(result.message).toEqual({ role: "assistant", content: "done" });
     expect(result.finishReason).toBe("stop");
+  });
+
+  it("captures and replays redacted_thinking blocks verbatim with tools", async () => {
+    let firstBody: Record<string, unknown> = {};
+    let secondBody: Record<string, unknown> = {};
+    let requestCount = 0;
+    const url = await serve(servers, (request, response) => {
+      collectJson(request).then((body) => {
+        requestCount += 1;
+        if (requestCount === 1) firstBody = body;
+        else secondBody = body;
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        if (requestCount === 1) {
+          response.write('data: {"type":"message_start","message":{"usage":{"input_tokens":8,"output_tokens":1}}}\n\n');
+          response.write('data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}\n\n');
+          response.write('data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan "}}\n\n');
+          response.write('data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-plain"}}\n\n');
+          response.write('data: {"type":"content_block_stop","index":0}\n\n');
+          response.write('data: {"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"EmwKAhgBEgy3va3p"}}\n\n');
+          response.write('data: {"type":"content_block_stop","index":1}\n\n');
+          response.write('data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_r","name":"read_file","input":{}}}\n\n');
+          response.write('data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"secret.txt\\"}"}}\n\n');
+          response.write('data: {"type":"content_block_stop","index":2}\n\n');
+          response.write('data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":12}}\n\n');
+          response.end('data: {"type":"message_stop"}\n\n');
+          return;
+        }
+        response.write('data: {"type":"message_start","message":{"usage":{"input_tokens":20,"output_tokens":1}}}\n\n');
+        response.write('data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n');
+        response.write('data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\n');
+        response.write('data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\n');
+        response.end('data: {"type":"message_stop"}\n\n');
+      }).catch((error: unknown) => response.destroy(error instanceof Error ? error : new Error(String(error))));
+    });
+
+    const provider = new AnthropicProvider(model(url));
+    const first = await provider.complete({
+      messages: [{ role: "user", content: "inspect" }],
+      tools: [readFileTool()],
+      signal: new AbortController().signal,
+    });
+
+    expect(first.message).toEqual({
+      role: "assistant",
+      content: null,
+      reasoning_content: "plan ",
+      reasoning_signature: "sig-plain",
+      thinking_blocks: [
+        { type: "thinking", thinking: "plan ", signature: "sig-plain" },
+        { type: "redacted_thinking", data: "EmwKAhgBEgy3va3p" },
+      ],
+      tool_calls: [{
+        id: "toolu_r",
+        type: "function",
+        function: { name: "read_file", arguments: '{"path":"secret.txt"}' },
+      }],
+    });
+
+    const second = await provider.complete({
+      messages: [
+        { role: "user", content: "inspect" },
+        first.message,
+        { role: "tool", content: "classified", tool_call_id: "toolu_r" },
+      ],
+      tools: [readFileTool()],
+      signal: new AbortController().signal,
+    });
+
+    expect(secondBody["messages"]).toEqual([
+      { role: "user", content: [{ type: "text", text: "inspect" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "plan ", signature: "sig-plain" },
+          { type: "redacted_thinking", data: "EmwKAhgBEgy3va3p" },
+          { type: "tool_use", id: "toolu_r", name: "read_file", input: { path: "secret.txt" } },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_r", content: "classified", cache_control: { type: "ephemeral" } },
+        ],
+      },
+    ]);
+    expect(second.message).toEqual({ role: "assistant", content: "ok" });
+    expect(firstBody).toMatchObject({ model: "test-model", stream: true });
   });
 
   it("streams text and thinking deltas through callbacks across split chunks", async () => {

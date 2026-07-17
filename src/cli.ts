@@ -13,7 +13,6 @@ import { VERSION } from "./core/version.js";
 import type { AutonomyLevel, OutputFormat } from "./core/types.js";
 import { SessionController } from "./runtime/controller.js";
 import { forkSession, listSessions, SessionStore } from "./runtime/session-store.js";
-import { estimateCost, formatCost } from "./provider/pricing.js";
 import { attachRenderer } from "./cli/render.js";
 import { runRpcServer } from "./rpc/server.js";
 import type { PermissionRequest } from "./tools/types.js";
@@ -135,12 +134,12 @@ program
 
 program
   .command("usage")
-  .description("show cumulative token usage and estimated cost")
+  .description("show cumulative token usage")
   .option("-n, --limit <count>", "number of sessions", "100")
   .action(async (options: { limit: string }) => {
     const sessions = await listSessions(Number.parseInt(options.limit, 10));
     const totals = { promptTokens: 0, completionTokens: 0, totalTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 };
-    const perModel: Record<string, { tokens: number; cost: number }> = {};
+    const perModel: Record<string, number> = {};
     let count = 0;
 
     for (const session of sessions) {
@@ -154,12 +153,9 @@ program
       totals.cacheMissTokens += u.cacheMissTokens;
 
       const model = session.model;
-      const entry = perModel[model] ??= { tokens: 0, cost: 0 };
-      entry.tokens += u.totalTokens;
-      entry.cost += estimateCost(model, u);
+      perModel[model] = (perModel[model] ?? 0) + u.totalTokens;
     }
 
-    const totalCost = Object.values(perModel).reduce((sum, e) => sum + e.cost, 0);
     const hitRate = totals.promptTokens > 0
       ? (totals.cacheHitTokens / totals.promptTokens * 100)
       : 0;
@@ -170,9 +166,6 @@ program
     process.stdout.write(`  Output:              ${totals.completionTokens.toLocaleString()} tokens\n`);
     process.stdout.write(`  Total:               ${totals.totalTokens.toLocaleString()} tokens\n`);
     process.stdout.write(`  Cache hit rate:      ${hitRate.toFixed(1)}%\n`);
-    process.stdout.write(`\n`);
-    process.stdout.write(`Estimated cost (pay-as-you-go rates):\n`);
-    process.stdout.write(`  ${formatCost(totalCost)} USD\n`);
 
     const modelNames = Object.keys(perModel);
     if (modelNames.length > 0) {
@@ -180,9 +173,9 @@ program
       process.stdout.write(`Per-model breakdown:\n`);
       const maxNameLen = Math.max(...modelNames.map(n => n.length));
       for (const model of modelNames) {
-        const entry = perModel[model]!;
+        const tokens = perModel[model]!;
         const padded = model.padEnd(maxNameLen);
-        process.stdout.write(`  ${pc.bold(padded)}  ${entry.tokens.toLocaleString()} tokens  ${pc.cyan(formatCost(entry.cost))}\n`);
+        process.stdout.write(`  ${pc.bold(padded)}  ${tokens.toLocaleString()} tokens\n`);
       }
     }
   });
