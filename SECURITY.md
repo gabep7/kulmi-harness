@@ -2,9 +2,9 @@
 
 ## Reporting
 
-If you find a vulnerability in Kulmi, email `gpernoca@gmail.com` with a clear description and steps to reproduce. Do not open a public issue for security reports.
+If you find a vulnerability in Kulmi, use GitHub private vulnerability reporting on this repository. Do not open a public issue for security reports.
 
-I will acknowledge receipt when I can and work with you on a fix timeline before any public disclosure.
+Include a clear description and steps to reproduce. Fixes land before any public disclosure when practical.
 
 ## Scope
 
