@@ -1,11 +1,12 @@
 import type { EventBus, EventEnvelope } from "../core/events.js";
+import { describeToolCall, summarizeToolResult, toolLabel } from "../core/tool-summary.js";
 import type { AgentStatus, PlanStep, RunState, TokenUsage } from "../core/types.js";
 import type { ProviderMessage } from "../provider/types.js";
 import type { PermissionRequest } from "../tools/types.js";
 
 export type FeedItem =
   | { id: string; kind: "user" | "assistant" | "notice" | "error"; text: string }
-  | { id: string; kind: "tool"; title: string; detail: string; diff?: string; status: "running" | "done" | "error"; durationMs?: number }
+  | { id: string; kind: "tool"; title: string; detail: string; summary?: string; diff?: string; status: "running" | "done" | "error"; durationMs?: number }
   | { id: string; kind: "worker"; title: string; status: AgentStatus; activity?: string };
 
 export interface PendingApproval {
@@ -197,31 +198,30 @@ export class TuiStore {
         break;
       }
       case "tool.started": {
-        const detail = toolDetail(event.input);
-        const activity = detail ? `${friendlyTool(event.tool)}  ${detail}` : friendlyTool(event.tool);
+        const { label, detail } = describeToolCall(event.tool, event.input);
         if (!this.#isRoot(event.agentId)) {
-          this.#patchWorker(event.agentId, { activity });
+          this.#patchWorker(event.agentId, { activity: detail ? `${label}  ${detail}` : label });
           break;
         }
         this.#startLive({
           id: event.callId,
           kind: "tool",
-          title: friendlyTool(event.tool),
+          title: label,
           detail,
           status: "running",
         });
         break;
       }
-      case "tool.finished":
+      case "tool.finished": {
         if (event.tool === "complete_task" && !event.isError && this.#isRoot(event.agentId)) {
           const completion = parseCompletion(event.output);
           if (completion) this.#update({ completion });
         }
+        const summary = summarizeToolResult(event.tool, event.output, event.isError);
         if (!this.#isRoot(event.agentId)) {
-          const label = friendlyTool(event.tool);
-          this.#patchWorker(event.agentId, {
-            activity: event.isError ? `failed  ${label}` : `done  ${label}`,
-          });
+          const label = toolLabel(event.tool);
+          const outcome = event.isError ? `failed  ${label}` : `done  ${label}`;
+          this.#patchWorker(event.agentId, { activity: summary ? `${outcome}  ${summary}` : outcome });
           break;
         }
         if (this.#snapshot.live.some((item) => item.id === event.callId)) {
@@ -230,7 +230,7 @@ export class TuiStore {
                 ...item,
                 status: event.isError ? "error" : "done",
                 durationMs: event.durationMs,
-                detail: event.isError ? compactError(event.output) : item.detail,
+                ...(summary && summary !== item.detail ? { summary } : {}),
                 ...(event.diff ? { diff: event.diff } : {}),
               }
             : item);
@@ -238,14 +238,16 @@ export class TuiStore {
           this.#commit({
             id: event.callId,
             kind: "tool",
-            title: friendlyTool(event.tool),
-            detail: event.isError ? compactError(event.output) : "",
+            title: toolLabel(event.tool),
+            detail: "",
+            ...(summary ? { summary } : {}),
             ...(event.diff ? { diff: event.diff } : {}),
             status: event.isError ? "error" : "done",
             durationMs: event.durationMs,
           });
         }
         break;
+      }
       case "plan.updated":
         if (!this.#isRoot(event.agentId)) break;
         this.#update({ plan: event.steps });
@@ -370,62 +372,12 @@ function addUsage(total: TokenUsage, next: TokenUsage): TokenUsage {
   };
 }
 
-function friendlyTool(name: string): string {
-  const labels: Record<string, string> = {
-    read_file: "Read file",
-    glob: "Find files",
-    grep: "Search code",
-    write_file: "Write file",
-    edit_file: "Edit file",
-    edit_files: "Edit files",
-    delete_file: "Delete file",
-    shell: "Run command",
-    web_search: "Search web",
-    fetch_url: "Fetch page",
-    browser_qa: "Browser QA",
-    attach_image: "Attach image",
-    list_conflicts: "List conflicts",
-    read_conflict: "Read conflict",
-    resolve_conflict: "Resolve conflict",
-    commit_changes: "Commit changes",
-    spawn_agent: "Start worker",
-    wait_agents: "Wait for workers",
-    inspect_agent: "Inspect worker",
-    steer_agent: "Steer worker",
-    integrate_agent: "Integrate worker",
-    cancel_agent: "Cancel worker",
-    retry_agent: "Retry worker",
-    update_plan: "Update plan",
-    inspect_plan: "Inspect plan",
-    complete_task: "Complete task",
-    report_worker: "Report worker",
-    start_task: "Start task",
-    read_skill: "Read skill",
-    read_artifact: "Read artifact",
-  };
-  if (labels[name]) return labels[name];
-  return name.replaceAll("_", " ");
-}
-
-function toolDetail(input: unknown): string {
-  if (!input || typeof input !== "object") return "";
-  const object = input as Record<string, unknown>;
-  const candidate = object.command ?? object.path ?? object.pattern ?? object.query ?? object.job_id;
-  if (typeof candidate === "string") return candidate.replace(/\s+/g, " ").slice(0, 100);
-  const rendered = JSON.stringify(input);
-  return rendered === "{}" ? "" : rendered.slice(0, 100);
-}
-
 function shortPrompt(value: string): string {
   const cleaned = value
     .replace(/^Worker preset:\s*\w+\.[\s\S]*?(?=\n\n|\n[A-Z]|$)/, "")
     .replace(/\s+/g, " ")
     .trim();
   return (cleaned || value.replace(/\s+/g, " ").trim()).slice(0, 72);
-}
-
-function compactError(value: string): string {
-  return value.replace(/\s+/g, " ").slice(0, 120);
 }
 
 function parseCompletion(value: string): CompletionSummary | undefined {
