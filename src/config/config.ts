@@ -233,23 +233,45 @@ export function assertGitWorkTree(cwd: string): void {
   );
 }
 
+export type ConfigTrustLevel = "user" | "project";
+
+// Settings that change containment, autonomy, or the code-execution surface.
+// Only hard defaults + user config (~/.config/kulmi/config.toml) may set them.
+// Project .kulmi/config.toml values for these keys are stripped so a cloned
+// repo cannot weaken the sandbox, raise autonomy, or inject MCP/hooks.
+// Privileged keys: sandbox, hooks, mcp, default_autonomy (and default.default_autonomy).
+//
+// Project network surface is restricted separately after user config is applied:
+// project models cannot override user profiles, cannot use non-loopback base_url
+// (which would send the bound API key and full transcript to an attacker), cannot
+// force default_model when the user already chose one, and cannot redirect search.
+
 export function loadConfig(cwd: string): KulmiConfig {
   const root = findWorkspaceRoot(cwd);
   let config = structuredClone(defaults);
-  for (const path of [
-    join(homedir(), ".config", "kulmi", "config.toml"),
-    join(root, ".kulmi", "config.toml"),
-  ]) {
-    if (!existsSync(path)) continue;
-    config = mergeConfig(config, parseFileConfig(parse(readFileSync(path, "utf8")), path));
+  const userPath = join(homedir(), ".config", "kulmi", "config.toml");
+  const projectPath = join(root, ".kulmi", "config.toml");
+  if (existsSync(userPath)) {
+    config = mergeConfig(config, parseFileConfig(parse(readFileSync(userPath, "utf8")), userPath, "user"));
+  }
+  if (existsSync(projectPath)) {
+    const projectFile = parseFileConfig(parse(readFileSync(projectPath, "utf8")), projectPath, "project");
+    config = mergeConfig(config, restrictProjectNetworkSurface(projectFile, config, projectPath));
   }
   registerSecretEnvNames(Object.values(config.models).map((model) => model.apiKeyEnv));
   return config;
 }
 
-export function applyFileConfig(base: KulmiConfig, raw: unknown, source = "configuration"): KulmiConfig {
-  return mergeConfig(base, parseFileConfig(raw, source));
+export function applyFileConfig(
+  base: KulmiConfig,
+  raw: unknown,
+  source = "configuration",
+  trust: ConfigTrustLevel = "user",
+): KulmiConfig {
+  const file = parseFileConfig(raw, source, trust);
+  return mergeConfig(base, trust === "project" ? restrictProjectNetworkSurface(file, base, source) : file);
 }
+
 
 function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
   const models = { ...base.models };
@@ -322,11 +344,161 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
   return merged;
 }
 
-function parseFileConfig(raw: unknown, source: string): FileConfig {
+function parseFileConfig(raw: unknown, source: string, trust: ConfigTrustLevel = "user"): FileConfig {
   const parsed = fileConfigSchema.safeParse(raw);
   if (!parsed.success) throw new Error(`${source}: ${z.prettifyError(parsed.error)}`);
-  return parsed.data;
+  return trust === "project" ? restrictProjectFileConfig(parsed.data, source) : parsed.data;
 }
+
+function restrictProjectFileConfig(file: FileConfig, source: string): FileConfig {
+  const ignored: string[] = [];
+  const next: FileConfig = { ...file };
+
+  if (next.sandbox !== undefined) {
+    ignored.push("sandbox");
+    delete next.sandbox;
+  }
+  if (next.hooks !== undefined) {
+    ignored.push("hooks");
+    delete next.hooks;
+  }
+  if (next.mcp !== undefined) {
+    ignored.push("mcp");
+    delete next.mcp;
+  }
+  if (next.default_autonomy !== undefined || next.defaultAutonomy !== undefined) {
+    ignored.push("default_autonomy");
+    delete next.default_autonomy;
+    delete next.defaultAutonomy;
+  }
+  if (next.default) {
+    const table = { ...next.default };
+    if (table.default_autonomy !== undefined || table.defaultAutonomy !== undefined) {
+      ignored.push("default.default_autonomy");
+      delete table.default_autonomy;
+      delete table.defaultAutonomy;
+      if (table.default_model === undefined && table.defaultModel === undefined) {
+        delete next.default;
+      } else {
+        next.default = table;
+      }
+    }
+  }
+
+  warnIgnoredProjectSettings(source, ignored);
+  return next;
+}
+
+function restrictProjectNetworkSurface(file: FileConfig, base: KulmiConfig, source: string): FileConfig {
+  const ignored: string[] = [];
+  const next: FileConfig = { ...file };
+
+  if (next.search) {
+    const search = { ...next.search };
+    let changed = false;
+    if (search.provider !== undefined) {
+      ignored.push("search.provider");
+      delete search.provider;
+      changed = true;
+    }
+    if (search.searxng_url !== undefined || search.searxngUrl !== undefined) {
+      ignored.push("search.searxng_url");
+      delete search.searxng_url;
+      delete search.searxngUrl;
+      changed = true;
+    }
+    if (changed) {
+      if (search.mode === undefined && search.result_limit === undefined && search.resultLimit === undefined) {
+        delete next.search;
+      } else {
+        next.search = search;
+      }
+    }
+  }
+
+  if (next.models) {
+    const kept: NonNullable<FileConfig["models"]> = {};
+    for (const [name, model] of Object.entries(next.models)) {
+      if (base.models[name]) {
+        ignored.push(`models.${name}`);
+        continue;
+      }
+      const baseUrl = model.base_url ?? model.baseUrl ?? "";
+      if (!baseUrl || !isLoopbackHttpUrl(baseUrl)) {
+        ignored.push(`models.${name}.base_url`);
+        continue;
+      }
+      kept[name] = model;
+    }
+    if (Object.keys(kept).length === 0) delete next.models;
+    else next.models = kept;
+  }
+
+  if (base.defaultModel) {
+    if (next.default_model !== undefined || next.defaultModel !== undefined) {
+      ignored.push("default_model");
+      delete next.default_model;
+      delete next.defaultModel;
+    }
+    if (next.default && (next.default.default_model !== undefined || next.default.defaultModel !== undefined)) {
+      ignored.push("default.default_model");
+      const table = { ...next.default };
+      delete table.default_model;
+      delete table.defaultModel;
+      if (Object.keys(table).length === 0) delete next.default;
+      else next.default = table;
+    }
+  }
+
+  const allowedModels = new Set([...Object.keys(base.models), ...Object.keys(next.models ?? {})]);
+  for (const key of ["default_model", "defaultModel"] as const) {
+    const value = next[key];
+    if (typeof value === "string" && value.length > 0 && !allowedModels.has(value)) {
+      ignored.push(key);
+      delete next[key];
+    }
+  }
+  if (next.default) {
+    const table = { ...next.default };
+    let tableChanged = false;
+    for (const key of ["default_model", "defaultModel"] as const) {
+      const value = table[key];
+      if (typeof value === "string" && value.length > 0 && !allowedModels.has(value)) {
+        ignored.push(`default.${key}`);
+        delete table[key];
+        tableChanged = true;
+      }
+    }
+    if (tableChanged) {
+      if (Object.keys(table).length === 0) delete next.default;
+      else next.default = table;
+    }
+  }
+
+  warnIgnoredProjectSettings(source, ignored);
+  return next;
+}
+
+function isLoopbackHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".localhost");
+  } catch {
+    return false;
+  }
+}
+
+function warnIgnoredProjectSettings(source: string, ignored: string[]): void {
+  if (ignored.length === 0) return;
+  const unique = [...new Set(ignored)];
+  process.stderr.write(
+    `warning: ${source}: ignoring privileged settings (${unique.join(", ")}); ` +
+      `set them in ~/.config/kulmi/config.toml only\n`,
+  );
+}
+
 
 function validateMergedConfig(config: KulmiConfig): void {
   if (Object.keys(config.models).length === 0) {
@@ -378,7 +550,6 @@ export function configTemplate(): string {
   return `# Kulmi autonomous coding harness configuration.
 # No models are built in. Define your own OpenAI-compatible profiles.
 # default_model = "my-model"
-default_autonomy = "medium"
 max_steps = 80
 max_subagents = 3
 command_timeout_seconds = 120
@@ -389,18 +560,22 @@ result_limit = 5
 provider = "auto" # auto, searxng, or bing-rss
 # searxng_url = "http://127.0.0.1:8080" # optional self-hosted instance
 
-[sandbox]
-mode = "required" # required or off
-network = false # allow sandboxed project commands to use the network
-
 [undo]
 message_history = "truncate" # truncate or keep
 
-[hooks]
+# Privileged settings below apply only from ~/.config/kulmi/config.toml.
+# Project .kulmi/config.toml cannot set sandbox, default autonomy, hooks, or MCP.
+# default_autonomy = "medium"
+#
+# [sandbox]
+# mode = "required" # required or off
+# network = false # allow sandboxed project commands to use the network
+#
+# [hooks]
 # tool_pre = ["npm run lint:changed"]
 # tool_post = ["npm run verify:changed"]
 # tool_pre = [{ tool = "edit_file", command = "npm run lint:changed", timeout_seconds = 30 }]
-
+#
 # MCP servers expose extra tools to the agent over stdio.
 # [mcp.servers.filesystem]
 # command = "npx"
