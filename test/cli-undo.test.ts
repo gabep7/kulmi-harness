@@ -22,10 +22,10 @@ describe("kulmi undo", () => {
   it("restores the latest durable turn from the headless CLI", async () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-cli-undo-workspace-"));
     const data = await mkdtemp(join(tmpdir(), "kulmi-cli-undo-data-"));
-    await exec("git", ["init", root]);
-    await writeTestModelConfig(root);
     process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
     process.env.XDG_DATA_HOME = data;
+    await exec("git", ["init", root]);
+    await writeTestModelConfig(root);
     const file = join(root, "file.txt");
     await writeFile(file, "before\n");
     const state: RunState = {

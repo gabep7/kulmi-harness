@@ -59,7 +59,8 @@ describe("SessionController resume", () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-controller-model-"));
     await exec("git", ["init", root]);
     await writeTestModelConfig(root);
-    await writeFile(join(root, ".kulmi", "config.toml"), `default_model = "${TEST_MODEL_PROFILE}"
+    await mkdir(join(process.env.HOME!, ".config", "kulmi"), { recursive: true });
+    await writeFile(join(process.env.HOME!, ".config", "kulmi", "config.toml"), `default_model = "${TEST_MODEL_PROFILE}"
 
 [models.${TEST_MODEL_PROFILE}]
 model = "${TEST_MODEL}"
@@ -251,7 +252,8 @@ api_key_env = "${TEST_API_KEY_ENV}"
     const root = await mkdtemp(join(tmpdir(), "kulmi-controller-undo-keep-"));
     await exec("git", ["init", root]);
     await writeTestModelConfig(root);
-    await writeFile(join(root, ".kulmi", "config.toml"), `${await readFile(join(root, ".kulmi", "config.toml"), "utf8")}\n[undo]\nmessage_history = "keep"\n`);
+    await mkdir(join(root, ".kulmi"), { recursive: true });
+    await writeFile(join(root, ".kulmi", "config.toml"), `[undo]\nmessage_history = "keep"\n`);
     const fixture = await createUndoFixture(root);
     const controller = await SessionController.create({
       cwd: root,
@@ -309,17 +311,7 @@ describe("SessionController steering", () => {
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("mock model server has no port");
-    await mkdir(join(root, ".kulmi"), { recursive: true });
-    await writeFile(join(root, ".kulmi", "config.toml"), `default_model = "${TEST_MODEL_PROFILE}"
-
-[models.${TEST_MODEL_PROFILE}]
-model = "${TEST_MODEL}"
-base_url = "http://127.0.0.1:${address.port}/v1"
-api_key_env = "${TEST_API_KEY_ENV}"
-thinking = false
-context_window = 128000
-max_output_tokens = 16384
-`, "utf8");
+    await writeTestModelConfig(root, { baseUrl: `http://127.0.0.1:${address.port}/v1` });
     const controller = await SessionController.create({ cwd: root, mode: "chat", autonomy: "medium" });
     try {
       const abort = new AbortController();

@@ -105,7 +105,7 @@ kulmi exec --web-search free "research the current API before editing"
 kulmi doctor
 ```
 
-User configuration (`~/.config/kulmi/config.toml`) controls privileged containment and execution settings. Project `.kulmi/config.toml` may still set models, search, undo, and limits, but cannot disable the sandbox, enable sandbox network, raise default autonomy, or register hooks/MCP servers (those keys are ignored with a warning):
+User configuration (`~/.config/kulmi/config.toml`) controls privileged containment and execution settings. Project `.kulmi/config.toml` may set undo, limits, search mode/result limits, and loopback-only model profiles, but cannot disable the sandbox, enable sandbox network, raise default autonomy, register hooks/MCP servers, redirect search to a custom SearXNG URL, override an existing user model profile, force `default_model` when the user already chose one, or define a non-loopback `base_url` (remote model endpoints and API keys stay in user config so a cloned repo cannot exfiltrate credentials or transcripts):
 
 ```toml
 # ~/.config/kulmi/config.toml only
