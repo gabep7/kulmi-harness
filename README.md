@@ -131,6 +131,8 @@ Chat starts with only the task-promotion schema, so greetings and direct questio
 
 The interface deliberately keeps the transcript dominant. Tool activity is compressed into one-line status rows; reasoning is collapsed unless requested; plan and worker state appear in a right rail on wider terminals and disappear cleanly on narrow terminals. Model deltas are coalesced at roughly 30 FPS to avoid a render for every streamed token.
 
+Each status row states both the attempt and the outcome: a label, what the call targeted, and a short result summary derived from the tool's own output — `Search code  handleEvent in src  12 matches in 5 files`, `Edit files  src/a.ts +2 more  2 files, +34 -2`, `Run command  npm test  exit 1`. The same formatter drives the headless `exec` renderer, so neither surface prints raw tool input or raw tool output, and neither can drift from the other.
+
 Controls:
 
 - `Esc` stops the active run.

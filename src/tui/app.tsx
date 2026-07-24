@@ -379,7 +379,8 @@ function FeedRow({ item, width }: { item: FeedItem; width: number }) {
           {item.status === "error" ? glyph.error : item.status === "done" ? glyph.success : glyph.active}
           <Text color={theme.muted}> {item.title}</Text>
         </Text>
-        {item.detail && <Text color={theme.faint}>  {clampLine(item.detail, Math.max(12, width - item.title.length - 8))}</Text>}
+        {item.detail && <Text color={theme.faint}>  {clampLine(item.detail, Math.max(12, width - item.title.length - (item.summary?.length ?? 0) - 12))}</Text>}
+        {item.summary && <Text color={item.status === "error" ? theme.rose : theme.sage}>  {clampLine(item.summary, Math.max(12, width - item.title.length - 10))}</Text>}
         {item.durationMs !== undefined && <Text color={theme.faint}>  {formatDuration(item.durationMs)}</Text>}
       </Box>
       {item.diff && <Text color={theme.faint}>{item.diff}</Text>}

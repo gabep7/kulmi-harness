@@ -525,7 +525,7 @@ describe("Kulmi TUI", () => {
     }
     await pause();
     const snapshot = store.getSnapshot();
-    expect(snapshot.transcript.at(-1)).toMatchObject({ title: "Read file", status: "error", detail: "ENOENT missing final file" });
+    expect(snapshot.transcript.at(-1)).toMatchObject({ title: "Read file", status: "error", detail: "src/11.ts", summary: "ENOENT missing final file" });
     const view = render(
       <TuiApp
         store={store}
@@ -544,6 +544,53 @@ describe("Kulmi TUI", () => {
     expect(frame).toContain("ENOENT missing final file");
     expect(frame).toContain("--- a/src/10.ts");
     expect(frame).toContain("+new");
+  });
+
+  it("shows what a finished tool call actually did on its row", async () => {
+    const bus = new EventBus();
+    const store = new TuiStore();
+    store.attach(bus);
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        onSubmit={async () => undefined}
+        onCommand={async () => undefined}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    await bus.emit({ type: "agent.started", agentId: "root", prompt: "Find the leak" });
+    await bus.emit({ type: "tool.started", agentId: "root", callId: "call_grep", tool: "grep", input: { pattern: "leak", path: "src" } });
+    await bus.emit({
+      type: "tool.finished",
+      agentId: "root",
+      callId: "call_grep",
+      tool: "grep",
+      output: "./src/a.ts:1:leak\n./src/a.ts:9:leak\n./src/b.ts:3:leak",
+      isError: false,
+      durationMs: 8,
+    });
+    await bus.emit({ type: "tool.started", agentId: "root", callId: "call_plan", tool: "update_plan", input: { steps: [{ id: "1", title: "fix", status: "completed" }, { id: "2", title: "verify", status: "pending" }] } });
+    await bus.emit({
+      type: "tool.finished",
+      agentId: "root",
+      callId: "call_plan",
+      tool: "update_plan",
+      output: JSON.stringify({ accepted: true, step_count: 2, completed: 1 }),
+      isError: false,
+      durationMs: 1,
+    });
+    await pause();
+    const frame = view.frames.join("\n");
+    expect(frame).toContain("Search code");
+    expect(frame).toContain("3 matches in 2 files");
+    expect(frame).toContain("Update plan");
+    expect(frame).toContain("2 steps, 1 done");
+    expect(frame).not.toContain("{\"steps\"");
   });
 
   it("keeps the transcript append-only past the former static cap", async () => {
