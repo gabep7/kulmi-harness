@@ -1,5 +1,6 @@
 import pc from "picocolors";
 import type { EventBus, EventEnvelope } from "../core/events.js";
+import { describeToolCall, summarizeToolResult, toolLabel } from "../core/tool-summary.js";
 import type { OutputFormat } from "../core/types.js";
 
 export function attachRenderer(bus: EventBus, format: OutputFormat, _model?: string): () => void {
@@ -40,13 +41,19 @@ function renderText(
         process.stderr.write(`${pc.dim("source")} ${citation.title} ${pc.dim(citation.url)}\n`);
       }
       break;
-    case "tool.started":
-      process.stderr.write(`${pc.dim("›")} ${event.tool} ${pc.dim(compact(event.input))}\n`);
+    case "tool.started": {
+      const { label, detail } = describeToolCall(event.tool, event.input);
+      process.stderr.write(`${pc.dim("›")} ${label}${detail ? ` ${pc.dim(detail)}` : ""}\n`);
       break;
-    case "tool.finished":
-      process.stderr.write(`${event.isError ? pc.red("×") : pc.green("✓")} ${event.tool} ${pc.dim(`${event.durationMs}ms`)}\n`);
+    }
+    case "tool.finished": {
+      const summary = summarizeToolResult(event.tool, event.output, event.isError);
+      const glyph = event.isError ? pc.red("×") : pc.green("✓");
+      const outcome = summary ? ` ${event.isError ? pc.red(summary) : summary}` : "";
+      process.stderr.write(`${glyph} ${toolLabel(event.tool)}${outcome} ${pc.dim(`${event.durationMs}ms`)}\n`);
       if (event.diff) process.stderr.write(`${pc.dim(event.diff)}\n`);
       break;
+    }
     case "plan.updated": {
       const done = event.steps.filter((step) => step.status === "completed").length;
       process.stderr.write(`${pc.cyan("plan")} ${done}/${event.steps.length}\n`);
@@ -81,9 +88,4 @@ function renderText(
     default:
       break;
   }
-}
-
-function compact(value: unknown): string {
-  const rendered = JSON.stringify(value);
-  return rendered.length > 180 ? `${rendered.slice(0, 177)}...` : rendered;
 }
