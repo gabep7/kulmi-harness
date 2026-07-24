@@ -152,13 +152,24 @@ function splitShellLines(command: string): string[] {
 }
 
 function collectLineCommands(line: string, commands: ParsedCommand[]): void {
-  const entries = parse(line, (key) => `$${key}`);
+  const entries = collapseAmpersandRedirects(parse(line, (key) => `$${key}`));
   let argv: string[] = [];
   let writesRedirect = false;
   let nextIsRedirectPath = false;
 
   const flush = () => {
-    if (argv.length > 0) commands.push({ argv, writesRedirect });
+    // A redirect with no program of its own still writes its target, so it must
+    // not be silently dropped. Attribute it to the preceding command when there
+    // is one, otherwise keep an empty argv that analyzeArgv rejects outright.
+    if (argv.length === 0) {
+      if (writesRedirect) {
+        const previous = commands.at(-1);
+        if (previous) previous.writesRedirect = true;
+        else commands.push({ argv, writesRedirect });
+      }
+    } else {
+      commands.push({ argv, writesRedirect });
+    }
     argv = [];
     writesRedirect = false;
     nextIsRedirectPath = false;
@@ -191,6 +202,28 @@ function collectLineCommands(line: string, commands: ParsedCommand[]): void {
     flush();
   }
   flush();
+}
+
+// bash parses `&>` and `&>>` as a single redirect of both stdout and stderr, but
+// shell-quote reports them as a `&` separator followed by a `>` redirect. Left
+// alone that flushes the real command and strands the redirect on an empty argv,
+// so the write disappears from the risk assessment.
+function collapseAmpersandRedirects(entries: ParseEntry[]): ParseEntry[] {
+  const collapsed: ParseEntry[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const next = entries[index + 1];
+    if (
+      typeof entry === "object" && entry !== null && "op" in entry && entry.op === "&" &&
+      typeof next === "object" && next !== null && "op" in next && (next.op === ">" || next.op === ">>")
+    ) {
+      collapsed.push(next);
+      index += 1;
+      continue;
+    }
+    collapsed.push(entry as ParseEntry);
+  }
+  return collapsed;
 }
 
 function analyzeArgv(input: string[], trusted: boolean): {

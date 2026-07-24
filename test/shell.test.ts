@@ -101,4 +101,43 @@ describe("shell tool", () => {
     expect(readOnlyRequested).toBe(false);
     await expect(readFile(join(root, "target.txt"), "utf8")).rejects.toThrow();
   });
+
+  it("keeps read-risk commands working without a git work tree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-shell-nogit-"));
+    const session = await mkdtemp(join(tmpdir(), "kulmi-shell-nogit-session-"));
+    await writeFile(join(root, "source.txt"), "new\n");
+    const checkpoint = new CheckpointStore(session, root);
+    await checkpoint.beginTurn(1, "agent");
+    const state: RunState = {
+      agentId: "agent",
+      mode: "task",
+      status: "running",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const context = {
+      workspaceRoot: root,
+      cwd: root,
+      autonomy: "medium" as const,
+      signal: new AbortController().signal,
+      events: new EventBus(),
+      state,
+      checkpoint,
+      artifacts: new ArtifactStore(session),
+      commandTimeoutMs: 10_000,
+      maxOutputBytes: 100_000,
+    };
+
+    // Read-risk capture is best effort, so an untracked workspace still works.
+    const read = await shellTool.execute(context, { command: "cat source.txt" });
+    expect(read.isError).toBeFalsy();
+    expect(read.content).toContain("changed_files: []");
+
+    // Commands we already believe mutate must still fail loudly rather than
+    // running with no way to record or undo what they changed.
+    await expect(shellTool.execute(context, { command: "cp source.txt target.txt" }))
+      .rejects.toThrow(/git/i);
+  });
 });

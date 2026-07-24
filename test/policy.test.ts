@@ -87,6 +87,23 @@ describe("command policy", () => {
     expect(decideCommand('echo "unbalanced', "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
   });
 
+  it("counts &> and &>> as writes rather than dropping the redirect", () => {
+    // shell-quote reports these as a `&` separator plus a `>` redirect, which
+    // previously stranded the write on an empty argv and scored it read-risk.
+    expect(decideCommand("cat README.md &> out.txt", "read")).toMatchObject({ allowed: false, risk: "low" });
+    expect(decideCommand("cat README.md &>> out.txt", "read")).toMatchObject({ allowed: false, risk: "low" });
+    expect(decideCommand("cat README.md &> out.txt", "low").allowed).toBe(true);
+  });
+
+  it("keeps treating a bare ampersand as a command separator", () => {
+    expect(decideCommand("sleep 1 & git status", "read")).toMatchObject({ allowed: false, risk: "medium" });
+    expect(decideCommand("sleep 1 & git status", "medium").allowed).toBe(true);
+  });
+
+  it("rejects a redirect with no program of its own", () => {
+    expect(decideCommand("> out.txt", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
   it("recognizes validator commands including assertion scripts", () => {
     expect(decideCommand("echo test", "medium").verification).toBe(false);
     expect(decideCommand("npm run typecheck", "medium").verification).toBe(true);

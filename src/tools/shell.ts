@@ -31,9 +31,18 @@ export const shellTool = defineTool({
       }
       approvedDenial = true;
     }
-    const snapshot = decision.risk === "read" && !approvedDenial
-      ? undefined
-      : await WorkspaceSnapshot.capture(context.workspaceRoot);
+    // Snapshot every command, not just the ones classified as mutating. A policy
+    // misclassification must not also mean the resulting change is untracked,
+    // undiffed and impossible to undo.
+    const expectedToMutate = decision.risk !== "read" || approvedDenial;
+    let snapshot: WorkspaceSnapshot | undefined;
+    try {
+      snapshot = await WorkspaceSnapshot.capture(context.workspaceRoot);
+    } catch (error) {
+      // Mandatory for commands we already believe mutate; best effort for
+      // read-risk ones so a workspace without a git work tree behaves as before.
+      if (expectedToMutate) throw error;
+    }
     let result: Awaited<ReturnType<typeof runShell>> | undefined;
     let diff: string | undefined;
     let changedFiles: string[] = [];
