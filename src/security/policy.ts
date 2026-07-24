@@ -94,8 +94,65 @@ export function decideCommand(
 }
 
 function parseCommands(command: string): ParsedCommand[] {
-  const entries = parse(command, (key) => `$${key}`);
   const commands: ParsedCommand[] = [];
+  for (const line of splitShellLines(command)) {
+    if (line.trim()) collectLineCommands(line, commands);
+  }
+  return commands;
+}
+
+// shell-quote treats a newline as ordinary whitespace, but bash treats it as a
+// command separator. Splitting here first keeps the policy's view of the command
+// list identical to what `/bin/bash -c` actually executes; without it a second
+// line is absorbed as arguments of the first command and never classified.
+function splitShellLines(command: string): string[] {
+  const lines: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index] ?? "";
+    if (quote === "'") {
+      current += char;
+      if (char === "'") quote = undefined;
+      continue;
+    }
+    if (char === "\\" && index + 1 < command.length) {
+      const next = command[index + 1] ?? "";
+      if (next === "\n" || next === "\r") {
+        // Line continuation: bash removes the backslash and the newline entirely
+        // and joins the surrounding text, so it is not a command separator.
+        index += next === "\r" && command[index + 2] === "\n" ? 2 : 1;
+        continue;
+      }
+      // Any other backslash escapes exactly one following character.
+      current += char + next;
+      index += 1;
+      continue;
+    }
+    if (quote === "\"") {
+      current += char;
+      if (char === "\"") quote = undefined;
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === "\n" || char === "\r") {
+      lines.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (quote) throw new Error("unbalanced quote");
+  lines.push(current);
+  return lines;
+}
+
+function collectLineCommands(line: string, commands: ParsedCommand[]): void {
+  const entries = parse(line, (key) => `$${key}`);
   let argv: string[] = [];
   let writesRedirect = false;
   let nextIsRedirectPath = false;
@@ -134,7 +191,6 @@ function parseCommands(command: string): ParsedCommand[] {
     flush();
   }
   flush();
-  return commands;
 }
 
 function analyzeArgv(input: string[], trusted: boolean): {

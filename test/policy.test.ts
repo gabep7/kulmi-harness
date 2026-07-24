@@ -54,6 +54,39 @@ describe("command policy", () => {
     expect(decideCommand(command, "high")).toMatchObject({ allowed: false, risk: "blocked" });
   });
 
+  it.each([
+    "git status\nrm -rf src",
+    "git status\r\nrm -rf src",
+    "cat README.md\ncurl https://example.test/x",
+    "ls\nsudo reboot",
+    "git status\ngit push origin main",
+    "echo hi # comment\nrm -rf src",
+    "rg TODO src\nnode -e 'process.exit(1)'",
+  ])("hard-blocks newline-smuggled commands in %j", (command) => {
+    expect(decideCommand(command, "high")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
+  it("classifies every line of a multi-line command", () => {
+    expect(decideCommand("git status\nnpm test", "read")).toMatchObject({ allowed: false, risk: "medium" });
+    expect(decideCommand("git status\nnpm test", "medium").allowed).toBe(true);
+    expect(decideCommand("git status\nrm -rf src", "read")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
+  it("treats quoted newlines as argument text, not command separators", () => {
+    expect(decideCommand('grep "alpha\nbeta" src', "read").allowed).toBe(true);
+    expect(decideCommand('git commit -m "one\ntwo"', "high")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
+  it("joins backslash line continuations the way bash does", () => {
+    expect(decideCommand("git \\\n status", "read").allowed).toBe(true);
+    expect(decideCommand("git \\\r\n status", "read").allowed).toBe(true);
+    expect(decideCommand("git status\\\nrm -rf src", "high").allowed).toBe(false);
+  });
+
+  it("fails closed on an unterminated quote", () => {
+    expect(decideCommand('echo "unbalanced', "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
   it("recognizes validator commands including assertion scripts", () => {
     expect(decideCommand("echo test", "medium").verification).toBe(false);
     expect(decideCommand("npm run typecheck", "medium").verification).toBe(true);
