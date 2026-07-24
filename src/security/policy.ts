@@ -94,20 +94,91 @@ export function decideCommand(
 }
 
 function parseCommands(command: string): ParsedCommand[] {
-  const entries = parse(command, (key) => `$${key}`);
   const commands: ParsedCommand[] = [];
+  for (const line of splitShellLines(command)) {
+    if (line.trim()) collectLineCommands(line, commands);
+  }
+  return commands;
+}
+
+// shell-quote treats a newline as ordinary whitespace, but bash treats it as a
+// command separator. Splitting here first keeps the policy's view of the command
+// list identical to what `/bin/bash -c` actually executes; without it a second
+// line is absorbed as arguments of the first command and never classified.
+function splitShellLines(command: string): string[] {
+  const lines: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index] ?? "";
+    if (quote === "'") {
+      current += char;
+      if (char === "'") quote = undefined;
+      continue;
+    }
+    if (char === "\\" && index + 1 < command.length) {
+      const next = command[index + 1] ?? "";
+      if (next === "\n" || next === "\r") {
+        // Line continuation: bash removes the backslash and the newline entirely
+        // and joins the surrounding text, so it is not a command separator.
+        index += next === "\r" && command[index + 2] === "\n" ? 2 : 1;
+        continue;
+      }
+      // Any other backslash escapes exactly one following character.
+      current += char + next;
+      index += 1;
+      continue;
+    }
+    if (quote === "\"") {
+      current += char;
+      if (char === "\"") quote = undefined;
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === "\n" || char === "\r") {
+      lines.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (quote) throw new Error("unbalanced quote");
+  lines.push(current);
+  return lines;
+}
+
+function collectLineCommands(line: string, commands: ParsedCommand[]): void {
+  const entries = collapseAmpersandRedirects(parse(line, (key) => `$${key}`));
   let argv: string[] = [];
   let writesRedirect = false;
   let nextIsRedirectPath = false;
+  let previousWasInput = false;
 
   const flush = () => {
-    if (argv.length > 0) commands.push({ argv, writesRedirect });
+    // A redirect with no program of its own still writes its target, so it must
+    // not be silently dropped. Attribute it to the preceding command when there
+    // is one, otherwise keep an empty argv that analyzeArgv rejects outright.
+    if (argv.length === 0) {
+      if (writesRedirect) {
+        const previous = commands.at(-1);
+        if (previous) previous.writesRedirect = true;
+        else commands.push({ argv, writesRedirect });
+      }
+    } else {
+      commands.push({ argv, writesRedirect });
+    }
     argv = [];
     writesRedirect = false;
     nextIsRedirectPath = false;
   };
 
   for (const entry of entries) {
+    const afterInputRedirect = previousWasInput;
+    previousWasInput = false;
     if (typeof entry === "string") {
       if (nextIsRedirectPath) {
         nextIsRedirectPath = false;
@@ -127,14 +198,48 @@ function parseCommands(command: string): ParsedCommand[] {
       nextIsRedirectPath = true;
       continue;
     }
+    // A heredoc body is data, not commands, but splitting on newlines would
+    // classify each body line as its own command: harmless prose mentioning a
+    // blocked program would be rejected, and the delimiter would parse as a
+    // program. Teaching this parser the heredoc grammar is exactly the surface
+    // that produced the bypasses above, so reject them the way subshells and
+    // command substitution already are.
+    // shell-quote emits `<<<` at runtime even though its ControlOperator union
+    // omits it, so widen before comparing rather than asserting a shape.
+    const operator: string = entry.op;
+    if (operator === "<<<") throw new Error("herestrings are blocked");
     if (entry.op === "<") {
+      if (afterInputRedirect) throw new Error("heredocs are blocked");
+      previousWasInput = true;
       nextIsRedirectPath = true;
       continue;
     }
     flush();
   }
   flush();
-  return commands;
+}
+
+// bash parses `&>` and `&>>` as a single redirect of both stdout and stderr, but
+// shell-quote reports them as a `&` separator followed by a `>` redirect. Left
+// alone that flushes the real command and strands the redirect on an empty argv,
+// so the write disappears from the risk assessment.
+function collapseAmpersandRedirects(entries: ParseEntry[]): ParseEntry[] {
+  const collapsed: ParseEntry[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const next = entries[index + 1];
+    if (
+      typeof entry === "object" && entry !== null && "op" in entry && entry.op === "&" &&
+      typeof next === "object" && next !== null && "op" in next && (next.op === ">" || next.op === ">>")
+    ) {
+      collapsed.push(next);
+      index += 1;
+      continue;
+    }
+    if (entry === undefined) continue;
+    collapsed.push(entry);
+  }
+  return collapsed;
 }
 
 function analyzeArgv(input: string[], trusted: boolean): {

@@ -54,6 +54,66 @@ describe("command policy", () => {
     expect(decideCommand(command, "high")).toMatchObject({ allowed: false, risk: "blocked" });
   });
 
+  it.each([
+    "git status\nrm -rf src",
+    "git status\r\nrm -rf src",
+    "cat README.md\ncurl https://example.test/x",
+    "ls\nsudo reboot",
+    "git status\ngit push origin main",
+    "echo hi # comment\nrm -rf src",
+    "rg TODO src\nnode -e 'process.exit(1)'",
+  ])("hard-blocks newline-smuggled commands in %j", (command) => {
+    expect(decideCommand(command, "high")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
+  it("classifies every line of a multi-line command", () => {
+    expect(decideCommand("git status\nnpm test", "read")).toMatchObject({ allowed: false, risk: "medium" });
+    expect(decideCommand("git status\nnpm test", "medium").allowed).toBe(true);
+    expect(decideCommand("git status\nrm -rf src", "read")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
+  it("treats quoted newlines as argument text, not command separators", () => {
+    expect(decideCommand('grep "alpha\nbeta" src', "read").allowed).toBe(true);
+    expect(decideCommand('git commit -m "one\ntwo"', "high")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
+  it("joins backslash line continuations the way bash does", () => {
+    expect(decideCommand("git \\\n status", "read").allowed).toBe(true);
+    expect(decideCommand("git \\\r\n status", "read").allowed).toBe(true);
+    expect(decideCommand("git status\\\nrm -rf src", "high").allowed).toBe(false);
+  });
+
+  it("fails closed on an unterminated quote", () => {
+    expect(decideCommand('echo "unbalanced', "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
+  it("rejects heredocs and herestrings instead of parsing their bodies", () => {
+    // Splitting on newlines would otherwise treat each heredoc body line as its
+    // own command, so prose that merely mentions a blocked program would be
+    // reported as that program being run.
+    expect(decideCommand("cat <<EOF\nhello\nEOF", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("cat <<EOF\nrm -rf src\nEOF", "trusted").reason).toContain("heredoc");
+    expect(decideCommand("grep -q x file.ts <<< inline", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("cat < input.txt", "read").allowed).toBe(true);
+  });
+
+  it("counts &> and &>> as writes rather than dropping the redirect", () => {
+    // shell-quote reports these as a `&` separator plus a `>` redirect, which
+    // previously stranded the write on an empty argv and scored it read-risk.
+    expect(decideCommand("cat README.md &> out.txt", "read")).toMatchObject({ allowed: false, risk: "low" });
+    expect(decideCommand("cat README.md &>> out.txt", "read")).toMatchObject({ allowed: false, risk: "low" });
+    expect(decideCommand("cat README.md &> out.txt", "low").allowed).toBe(true);
+  });
+
+  it("keeps treating a bare ampersand as a command separator", () => {
+    expect(decideCommand("sleep 1 & git status", "read")).toMatchObject({ allowed: false, risk: "medium" });
+    expect(decideCommand("sleep 1 & git status", "medium").allowed).toBe(true);
+  });
+
+  it("rejects a redirect with no program of its own", () => {
+    expect(decideCommand("> out.txt", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+  });
+
   it("recognizes validator commands including assertion scripts", () => {
     expect(decideCommand("echo test", "medium").verification).toBe(false);
     expect(decideCommand("npm run typecheck", "medium").verification).toBe(true);
