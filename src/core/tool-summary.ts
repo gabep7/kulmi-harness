@@ -219,8 +219,14 @@ export function summarizeToolResult(tool: string, output: string, isError: boole
 export function toolLabel(tool: string): string {
   const known = TOOL_LABELS[tool];
   if (known) return known;
-  const bridged = /^mcp_([^_]+)_(.+)$/.exec(tool);
-  if (bridged) return `${bridged[1]}: ${(bridged[2] as string).replaceAll("_", " ")}`;
+  // Bridged MCP tools arrive as the flat `mcp_<server>_<tool>` name built in
+  // src/mcp/client.ts. Both halves may contain underscores (config.ts allows `_`
+  // in server names), so the boundary is unrecoverable from the flat string, and
+  // the server list is not reachable here: MCP servers connect inside
+  // SessionController.create, after both renderers are already attached. Rather
+  // than guess a split and mislabel `mcp_my_server_read_file` as server `my`, keep
+  // the whole remainder and mark the family.
+  if (tool.startsWith("mcp_") && tool.length > 4) return `mcp: ${tool.slice(4).replaceAll("_", " ")}`;
   const words = tool.replaceAll("_", " ").trim();
   return words ? `${words[0]?.toUpperCase()}${words.slice(1)}` : tool;
 }

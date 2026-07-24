@@ -91,9 +91,22 @@ describe("describeToolCall detail rules", () => {
     expect(describeToolCall("complete_task", { status: "blocked", summary: "no key" }).detail).toBe("blocked");
   });
 
-  it("labels bridged mcp tools as server plus tool name", () => {
-    expect(toolLabel("mcp_filesystem_read_file")).toBe("filesystem: read file");
-    expect(describeToolCall("mcp_echo_echo", { text: "hi" }).label).toBe("echo: echo");
+  it("gives bridged mcp tools a readable label without guessing the server boundary", () => {
+    expect(toolLabel("mcp_filesystem_read_file")).toBe("mcp: filesystem read file");
+    expect(describeToolCall("mcp_echo_echo", { text: "hi" }).label).toBe("mcp: echo echo");
+  });
+
+  // config.ts allows `_` in mcp server names, so `mcp_my_server_read_file` could be
+  // server `my_server` tool `read_file` or server `my` tool `server_read_file`. The
+  // flat name cannot say which, so the label keeps every word rather than inventing
+  // a server called `my`.
+  it("never mislabels an mcp server whose name contains an underscore", () => {
+    expect(toolLabel("mcp_my_server_read_file")).toBe("mcp: my server read file");
+    expect(toolLabel("mcp_my_server_read_file")).not.toBe("my: server read file");
+  });
+
+  it("keeps a bare mcp prefix intact rather than emitting a dangling label", () => {
+    expect(toolLabel("mcp_")).toBe("Mcp");
   });
 
   it("capitalizes unmapped tool labels so rows stay consistent", () => {
