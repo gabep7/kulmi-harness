@@ -23,7 +23,7 @@ interface Observation {
 }
 
 async function fingerprint(dir: string): Promise<string> {
-  const names = (await readdir(dir)).sort();
+  const names = (await readdir(dir, { recursive: true })).sort();
   const entries = await Promise.all(names.map(async (name) => {
     const info = await stat(join(dir, name));
     return `${name}:${info.size}:${info.mtimeMs}`;

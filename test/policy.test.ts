@@ -87,6 +87,16 @@ describe("command policy", () => {
     expect(decideCommand('echo "unbalanced', "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
   });
 
+  it("rejects heredocs and herestrings instead of parsing their bodies", () => {
+    // Splitting on newlines would otherwise treat each heredoc body line as its
+    // own command, so prose that merely mentions a blocked program would be
+    // reported as that program being run.
+    expect(decideCommand("cat <<EOF\nhello\nEOF", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("cat <<EOF\nrm -rf src\nEOF", "trusted").reason).toContain("heredoc");
+    expect(decideCommand("grep -q x file.ts <<< inline", "trusted")).toMatchObject({ allowed: false, risk: "blocked" });
+    expect(decideCommand("cat < input.txt", "read").allowed).toBe(true);
+  });
+
   it("counts &> and &>> as writes rather than dropping the redirect", () => {
     // shell-quote reports these as a `&` separator plus a `>` redirect, which
     // previously stranded the write on an empty argv and scored it read-risk.

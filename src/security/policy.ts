@@ -156,6 +156,7 @@ function collectLineCommands(line: string, commands: ParsedCommand[]): void {
   let argv: string[] = [];
   let writesRedirect = false;
   let nextIsRedirectPath = false;
+  let previousWasInput = false;
 
   const flush = () => {
     // A redirect with no program of its own still writes its target, so it must
@@ -176,6 +177,8 @@ function collectLineCommands(line: string, commands: ParsedCommand[]): void {
   };
 
   for (const entry of entries) {
+    const afterInputRedirect = previousWasInput;
+    previousWasInput = false;
     if (typeof entry === "string") {
       if (nextIsRedirectPath) {
         nextIsRedirectPath = false;
@@ -195,7 +198,19 @@ function collectLineCommands(line: string, commands: ParsedCommand[]): void {
       nextIsRedirectPath = true;
       continue;
     }
+    // A heredoc body is data, not commands, but splitting on newlines would
+    // classify each body line as its own command: harmless prose mentioning a
+    // blocked program would be rejected, and the delimiter would parse as a
+    // program. Teaching this parser the heredoc grammar is exactly the surface
+    // that produced the bypasses above, so reject them the way subshells and
+    // command substitution already are.
+    // shell-quote emits `<<<` at runtime even though its ControlOperator union
+    // omits it, so widen before comparing rather than asserting a shape.
+    const operator: string = entry.op;
+    if (operator === "<<<") throw new Error("herestrings are blocked");
     if (entry.op === "<") {
+      if (afterInputRedirect) throw new Error("heredocs are blocked");
+      previousWasInput = true;
       nextIsRedirectPath = true;
       continue;
     }
@@ -221,7 +236,8 @@ function collapseAmpersandRedirects(entries: ParseEntry[]): ParseEntry[] {
       index += 1;
       continue;
     }
-    collapsed.push(entry as ParseEntry);
+    if (entry === undefined) continue;
+    collapsed.push(entry);
   }
   return collapsed;
 }
