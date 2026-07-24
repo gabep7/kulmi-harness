@@ -105,9 +105,10 @@ kulmi exec --web-search free "research the current API before editing"
 kulmi doctor
 ```
 
-Project or user configuration can control the command sandbox and undo transcript behavior:
+User configuration (`~/.config/kulmi/config.toml`) controls privileged containment and execution settings. Project `.kulmi/config.toml` may still set models, search, undo, and limits, but cannot disable the sandbox, enable sandbox network, raise default autonomy, or register hooks/MCP servers (those keys are ignored with a warning):
 
 ```toml
+# ~/.config/kulmi/config.toml only
 [sandbox]
 mode = "required" # required or off
 network = false
@@ -119,7 +120,7 @@ default_autonomy = "trusted"
 message_history = "truncate" # truncate or keep
 ```
 
-The safe defaults require an available OS sandbox, deny command network access, and remove the undone turn from the active model and UI transcript. `keep` preserves the undone messages and appends an explicit marker telling the model that their file changes were reverted. `off` runs project commands without OS containment and should only be used deliberately.
+The safe defaults require an available OS sandbox, deny command network access, and remove the undone turn from the active model and UI transcript. `keep` preserves the undone messages and appends an explicit marker telling the model that their file changes were reverted. `off` runs project commands without OS containment and should only be used deliberately in user config.
 
 On Ubuntu systems that restrict unprivileged user namespaces through AppArmor, `bwrap` can be installed but unusable. `kulmi doctor` performs a real namespace probe and reports this state. Configure an administrator-approved AppArmor exception for `bwrap`; do not disable Kulmi's sandbox merely to bypass the check.
 
@@ -188,7 +189,7 @@ Running workers can be redirected with `steer_agent`. Failed or interrupted work
 
 ## MCP servers
 
-Kulmi is an MCP client. Declare stdio servers in `config.toml`:
+Kulmi is an MCP client. Declare stdio servers in user config (`~/.config/kulmi/config.toml`) only — project config cannot register MCP servers:
 
 ```toml
 [mcp.servers.filesystem]
@@ -225,8 +226,7 @@ Git workflow tools list, read, and resolve merge conflicts, then stage the resol
 ## Cache contract
 
 Prompt caching is automatic and prefix-based on supported providers. Kulmi optimizes it by keeping the system message byte-stable, sorting tools canonically, canonicalizing every JSON schema, preserving message and tool-result order, and appending volatile state only at the conversation tail. Chat and task mode use separate cache scopes so the one deliberate tool-catalog expansion cannot invalidate either stable prefix. Compaction happens only near the context boundary and only at a complete message boundary. Large tool output is stored as a retrievable artifact with a bounded preview, and state-changing tools return compact acknowledgements instead of duplicating state into the next fresh prompt tail.
-
-Configured `tool_pre` hooks run before tool execution and can block a tool by exiting nonzero. `tool_post` hooks run after tool execution; failures are reported as runtime errors without replacing the original tool result. Hooks are plain project commands with safe environment, timeout, and bounded output, not a plugin system.
+Configured `tool_pre` hooks (user config only) run before tool execution and can block a tool by exiting nonzero. `tool_post` hooks run after tool execution; failures are reported as runtime errors without replacing the original tool result. Hooks are plain project commands with safe environment, timeout, and bounded output, not a plugin system.
 
 Providers that report cache reads through `usage.prompt_tokens_details.cached_tokens` are fully supported. Kulmi reports cached and fresh tokens independently for every request.
 

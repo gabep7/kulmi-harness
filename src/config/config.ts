@@ -233,23 +233,38 @@ export function assertGitWorkTree(cwd: string): void {
   );
 }
 
+export type ConfigTrustLevel = "user" | "project";
+
+// Settings that change containment, autonomy, or code-execution surface.
+// Only hard defaults + user config (~/.config/kulmi/config.toml) may set them.
+// Project .kulmi/config.toml values for these keys are stripped so a cloned
+// repo cannot weaken the sandbox, raise autonomy, or inject MCP/hooks.
+// Privileged keys: sandbox, hooks, mcp, default_autonomy (and default.default_autonomy).
+
 export function loadConfig(cwd: string): KulmiConfig {
   const root = findWorkspaceRoot(cwd);
   let config = structuredClone(defaults);
-  for (const path of [
-    join(homedir(), ".config", "kulmi", "config.toml"),
-    join(root, ".kulmi", "config.toml"),
-  ]) {
-    if (!existsSync(path)) continue;
-    config = mergeConfig(config, parseFileConfig(parse(readFileSync(path, "utf8")), path));
+  const userPath = join(homedir(), ".config", "kulmi", "config.toml");
+  const projectPath = join(root, ".kulmi", "config.toml");
+  if (existsSync(userPath)) {
+    config = mergeConfig(config, parseFileConfig(parse(readFileSync(userPath, "utf8")), userPath, "user"));
+  }
+  if (existsSync(projectPath)) {
+    config = mergeConfig(config, parseFileConfig(parse(readFileSync(projectPath, "utf8")), projectPath, "project"));
   }
   registerSecretEnvNames(Object.values(config.models).map((model) => model.apiKeyEnv));
   return config;
 }
 
-export function applyFileConfig(base: KulmiConfig, raw: unknown, source = "configuration"): KulmiConfig {
-  return mergeConfig(base, parseFileConfig(raw, source));
+export function applyFileConfig(
+  base: KulmiConfig,
+  raw: unknown,
+  source = "configuration",
+  trust: ConfigTrustLevel = "user",
+): KulmiConfig {
+  return mergeConfig(base, parseFileConfig(raw, source, trust));
 }
+
 
 function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
   const models = { ...base.models };
@@ -322,11 +337,57 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
   return merged;
 }
 
-function parseFileConfig(raw: unknown, source: string): FileConfig {
+function parseFileConfig(raw: unknown, source: string, trust: ConfigTrustLevel = "user"): FileConfig {
   const parsed = fileConfigSchema.safeParse(raw);
   if (!parsed.success) throw new Error(`${source}: ${z.prettifyError(parsed.error)}`);
-  return parsed.data;
+  return trust === "project" ? restrictProjectFileConfig(parsed.data, source) : parsed.data;
 }
+
+function restrictProjectFileConfig(file: FileConfig, source: string): FileConfig {
+  const ignored: string[] = [];
+  const next: FileConfig = { ...file };
+
+  if (next.sandbox !== undefined) {
+    ignored.push("sandbox");
+    delete next.sandbox;
+  }
+  if (next.hooks !== undefined) {
+    ignored.push("hooks");
+    delete next.hooks;
+  }
+  if (next.mcp !== undefined) {
+    ignored.push("mcp");
+    delete next.mcp;
+  }
+  if (next.default_autonomy !== undefined || next.defaultAutonomy !== undefined) {
+    ignored.push("default_autonomy");
+    delete next.default_autonomy;
+    delete next.defaultAutonomy;
+  }
+  if (next.default) {
+    const table = { ...next.default };
+    if (table.default_autonomy !== undefined || table.defaultAutonomy !== undefined) {
+      ignored.push("default.default_autonomy");
+      delete table.default_autonomy;
+      delete table.defaultAutonomy;
+      if (table.default_model === undefined && table.defaultModel === undefined) {
+        delete next.default;
+      } else {
+        next.default = table;
+      }
+    }
+  }
+
+  if (ignored.length > 0) {
+    const unique = [...new Set(ignored)];
+    process.stderr.write(
+      `warning: ${source}: ignoring privileged settings (${unique.join(", ")}); ` +
+        `set them in ~/.config/kulmi/config.toml only\n`,
+    );
+  }
+  return next;
+}
+
 
 function validateMergedConfig(config: KulmiConfig): void {
   if (Object.keys(config.models).length === 0) {
@@ -378,7 +439,6 @@ export function configTemplate(): string {
   return `# Kulmi autonomous coding harness configuration.
 # No models are built in. Define your own OpenAI-compatible profiles.
 # default_model = "my-model"
-default_autonomy = "medium"
 max_steps = 80
 max_subagents = 3
 command_timeout_seconds = 120
@@ -389,18 +449,22 @@ result_limit = 5
 provider = "auto" # auto, searxng, or bing-rss
 # searxng_url = "http://127.0.0.1:8080" # optional self-hosted instance
 
-[sandbox]
-mode = "required" # required or off
-network = false # allow sandboxed project commands to use the network
-
 [undo]
 message_history = "truncate" # truncate or keep
 
-[hooks]
+# Privileged settings below apply only from ~/.config/kulmi/config.toml.
+# Project .kulmi/config.toml cannot set sandbox, default autonomy, hooks, or MCP.
+# default_autonomy = "medium"
+#
+# [sandbox]
+# mode = "required" # required or off
+# network = false # allow sandboxed project commands to use the network
+#
+# [hooks]
 # tool_pre = ["npm run lint:changed"]
 # tool_post = ["npm run verify:changed"]
 # tool_pre = [{ tool = "edit_file", command = "npm run lint:changed", timeout_seconds = 30 }]
-
+#
 # MCP servers expose extra tools to the agent over stdio.
 # [mcp.servers.filesystem]
 # command = "npx"
