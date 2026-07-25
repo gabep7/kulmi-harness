@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse } from "smol-toml";
 import { z } from "zod";
 import type { AutonomyLevel } from "../core/types.js";
@@ -538,6 +538,72 @@ export function resolveModel(config: KulmiConfig, name?: string): ResolvedModel 
   const apiKey = process.env[model.apiKeyEnv];
   if (!apiKey) throw new Error(`missing ${model.apiKeyEnv} for model ${modelName}`);
   return { ...model, name: modelName, apiKey };
+}
+
+export function userConfigPath(): string {
+  return join(homedir(), ".config", "kulmi", "config.toml");
+}
+
+export function writeUserModelProfile(options: {
+  profileName: string;
+  model: string;
+  baseUrl: string;
+  apiKeyEnv: string;
+  protocol?: ModelProtocol;
+  thinking?: boolean;
+  reasoningEffort?: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  makeDefault?: boolean;
+}): string {
+  const path = userConfigPath();
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+
+  let existing = "";
+  if (existsSync(path)) {
+    existing = readFileSync(path, "utf8");
+    try {
+      parse(existing);
+    } catch (error) {
+      throw new Error(`cannot add model profile: existing user config is invalid: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const withoutDefault = removeTopLevelDefaultModel(existing);
+  const profile = [
+    `[models.${options.profileName}]`,
+    `model = ${tomlValue(options.model)}`,
+    `base_url = ${tomlValue(options.baseUrl)}`,
+    `api_key_env = ${tomlValue(options.apiKeyEnv)}`,
+    `protocol = ${tomlValue(options.protocol ?? "openai")}`,
+    `thinking = ${String(options.thinking ?? false)}`,
+    ...(options.reasoningEffort ? [`reasoning_effort = ${tomlValue(options.reasoningEffort)}`] : []),
+    `context_window = ${String(options.contextWindow ?? 128_000)}`,
+    `max_output_tokens = ${String(options.maxOutputTokens ?? 16_384)}`,
+  ].join("\n");
+  const prefix = withoutDefault ? `${withoutDefault}\n\n` : "";
+  const defaultLine = options.makeDefault === false ? "" : `default_model = ${tomlValue(options.profileName)}\n\n`;
+  writeFileSync(path, `${defaultLine}${prefix}${profile}\n`, { encoding: "utf8", mode: 0o600 });
+  return path;
+}
+
+
+function removeTopLevelDefaultModel(source: string): string {
+  const lines = source.split("\n");
+  let inMultiline = false;
+  const kept: string[] = [];
+  for (const line of lines) {
+    const tripleCount = (line.match(/"""/g) ?? []).length;
+    if (!inMultiline && /^default_model\s*=/.test(line)) {
+      if (tripleCount % 2 === 1) inMultiline = true;
+      continue;
+    }
+    kept.push(line);
+    if (tripleCount % 2 === 1) inMultiline = !inMultiline;
+  }
+  return kept.join("\n").trimEnd();
+}
+function tomlValue(value: string): string {
+  return JSON.stringify(value);
 }
 
 export function expandPath(path: string): string {

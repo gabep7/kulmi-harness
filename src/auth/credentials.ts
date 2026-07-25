@@ -1,12 +1,21 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { loadConfig } from "../config/config.js";
+import { loadConfig, writeUserModelProfile, type ModelProtocol } from "../config/config.js";
 
 const execFileAsync = promisify(execFile);
 const keychainService = "dev.kulmi.api-key";
 
 export interface CredentialChoice {
   key: string;
+  baseUrl?: string;
+  model?: string;
+  profileName?: string;
+  protocol?: ModelProtocol;
+  thinking?: boolean;
+  reasoningEffort?: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  apiKeyEnv?: string;
 }
 
 export interface CredentialResolution {
@@ -144,10 +153,46 @@ export async function acceptCredential(options: {
   requestedModel?: string;
   keychain?: Keychain;
 }): Promise<CredentialResolution & { stored: boolean }> {
-  const config = loadConfig(options.cwd);
+  let config = loadConfig(options.cwd);
+  const creatingProfile = Boolean(options.choice.baseUrl && options.choice.model);
+
+  if (creatingProfile) {
+    const derivedName = (options.choice.model ?? "default")
+      .replace(/[^a-zA-Z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase() || "default";
+    const profileName = options.choice.profileName ?? derivedName;
+    const apiKeyEnv = options.choice.apiKeyEnv
+      ?? `KULMI_${profileName.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase()}_API_KEY`;
+    writeUserModelProfile({
+      profileName,
+      model: options.choice.model!,
+      baseUrl: options.choice.baseUrl!,
+      apiKeyEnv,
+      protocol: options.choice.protocol ?? "openai",
+      thinking: options.choice.thinking ?? false,
+      ...(options.choice.reasoningEffort ? { reasoningEffort: options.choice.reasoningEffort } : {}),
+      contextWindow: options.choice.contextWindow ?? 128_000,
+      maxOutputTokens: options.choice.maxOutputTokens ?? 16_384,
+      makeDefault: true,
+    });
+    config = loadConfig(options.cwd);
+    options = {
+      ...options,
+      requestedModel: profileName,
+      choice: { ...options.choice, apiKeyEnv },
+    };
+  }
+
   const modelName = options.requestedModel ?? config.defaultModel;
   const model = config.models[modelName];
-  if (!model) throw new Error(`unknown model ${modelName}`);
+  if (!model) {
+    throw new Error(
+      creatingProfile
+        ? "failed to create model profile"
+        : "no model profile configured. Run kulmi and complete provider setup, or edit ~/.config/kulmi/config.toml",
+    );
+  }
   process.env[model.apiKeyEnv] = options.choice.key;
   const stored = await (options.keychain ?? new MacKeychain()).save(model.apiKeyEnv, options.choice.key);
   return {
@@ -157,13 +202,14 @@ export async function acceptCredential(options: {
   };
 }
 
-export function validateCredential(_key: string): boolean {
-  return true;
+export function validateCredential(key: string): boolean {
+  return key.trim().length > 0;
 }
 
 export function credentialHint(): string {
-  return "Enter your API key.";
+  return "Enter a non-empty API key.";
 }
+
 export function defaultModelFor(): string {
   throw new Error("no default model is built in; configure a model profile first");
 }
