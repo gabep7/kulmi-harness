@@ -83,6 +83,14 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
         }
         return await controller.setModel(args.trim());
       }
+      case "/effort": {
+        const efforts = controller.listReasoningEfforts();
+        if (!args) {
+          if (efforts.length === 0) return "No reasoning effort options configured for this model";
+          return { efforts };
+        }
+        return controller.setReasoningEffort(args.trim());
+      }
       case "/workers": {
         const workers = controller.workers();
         return workers.map((worker) => `${worker.id}  ${worker.status.padEnd(9)}  ${worker.description}`).join("\n") || "No workers in this session";
@@ -165,6 +173,8 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       onExit={close}
       onSteer={(message) => controller.steer(message)}
       onSwitchModel={switchModel}
+      onListEfforts={() => controller.listReasoningEfforts()}
+      onSetEffort={(effort) => controller.setReasoningEffort(effort)}
       onAlwaysAllow={(request) => {
         const entry = allowlistEntryFor(controller.workspaceRoot, request);
         if (!entry) return;

@@ -40,18 +40,19 @@ describe("OpenAIProvider", () => {
         },
       }],
       signal: new AbortController().signal,
+      reasoningEffort: "high",
     });
 
     expect(authHeader).toBe("Bearer test-key");
     expect(requestBody).toMatchObject({
       model: "test-model",
       thinking: { type: "enabled" },
+      reasoning_effort: "high",
       stream: true,
       max_completion_tokens: 131_072,
       tools: [{ function: { name: "read_file", strict: true } }],
     });
     expect(requestBody).not.toHaveProperty("user_id");
-    expect(requestBody).not.toHaveProperty("reasoning_effort");
     expect(requestBody).not.toHaveProperty("stream_options");
     expect(requestBody).not.toHaveProperty("temperature");
     expect(requestBody).not.toHaveProperty("top_p");
