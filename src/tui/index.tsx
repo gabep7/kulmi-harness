@@ -85,7 +85,10 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       }
       case "/effort": {
         const efforts = controller.listReasoningEfforts();
-        if (!args) return efforts.length > 0 ? { notice: `Available reasoning effort: ${efforts.join(", ")}. Use /effort <value>.` } : "No reasoning effort options configured";
+        if (!args) {
+          if (efforts.length === 0) return "No reasoning effort options configured for this model";
+          return { efforts };
+        }
         return controller.setReasoningEffort(args.trim());
       }
       case "/workers": {
@@ -170,6 +173,8 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       onExit={close}
       onSteer={(message) => controller.steer(message)}
       onSwitchModel={switchModel}
+      onListEfforts={() => controller.listReasoningEfforts()}
+      onSetEffort={(effort) => controller.setReasoningEffort(effort)}
       onAlwaysAllow={(request) => {
         const entry = allowlistEntryFor(controller.workspaceRoot, request);
         if (!entry) return;

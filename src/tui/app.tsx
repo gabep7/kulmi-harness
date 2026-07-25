@@ -20,6 +20,8 @@ export interface TuiAppProps {
   onSwitchSession?: (sessionId: string) => Promise<TuiRuntimeInfo>;
   onCycleAutonomy?: () => Promise<TuiRuntimeInfo>;
   onSwitchModel?: (name: string) => Promise<TuiRuntimeInfo>;
+  onListEfforts?: () => string[];
+  onSetEffort?: (effort: string) => string;
   onCancel: () => void;
   onExit: () => void;
 }
@@ -88,6 +90,8 @@ export function TuiApp(props: TuiAppProps) {
   const [sessionCursor, setSessionCursor] = useState(0);
   const [models, setModels] = useState<TuiModelOption[] | undefined>();
   const [modelCursor, setModelCursor] = useState(0);
+  const [efforts, setEfforts] = useState<string[] | undefined>();
+  const [effortCursor, setEffortCursor] = useState(0);
   const [runtime, setRuntime] = useState<TuiRuntimeInfo>({
     model: props.model,
     sessionId: props.sessionId,
@@ -176,14 +180,57 @@ export function TuiApp(props: TuiAppProps) {
       if (key.return) {
         const selected = models[modelCursor];
         setModels(undefined);
-        if (!selected || selected.active || !props.onSwitchModel) return;
+        if (!selected || !props.onSwitchModel) return;
+        const openEffortPicker = () => {
+          const options = props.onListEfforts?.() ?? [];
+          if (options.length <= 1) return;
+          setEffortCursor(0);
+          setEfforts(options);
+        };
+        if (selected.active) {
+          openEffortPicker();
+          return;
+        }
         setBusy(true);
         void props.onSwitchModel(selected.name).then((next) => {
           setRuntime(next);
           props.store.addNotice(`Switched to ${next.model}`);
+          openEffortPicker();
         }, (error: unknown) => {
           props.store.addNotice(error instanceof Error ? error.message : String(error), true);
         }).finally(() => setBusy(false));
+        return;
+      }
+      return;
+    }
+    if (efforts) {
+      if (key.ctrl && value === "c") {
+        props.onExit();
+        exit();
+        return;
+      }
+      if (busy) return;
+      if (key.escape) {
+        setEfforts(undefined);
+        return;
+      }
+      if (key.upArrow) {
+        setEffortCursor((index) => (index - 1 + efforts.length) % efforts.length);
+        return;
+      }
+      if (key.downArrow) {
+        setEffortCursor((index) => (index + 1) % efforts.length);
+        return;
+      }
+      if (key.return) {
+        const selected = efforts[effortCursor];
+        setEfforts(undefined);
+        if (!selected || !props.onSetEffort) return;
+        try {
+          props.store.addNotice(props.onSetEffort(selected));
+        } catch (error) {
+          props.store.addNotice(error instanceof Error ? error.message : String(error), true);
+        }
         return;
       }
       return;
@@ -273,6 +320,13 @@ export function TuiApp(props: TuiAppProps) {
             setModelCursor(Math.max(0, result.models.findIndex((entry) => entry.active)));
             setModels(result.models);
           }
+          if (result.efforts) {
+            if (result.efforts.length === 0) props.store.addNotice("No reasoning effort options for this model");
+            else {
+              setEffortCursor(0);
+              setEfforts(result.efforts);
+            }
+          }
           if (result.submit) await props.onSubmit(result.submit);
         }
       } catch (error) {
@@ -335,9 +389,9 @@ export function TuiApp(props: TuiAppProps) {
         {snapshot.completion && <CompletionBlock completion={snapshot.completion} />}
 
         {help && <Help onClose={() => setHelp(false)} custom={props.customCommands ?? []} />}
-        {!help && !snapshot.pendingApproval && !sessions && !models && input.startsWith("/") && <CommandPalette query={input} columns={size.columns} />}
+        {!help && !snapshot.pendingApproval && !sessions && !models && !efforts && input.startsWith("/") && <CommandPalette query={input} columns={size.columns} />}
 
-        {!snapshot.pendingApproval && !sessions && !models && busy && <LoadingStatus />}
+        {!snapshot.pendingApproval && !sessions && !models && !efforts && busy && <LoadingStatus />}
 
         {snapshot.pendingApproval
           ? <Approval request={snapshot.pendingApproval.request} />
@@ -345,7 +399,9 @@ export function TuiApp(props: TuiAppProps) {
             ? <SessionPicker sessions={sessions} cursor={sessionCursor} />
             : models
               ? <ModelPicker models={models} cursor={modelCursor} />
-              : <Composer value={input} onChange={setInput} onSubmit={submit} busy={busy} />}
+              : efforts
+                ? <EffortPicker efforts={efforts} cursor={effortCursor} model={runtime.model} />
+                : <Composer value={input} onChange={setInput} onSubmit={submit} busy={busy} />}
 
         <Footer runtime={runtime} status={snapshot.status} busy={busy} agents={snapshot.live.filter((item) => item.kind === "worker").length} />
       </Box>
@@ -535,7 +591,21 @@ function ModelPicker({ models, cursor }: { models: TuiModelOption[]; cursor: num
           {index === cursor ? "›" : " "} {entry.name.padEnd(22)} {entry.model}{entry.active ? "  current" : ""}
         </Text>
       ))}
-      <Text color={theme.faint}>up/down select  enter switch  esc close</Text>
+      <Text color={theme.faint}>↑↓ select  ·  enter switch  ·  esc close</Text>
+    </Box>
+  );
+}
+
+function EffortPicker({ efforts, cursor, model }: { efforts: string[]; cursor: number; model: string }) {
+  return (
+    <Box marginTop={1} borderStyle="round" borderColor={theme.cocoa} paddingX={1} flexDirection="column">
+      <Text color={theme.cream} bold>reasoning effort  <Text color={theme.faint}>{model}</Text></Text>
+      {efforts.map((effort, index) => (
+        <Text key={effort} color={index === cursor ? theme.sand : theme.muted} bold={index === cursor}>
+          {index === cursor ? "›" : " "} {effort}
+        </Text>
+      ))}
+      <Text color={theme.faint}>↑↓ select  ·  enter apply  ·  esc skip</Text>
     </Box>
   );
 }

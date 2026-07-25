@@ -41,6 +41,7 @@ import { browserQaTool } from "../tools/browser.js";
 import { attachImageTool } from "../tools/media.js";
 import { disposeLspClients, lspTool } from "../tools/lsp.js";
 import { processTools, ProcessManager } from "../tools/processes.js";
+import { resolveExistingCredential } from "../auth/credentials.js";
 import { connectMcpServers, type McpConnection } from "../mcp/client.js";
 import { AnthropicProvider } from "../provider/anthropic.js";
 import { loadAllowlist, matchesAllowlist } from "../security/allowlist.js";
@@ -515,6 +516,10 @@ export class SessionController {
     const profileName = Object.entries(config.models).find(
       ([, profile]) => profile.model === name,
     )?.[0] ?? name;
+    // Only the boot profile's key is loaded into the environment at startup, so a
+    // switch to another profile must pull that profile's credential from the
+    // keychain before resolveModel demands the env var.
+    await resolveExistingCredential({ cwd: this.workspaceRoot, requestedModel: profileName });
     const resolved = resolveModel(config, profileName);
     if (resolved.name === this.modelProfile) return `already using ${resolved.name} (${resolved.model})`;
     const provider = resolved.protocol === "anthropic" ? new AnthropicProvider(resolved) : new OpenAIProvider(resolved);
@@ -522,8 +527,14 @@ export class SessionController {
     this.#agent.setProvider(provider);
     this.model = provider.model;
     this.modelProfile = provider.name;
+    this.#agent.setReasoningEffort(resolved.reasoningEffort);
     await this.#session.setModel(provider.model, provider.name);
     return `switched to ${resolved.name} (${resolved.model})`;
+  }
+
+  get reasoningEffort(): string | undefined {
+    const config = loadConfig(this.workspaceRoot);
+    return config.models[this.modelProfile]?.reasoningEffort;
   }
 
   listReasoningEfforts(): string[] {
@@ -533,8 +544,11 @@ export class SessionController {
   }
 
   setReasoningEffort(effort: string): string {
+    if (this.#running) throw new Error("cannot change reasoning effort while a run is active");
     const allowed = this.listReasoningEfforts();
-    if (!allowed.includes(effort)) throw new Error(`unsupported reasoning effort ${effort}`);
+    if (allowed.length > 0 && !allowed.includes(effort)) {
+      throw new Error(`unsupported reasoning effort ${effort}; options: ${allowed.join(", ")}`);
+    }
     this.#agent.setReasoningEffort(effort);
     return `reasoning effort: ${effort}`;
   }

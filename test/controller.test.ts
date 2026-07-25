@@ -99,6 +99,48 @@ api_key_env = "${TEST_API_KEY_ENV}"
     }
   });
 
+  it("loads a switched profile's own credential and its reasoning effort options", async () => {
+    process.env[TEST_API_KEY_ENV] = "sk-123456789";
+    process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-controller-data-"));
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    const root = await mkdtemp(join(tmpdir(), "kulmi-controller-effort-"));
+    await exec("git", ["init", root]);
+    await mkdir(join(process.env.HOME!, ".config", "kulmi"), { recursive: true });
+    await writeFile(join(process.env.HOME!, ".config", "kulmi", "config.toml"), `default_model = "${TEST_MODEL_PROFILE}"
+
+[models.${TEST_MODEL_PROFILE}]
+model = "${TEST_MODEL}"
+base_url = "https://example.test/v1"
+api_key_env = "${TEST_API_KEY_ENV}"
+reasoning_efforts = ["low", "medium", "high"]
+
+[models.second]
+model = "second-model-id"
+base_url = "https://second.example.test/v1"
+api_key_env = "KULMI_SECOND_API_KEY"
+reasoning_efforts = ["minimal", "max"]
+`, "utf8");
+
+    const controller = await SessionController.create({ cwd: root, mode: "chat", autonomy: "read" });
+    try {
+      expect(controller.listReasoningEfforts()).toEqual(["low", "medium", "high"]);
+      expect(controller.setReasoningEffort("high")).toContain("high");
+      expect(() => controller.setReasoningEffort("max")).toThrow("unsupported reasoning effort");
+
+      // The second profile's key was never exported, so switching must fail loudly
+      // rather than silently reusing the first profile's credential.
+      await expect(controller.setModel("second")).rejects.toThrow("KULMI_SECOND_API_KEY");
+
+      process.env.KULMI_SECOND_API_KEY = "sk-second-key";
+      await expect(controller.setModel("second")).resolves.toContain("switched to second");
+      expect(controller.listReasoningEfforts()).toEqual(["minimal", "max"]);
+      expect(controller.setReasoningEffort("max")).toContain("max");
+    } finally {
+      delete process.env.KULMI_SECOND_API_KEY;
+      await controller.close();
+    }
+  });
+
   it("preserves task mode and its prompt when the TUI resumes an empty session", async () => {
     process.env[TEST_API_KEY_ENV] = "sk-123456789";
     process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-controller-data-"));
