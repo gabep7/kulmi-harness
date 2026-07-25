@@ -83,6 +83,11 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
         }
         return await controller.setModel(args.trim());
       }
+      case "/effort": {
+        const efforts = controller.listReasoningEfforts();
+        if (!args) return efforts.length > 0 ? { notice: `Available reasoning effort: ${efforts.join(", ")}. Use /effort <value>.` } : "No reasoning effort options configured";
+        return controller.setReasoningEffort(args.trim());
+      }
       case "/workers": {
         const workers = controller.workers();
         return workers.map((worker) => `${worker.id}  ${worker.status.padEnd(9)}  ${worker.description}`).join("\n") || "No workers in this session";

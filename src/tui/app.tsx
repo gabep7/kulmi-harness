@@ -49,11 +49,12 @@ export interface TuiRuntimeInfo {
 }
 
 export type TuiCommandResult = string | {
-  submit?: string;
   notice?: string;
   mode?: AgentMode;
   sessions?: TuiSessionOption[];
   models?: TuiModelOption[];
+  efforts?: string[];
+  submit?: string;
 } | undefined;
 
 const commands = [
@@ -62,6 +63,7 @@ const commands = [
   ["/sessions", "switch sessions"],
   ["/status", "show runtime details"],
   ["/model", "list or switch model profiles"],
+  ["/effort", "list or switch reasoning effort"],
   ["/thinking", "expand or collapse reasoning"],
   ["/fork", "fork this session"],
   ["/undo", "revert the previous turn"],

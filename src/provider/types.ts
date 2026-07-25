@@ -50,6 +50,7 @@ export interface ProviderRequest {
   signal: AbortSignal;
   cacheScope?: string;
   thinking?: boolean;
+  reasoningEffort?: string;
   maxCompletionTokens?: number;
   onReasoningDelta?: (text: string) => void | Promise<void>;
   onTextDelta?: (text: string) => void | Promise<void>;

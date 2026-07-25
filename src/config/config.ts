@@ -22,6 +22,7 @@ export interface ModelConfig {
   apiKeyEnv: string;
   thinking: boolean;
   reasoningEffort?: string;
+  reasoningEfforts?: string[];
   contextWindow: number;
   maxOutputTokens: number;
 }
@@ -138,6 +139,8 @@ const modelFileSchema = z.object({
   thinking: z.boolean().optional(),
   reasoning_effort: z.string().min(1).optional(),
   reasoningEffort: z.string().min(1).optional(),
+  reasoning_efforts: z.array(z.string().min(1)).optional(),
+  reasoningEfforts: z.array(z.string().min(1)).optional(),
   context_window: positiveInt.optional(),
   contextWindow: positiveInt.optional(),
   max_output_tokens: positiveInt.optional(),
@@ -295,6 +298,9 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
       thinking: raw.thinking ?? previous.thinking,
       ...(raw.reasoning_effort ?? raw.reasoningEffort ?? previous.reasoningEffort
         ? { reasoningEffort: raw.reasoning_effort ?? raw.reasoningEffort ?? previous.reasoningEffort }
+        : {}),
+      ...(raw.reasoning_efforts ?? raw.reasoningEfforts ?? previous.reasoningEfforts
+        ? { reasoningEfforts: raw.reasoning_efforts ?? raw.reasoningEfforts ?? previous.reasoningEfforts }
         : {}),
       contextWindow: raw.context_window ?? raw.contextWindow ?? previous.contextWindow,
       maxOutputTokens: raw.max_output_tokens ?? raw.maxOutputTokens ?? previous.maxOutputTokens,

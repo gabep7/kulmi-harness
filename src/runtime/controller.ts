@@ -415,7 +415,7 @@ export class SessionController {
       commandTimeoutMs: config.commandTimeoutSeconds * 1_000,
       maxOutputBytes: config.maxOutputBytes,
       contextWindow: resolved.contextWindow,
-      sandbox: config.sandbox,
+      ...(resolved.reasoningEffort ? { reasoningEffort: resolved.reasoningEffort } : {}),
       ...(loaded?.session.messages ? { messages: loaded.session.messages as ProviderMessage[] } : {}),
       subagents: scheduler,
       permissions,
@@ -524,6 +524,19 @@ export class SessionController {
     this.modelProfile = provider.name;
     await this.#session.setModel(provider.model, provider.name);
     return `switched to ${resolved.name} (${resolved.model})`;
+  }
+
+  listReasoningEfforts(): string[] {
+    const config = loadConfig(this.workspaceRoot);
+    const profile = config.models[this.modelProfile];
+    return profile?.reasoningEfforts ?? (profile?.reasoningEffort ? [profile.reasoningEffort] : []);
+  }
+
+  setReasoningEffort(effort: string): string {
+    const allowed = this.listReasoningEfforts();
+    if (!allowed.includes(effort)) throw new Error(`unsupported reasoning effort ${effort}`);
+    this.#agent.setReasoningEffort(effort);
+    return `reasoning effort: ${effort}`;
   }
 
   listModels(): Array<{ name: string; model: string; active: boolean }> {

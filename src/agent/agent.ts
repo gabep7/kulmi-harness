@@ -28,6 +28,7 @@ export interface AgentOptions {
   commandTimeoutMs: number;
   maxOutputBytes: number;
   contextWindow: number;
+  reasoningEffort?: string;
   sandbox?: SandboxConfig;
   messages?: ProviderMessage[];
   subagents?: SubagentApi;
@@ -88,6 +89,13 @@ export class Agent {
     if (this.#running) throw new Error("cannot change providers while the agent is running");
     this.#options.provider.invalidateCacheScopes?.(`${this.#options.state.agentId}:`);
     this.#options.provider = provider;
+    this.#cacheEpoch += 1;
+  }
+
+  setReasoningEffort(reasoningEffort: string | undefined): void {
+    if (this.#running) throw new Error("cannot change reasoning effort while the agent is running");
+    if (reasoningEffort === undefined) delete this.#options.reasoningEffort;
+    else this.#options.reasoningEffort = reasoningEffort;
     this.#cacheEpoch += 1;
   }
 
@@ -203,6 +211,7 @@ export class Agent {
           messages: await materializeMessageAttachments(this.#messages),
           tools: providerTools,
           signal,
+          ...(this.#options.reasoningEffort ? { reasoningEffort: this.#options.reasoningEffort } : {}),
           cacheScope: `${state.agentId}:${state.mode}:${this.#cacheEpoch}`,
           onReasoningDelta: (text) => events.emit({
             type: "assistant.reasoning.delta",

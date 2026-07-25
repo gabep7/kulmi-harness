@@ -99,6 +99,7 @@ export class OpenAIProvider implements ModelProvider {
 
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
     const thinking = request.thinking ?? this.#config.thinking;
+    const reasoningEffort = request.reasoningEffort ?? this.#config.reasoningEffort;
     const maxCompletionTokens = Math.min(
       this.#config.maxOutputTokens,
       Math.max(1, Math.trunc(request.maxCompletionTokens ?? this.#config.maxOutputTokens)),
@@ -116,6 +117,7 @@ export class OpenAIProvider implements ModelProvider {
       stream: true,
       max_completion_tokens: maxCompletionTokens,
       ...(thinking ? { thinking: { type: "enabled" } } : {}),
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     });
     if (request.cacheScope) {
       const anchor = createHash("sha256").update(JSON.stringify({
