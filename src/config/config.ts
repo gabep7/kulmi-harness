@@ -559,77 +559,32 @@ export function writeUserModelProfile(options: {
   const path = userConfigPath();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 
-  let existing: Record<string, unknown> = {};
-  if (existsSync(path)) {
-    try {
-      existing = parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-    } catch {
-      existing = {};
-    }
-  }
-
-  const models = (existing.models && typeof existing.models === "object" && !Array.isArray(existing.models)
-    ? { ...(existing.models as Record<string, unknown>) }
-    : {}) as Record<string, unknown>;
-
-  models[options.profileName] = {
-    model: options.model,
-    base_url: options.baseUrl,
-    api_key_env: options.apiKeyEnv,
-    protocol: options.protocol ?? "openai",
-    thinking: options.thinking ?? false,
-    ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
-    context_window: options.contextWindow ?? 128_000,
-    max_output_tokens: options.maxOutputTokens ?? 16_384,
-  };
-
-  const next: Record<string, unknown> = {
-    ...existing,
-    models,
-  };
-  if (options.makeDefault !== false) next.default_model = options.profileName;
-
-  writeFileSync(path, `${stringifyToml(next)}\n`, { encoding: "utf8", mode: 0o600 });
+  let existing = "";
+  if (existsSync(path)) existing = readFileSync(path, "utf8");
+  // First-run setup only calls this when no model profiles exist. Preserve the
+  // user's TOML byte-for-byte instead of parsing and reserializing it: generic
+  // TOML writers easily corrupt arrays of inline tables such as hook commands.
+  const withoutDefault = existing.replace(/^default_model\s*=.*\n?/m, "").trimEnd();
+  const profileName = options.profileName;
+  const profile = [
+    `[models.${profileName}]`,
+    `model = ${tomlValue(options.model)}`,
+    `base_url = ${tomlValue(options.baseUrl)}`,
+    `api_key_env = ${tomlValue(options.apiKeyEnv)}`,
+    `protocol = ${tomlValue(options.protocol ?? "openai")}`,
+    `thinking = ${String(options.thinking ?? false)}`,
+    ...(options.reasoningEffort ? [`reasoning_effort = ${tomlValue(options.reasoningEffort)}`] : []),
+    `context_window = ${String(options.contextWindow ?? 128_000)}`,
+    `max_output_tokens = ${String(options.maxOutputTokens ?? 16_384)}`,
+  ].join("\n");
+  const prefix = withoutDefault ? `${withoutDefault}\n\n` : "";
+  const defaultLine = options.makeDefault === false ? "" : `default_model = ${tomlValue(profileName)}\n\n`;
+  writeFileSync(path, `${defaultLine}${prefix}${profile}\n`, { encoding: "utf8", mode: 0o600 });
   return path;
 }
 
-function stringifyToml(value: Record<string, unknown>): string {
-  const lines: string[] = [];
-  const tables: Array<[string, Record<string, unknown>]> = [];
-
-  for (const [key, entry] of Object.entries(value)) {
-    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-      const record = entry as Record<string, unknown>;
-      const nestedTables = Object.values(record).some((child) => child && typeof child === "object" && !Array.isArray(child));
-      if (nestedTables) {
-        for (const [childKey, child] of Object.entries(record)) {
-          if (child && typeof child === "object" && !Array.isArray(child)) {
-            tables.push([`${key}.${childKey}`, child as Record<string, unknown>]);
-          }
-        }
-        continue;
-      }
-      tables.push([key, record]);
-      continue;
-    }
-    lines.push(`${key} = ${tomlValue(entry)}`);
-  }
-
-  for (const [name, table] of tables) {
-    if (lines.length > 0 && lines.at(-1) !== "") lines.push("");
-    lines.push(`[${name}]`);
-    for (const [key, entry] of Object.entries(table)) {
-      lines.push(`${key} = ${tomlValue(entry)}`);
-    }
-  }
-  return lines.join("\n");
-}
-
-function tomlValue(value: unknown): string {
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (Array.isArray(value)) return `[${value.map((entry) => tomlValue(entry)).join(", ")}]`;
-  return JSON.stringify(String(value));
+function tomlValue(value: string): string {
+  return JSON.stringify(value);
 }
 
 export function expandPath(path: string): string {
