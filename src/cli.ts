@@ -46,7 +46,7 @@ program
     });
     let model = existing?.model;
     if (!existing) {
-      const choice = await runCredentialOnboarding();
+      const choice = await runCredentialOnboarding(process.cwd(), credentialModel);
       const accepted = await acceptCredential({
         choice,
         cwd: process.cwd(),

@@ -12,7 +12,7 @@ export class CredentialSetupCancelledError extends Error {
   }
 }
 
-export async function runCredentialOnboarding(cwd = process.cwd()): Promise<CredentialChoice> {
+export async function runCredentialOnboarding(cwd = process.cwd(), requestedModel?: string): Promise<CredentialChoice> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error(
       "API key is missing. Configure a model profile in ~/.config/kulmi/config.toml and set the env var named by api_key_env.",
@@ -20,12 +20,14 @@ export async function runCredentialOnboarding(cwd = process.cwd()): Promise<Cred
   }
   const config = loadConfig(cwd);
   const needsProfile = Object.keys(config.models).length === 0;
-  const existingProfile = config.defaultModel && config.models[config.defaultModel]
+  const selectedModel = requestedModel ? config.models[requestedModel] : undefined;
+  const selectedName = requestedModel && selectedModel ? requestedModel : config.defaultModel;
+  const existingProfile = selectedName && config.models[selectedName]
     ? {
-        name: config.defaultModel,
-        model: config.models[config.defaultModel]!.model,
-        baseUrl: config.models[config.defaultModel]!.baseUrl,
-        apiKeyEnv: config.models[config.defaultModel]!.apiKeyEnv,
+        name: selectedName,
+        model: config.models[selectedName]!.model,
+        baseUrl: safeDisplayUrl(config.models[selectedName]!.baseUrl),
+        apiKeyEnv: config.models[selectedName]!.apiKeyEnv,
       }
     : undefined;
 
@@ -71,6 +73,7 @@ export function CredentialSetup({
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
   const [protocol, setProtocol] = useState<ModelProtocol>("openai");
+  const [protocolInput, setProtocolInput] = useState("openai");
   const [key, setKey] = useState("");
   const [error, setError] = useState("");
 
@@ -100,12 +103,12 @@ export function CredentialSetup({
     const profileName = slugifyProfile(model);
     onComplete({
       key: clean,
-      baseUrl: baseUrl.trim().replace(/\/$/, ""),
+      baseUrl: normalizeBaseUrl(baseUrl.trim(), protocol),
       model: model.trim(),
       profileName,
       protocol,
       apiKeyEnv: `KULMI_${profileName.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase()}_API_KEY`,
-      thinking: true,
+      thinking: false,
       contextWindow: 128_000,
       maxOutputTokens: 16_384,
     });
@@ -141,12 +144,14 @@ export function CredentialSetup({
     const clean = value.trim().toLowerCase();
     if (clean === "" || clean === "openai" || clean === "o") {
       setProtocol("openai");
+      setProtocolInput("openai");
       setError("");
       setStep("api_key");
       return;
     }
     if (clean === "anthropic" || clean === "a") {
       setProtocol("anthropic");
+      setProtocolInput("anthropic");
       setError("");
       setStep("api_key");
       return;
@@ -199,8 +204,8 @@ export function CredentialSetup({
       {needsProfile && step === "protocol" && (
         <Field
           label="Protocol"
-          value={protocol}
-          onChange={(value) => { setProtocol(value === "anthropic" ? "anthropic" : "openai"); setError(""); }}
+          value={protocolInput}
+          onChange={(value) => { setProtocolInput(value); setError(""); }}
           onSubmit={submitProtocol}
           placeholder="openai"
           error={error}
@@ -276,4 +281,23 @@ function slugifyProfile(model: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return slug || "default";
+}
+
+function safeDisplayUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "configured endpoint";
+  }
+}
+
+
+function normalizeBaseUrl(value: string, protocol: ModelProtocol): string {
+  const clean = value.replace(/\/$/, "");
+  return protocol === "anthropic" && clean.endsWith("/v1") ? clean.slice(0, -3) : clean;
 }
