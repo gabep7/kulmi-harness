@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse } from "smol-toml";
 import { z } from "zod";
 import type { AutonomyLevel } from "../core/types.js";
@@ -538,6 +538,98 @@ export function resolveModel(config: KulmiConfig, name?: string): ResolvedModel 
   const apiKey = process.env[model.apiKeyEnv];
   if (!apiKey) throw new Error(`missing ${model.apiKeyEnv} for model ${modelName}`);
   return { ...model, name: modelName, apiKey };
+}
+
+export function userConfigPath(): string {
+  return join(homedir(), ".config", "kulmi", "config.toml");
+}
+
+export function writeUserModelProfile(options: {
+  profileName: string;
+  model: string;
+  baseUrl: string;
+  apiKeyEnv: string;
+  protocol?: ModelProtocol;
+  thinking?: boolean;
+  reasoningEffort?: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  makeDefault?: boolean;
+}): string {
+  const path = userConfigPath();
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+
+  let existing: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    try {
+      existing = parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    } catch {
+      existing = {};
+    }
+  }
+
+  const models = (existing.models && typeof existing.models === "object" && !Array.isArray(existing.models)
+    ? { ...(existing.models as Record<string, unknown>) }
+    : {}) as Record<string, unknown>;
+
+  models[options.profileName] = {
+    model: options.model,
+    base_url: options.baseUrl,
+    api_key_env: options.apiKeyEnv,
+    protocol: options.protocol ?? "openai",
+    thinking: options.thinking ?? false,
+    ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
+    context_window: options.contextWindow ?? 128_000,
+    max_output_tokens: options.maxOutputTokens ?? 16_384,
+  };
+
+  const next: Record<string, unknown> = {
+    ...existing,
+    models,
+  };
+  if (options.makeDefault !== false) next.default_model = options.profileName;
+
+  writeFileSync(path, `${stringifyToml(next)}\n`, { encoding: "utf8", mode: 0o600 });
+  return path;
+}
+
+function stringifyToml(value: Record<string, unknown>): string {
+  const lines: string[] = [];
+  const tables: Array<[string, Record<string, unknown>]> = [];
+
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      const record = entry as Record<string, unknown>;
+      const nestedTables = Object.values(record).some((child) => child && typeof child === "object" && !Array.isArray(child));
+      if (nestedTables) {
+        for (const [childKey, child] of Object.entries(record)) {
+          if (child && typeof child === "object" && !Array.isArray(child)) {
+            tables.push([`${key}.${childKey}`, child as Record<string, unknown>]);
+          }
+        }
+        continue;
+      }
+      tables.push([key, record]);
+      continue;
+    }
+    lines.push(`${key} = ${tomlValue(entry)}`);
+  }
+
+  for (const [name, table] of tables) {
+    if (lines.length > 0 && lines.at(-1) !== "") lines.push("");
+    lines.push(`[${name}]`);
+    for (const [key, entry] of Object.entries(table)) {
+      lines.push(`${key} = ${tomlValue(entry)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function tomlValue(value: unknown): string {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return `[${value.map((entry) => tomlValue(entry)).join(", ")}]`;
+  return JSON.stringify(String(value));
 }
 
 export function expandPath(path: string): string {

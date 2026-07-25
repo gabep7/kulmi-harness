@@ -91,6 +91,43 @@ describe("credential onboarding", () => {
     expect(calls[1]!.args).not.toContain("sk-123456789");
   });
 
+
+  it("creates a user model profile when first-run setup supplies endpoint details", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "kulmi-credentials-"));
+    process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
+    const keychain = new FakeKeychain();
+    const result = await acceptCredential({
+      cwd,
+      choice: {
+        key: "sk-123456789",
+        baseUrl: "https://a6.a6api.com/v1",
+        model: "grok-4.5",
+        profileName: "a6-grok",
+        protocol: "openai",
+        apiKeyEnv: "A6_GROK_API_KEY",
+        thinking: true,
+        reasoningEffort: "high",
+        contextWindow: 500_000,
+        maxOutputTokens: 65_536,
+      },
+      keychain,
+    });
+    expect(result).toMatchObject({ model: "a6-grok", source: "prompt", stored: true });
+    const config = await import("../src/config/config.js").then((mod) => mod.loadConfig(cwd));
+    expect(config.defaultModel).toBe("a6-grok");
+    expect(config.models["a6-grok"]).toMatchObject({
+      model: "grok-4.5",
+      baseUrl: "https://a6.a6api.com/v1",
+      apiKeyEnv: "A6_GROK_API_KEY",
+      thinking: true,
+      reasoningEffort: "high",
+      contextWindow: 500_000,
+      maxOutputTokens: 65_536,
+    });
+    expect(process.env.A6_GROK_API_KEY).toBe("sk-123456789");
+    expect(await keychain.read("A6_GROK_API_KEY")).toBe("sk-123456789");
+  });
+
   it("does not return a key saved for a different api_key_env account", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "kulmi-credentials-"));
     process.env.HOME = await mkdtemp(join(tmpdir(), "kulmi-home-"));
