@@ -4,6 +4,7 @@ import { SubagentScheduler, type WorkerJob } from "../agent/scheduler.js";
 import {
   assertGitWorkTree,
   findWorkspaceRoot,
+  isGitWorkTree,
   loadConfig,
   resolveModel,
   type SearchMode,
@@ -35,7 +36,7 @@ import { fetchUrlTool, freeWebSearchTool } from "../tools/web-search.js";
 import { skillTools } from "../tools/skills.js";
 import { memoryTools } from "../tools/memory.js";
 import { ruleTools } from "../tools/rules.js";
-import { astGrepTool } from "../tools/ast-grep.js";
+import { astGrepTool, astGrepReplaceTool } from "../tools/ast-grep.js";
 import { gitTools } from "../tools/git.js";
 import { browserQaTool } from "../tools/browser.js";
 import { attachImageTool } from "../tools/media.js";
@@ -73,6 +74,7 @@ export class SessionController {
   model: string;
   modelProfile: string;
   readonly workspaceRoot: string;
+  readonly contextWindow: number;
   autonomy: AutonomyLevel;
   readonly searchMode: SearchMode;
   readonly sandbox: SandboxConfig;
@@ -86,6 +88,7 @@ export class SessionController {
   #running: Promise<AgentResult> | undefined;
   #runAbort: AbortController | undefined;
   #closed = false;
+  #closePromise: Promise<void> | undefined;
   readonly #processes: ProcessManager;
   readonly #mcp: McpConnection;
   readonly #worktrees: WorktreeManager;
@@ -106,6 +109,7 @@ export class SessionController {
     processes: ProcessManager;
     mcp: McpConnection;
     worktrees: WorktreeManager;
+    contextWindow: number;
   }) {
     this.events = options.events;
     this.#providerRef = options.providerRef;
@@ -115,6 +119,7 @@ export class SessionController {
     this.sandbox = { ...options.sandbox };
     this.#state = options.state;
     this.#agent = options.agent;
+    this.contextWindow = options.contextWindow;
     this.#scheduler = options.scheduler;
     this.sessionId = options.session.id;
     this.model = options.providerRef.current.model;
@@ -198,7 +203,9 @@ export class SessionController {
     session.attach(events);
     const autonomy = options.autonomy ?? config.defaultAutonomy;
     const processes = new ProcessManager();
-    const mcp = await connectMcpServers(config.mcpServers, { cwd: workspaceRoot });
+    let connectedMcp: McpConnection | undefined;
+    try {
+      const mcp = connectedMcp = await connectMcpServers(config.mcpServers, { cwd: workspaceRoot });
     for (const error of mcp.errors) {
       await events.emit({ type: "notice", message: `mcp: ${error}` });
     }
@@ -231,98 +238,111 @@ export class SessionController {
     const rootCheckpoint = new CheckpointStore(session.path, workspaceRoot);
     const rootArtifacts = new ArtifactStore(session.path);
     const worktrees = new WorktreeManager(workspaceRoot);
+    if (isGitWorkTree(workspaceRoot)) {
+      await worktrees.recover((loaded?.session.workers ?? []).flatMap((job) => job.worktree ? [job.worktree] : []));
+    }
     const activeWorkers = new Map<string, Agent>();
     let scheduler: SubagentScheduler;
     const disposeJobWorktree = async (job: WorkerJob, reason: string): Promise<void> => {
       const worktree = job.worktree;
       if (!worktree) return;
-      delete job.worktree;
-      await worktrees.dispose(worktree).catch((error: unknown) =>
-        events.emit({
+      try {
+        await worktrees.dispose(worktree);
+      } catch (error) {
+        await events.emit({
           type: "notice",
           agentId: job.parentAgentId,
           message: `worker ${job.id} ${reason}: worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-        }).then(() => undefined)
-      );
+        });
+        return;
+      }
+      delete job.worktree;
       await scheduler.persist();
     };
     const pruneTerminalWorkerWorktrees = async (): Promise<void> => {
       await scheduler.reclaimTerminalWorktrees(async (job, worktree) => {
-        await worktrees.dispose(worktree).catch((error: unknown) =>
-          events.emit({
+        try {
+          await worktrees.dispose(worktree);
+        } catch (error) {
+          await events.emit({
             type: "notice",
             agentId: job.parentAgentId,
             message: `worker ${job.id} terminal cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-          }).then(() => undefined)
-        );
+          });
+          throw error;
+        }
       });
     };
     const runWorker = async (job: WorkerJob, signal: AbortSignal): Promise<string> => {
-      const worktree = job.mode === "implement" ? await worktrees.create(job.id) : undefined;
-      if (worktree) {
-        job.worktree = worktree;
-        await scheduler.persist();
-      }
-      const workerCwd = worktree?.path ?? cwd;
-      const childEvents = new EventBus();
-      const childSession = await SessionStore.create({
-        cwd: workerCwd,
-        model: resolved.model,
-        modelProfile: resolved.name,
-        prompt: job.prompt,
-      });
-      childSession.attach(childEvents);
-      job.childSessionId = childSession.id;
-      await scheduler.persist();
-      const detachBridge = childEvents.on((envelope) => events.emit(envelope.event).then(() => undefined));
-      const childState: RunState = {
-        agentId: job.id,
-        parentAgentId: job.parentAgentId,
-        mode: "subagent",
-        status: "idle",
-        plan: [],
-        modifiedFiles: new Set(),
-        verifications: [],
-        revision: 0,
-      };
-      const readOnly = job.mode !== "implement";
-      const searchTools = search.mode === "free" ? [freeWebSearchTool(search), fetchUrlTool()] : [];
-      const childTools = readOnly
-        ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools().filter((tool) => tool.readOnly), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools().filter((tool) => tool.readOnly), ...processTools(processes).filter((tool) => tool.readOnly), ...mcp.tools.filter((tool) => tool.readOnly), browserQaTool, attachImageTool, ...workerProgressTools()])
-        : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools(), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools(), ...processTools(processes), ...mcp.tools, browserQaTool, attachImageTool, ...workerProgressTools()]);
-      const childAgent = new Agent({
-        provider: providerRef.current,
-        tools: childTools,
-        events: childEvents,
-        session: childSession,
-        checkpoint: new CheckpointStore(childSession.path, workerCwd),
-        artifacts: new ArtifactStore(childSession.path),
-        state: childState,
-        systemPrompt: `${buildSystemPrompt({
-          mode: "subagent",
-          projectInstructions: instructions.content,
-          readOnly,
-          skillsInventory,
-          rulesInventory,
-          agentsInventory,
-          memoryInventory,
-        })}\n${subagentReportContract}`,
-        workspaceRoot: workerCwd,
-        cwd: workerCwd,
-        autonomy: readOnly ? "read" : autonomy,
-        maxSteps: Math.max(10, Math.floor(config.maxSteps / 2)),
-        commandTimeoutMs: config.commandTimeoutSeconds * 1_000,
-        maxOutputBytes: config.maxOutputBytes,
-        contextWindow: resolved.contextWindow,
-        sandbox: config.sandbox,
-        ...(!readOnly && permissions ? { permissions } : {}),
-        hooks: config.hooks,
-      });
-      activeWorkers.set(job.id, childAgent);
+      const workerProcesses = new ProcessManager();
+      let childSession: SessionStore | undefined;
+      let detachBridge = (): void => undefined;
       try {
+        const worktree = job.mode === "implement" ? await worktrees.create(job.id) : undefined;
+        if (worktree) {
+          job.worktree = worktree;
+          await scheduler.persist();
+        }
+        const workerCwd = worktree?.path ?? cwd;
+        const childEvents = new EventBus();
+        childSession = await SessionStore.create({
+          cwd: workerCwd,
+          model: resolved.model,
+          modelProfile: resolved.name,
+          prompt: job.prompt,
+        });
+        childSession.attach(childEvents);
+        job.childSessionId = childSession.id;
+        await scheduler.persist();
+        detachBridge = childEvents.on((envelope) => events.emit(envelope.event).then(() => undefined));
+        const childState: RunState = {
+          agentId: job.id,
+          parentAgentId: job.parentAgentId,
+          mode: "subagent",
+          status: "idle",
+          plan: [],
+          modifiedFiles: new Set(),
+          verifications: [],
+          revision: 0,
+        };
+        const readOnly = job.mode !== "implement";
+        const searchTools = search.mode === "free" ? [freeWebSearchTool(search), fetchUrlTool()] : [];
+        const childTools = readOnly
+          ? new ToolRegistry([...fileTools().filter((tool) => tool.readOnly), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools().filter((tool) => tool.readOnly), ...ruleTools(rules), astGrepTool, lspTool, ...gitTools().filter((tool) => tool.readOnly), ...processTools(workerProcesses).filter((tool) => tool.readOnly), ...mcp.tools.filter((tool) => tool.readOnly), browserQaTool, attachImageTool, ...workerProgressTools()])
+          : new ToolRegistry([...fileTools(), readArtifactTool, shellTool, ...searchTools, ...skillTools(skills), ...memoryTools(), ...ruleTools(rules), astGrepTool, astGrepReplaceTool, lspTool, ...gitTools(), ...processTools(workerProcesses), ...mcp.tools, browserQaTool, attachImageTool, ...workerProgressTools()]);
+        const childAgent = new Agent({
+          provider: providerRef.current,
+          tools: childTools,
+          events: childEvents,
+          session: childSession,
+          checkpoint: new CheckpointStore(childSession.path, workerCwd),
+          artifacts: new ArtifactStore(childSession.path),
+          state: childState,
+          systemPrompt: `${buildSystemPrompt({
+            mode: "subagent",
+            projectInstructions: instructions.content,
+            readOnly,
+            skillsInventory,
+            rulesInventory,
+            agentsInventory,
+            memoryInventory,
+          })}\n${subagentReportContract}`,
+          workspaceRoot: workerCwd,
+          cwd: workerCwd,
+          autonomy: readOnly ? "read" : autonomy,
+          maxSteps: Math.max(10, Math.floor(config.maxSteps / 2)),
+          commandTimeoutMs: config.commandTimeoutSeconds * 1_000,
+          maxOutputBytes: config.maxOutputBytes,
+          contextWindow: resolved.contextWindow,
+          sandbox: config.sandbox,
+          ...(!readOnly && permissions ? { permissions } : {}),
+          hooks: config.hooks,
+        });
+        activeWorkers.set(job.id, childAgent);
         const result = await childAgent.run(job.prompt, signal);
         await childSession.close(result.status);
         if (result.status === "failed" || result.status === "cancelled") {
+          await workerProcesses.disposeAll();
           await disposeJobWorktree(job, "finished without success");
           return result.text;
         }
@@ -330,10 +350,12 @@ export class SessionController {
           ? `${result.text}\n\nWorktree ready for integration: ${worktree.path}`
           : result.text;
       } catch (error) {
-        await childSession.close(signal.aborted ? "cancelled" : "failed");
+        await childSession?.close(signal.aborted ? "cancelled" : "failed").catch(() => undefined);
+        await workerProcesses.disposeAll();
         await disposeJobWorktree(job, signal.aborted ? "cancelled" : "failed");
         throw error;
       } finally {
+        await workerProcesses.disposeAll();
         activeWorkers.delete(job.id);
         detachBridge();
       }
@@ -342,20 +364,22 @@ export class SessionController {
       const worktree = job.worktree;
       if (!worktree) throw new Error(`worker ${job.id} has no worktree`);
       const integrated = await worktrees.integrate(worktree, rootCheckpoint);
-      delete job.worktree;
-      await worktrees.dispose(worktree).catch((error: unknown) =>
-        events.emit({
-          type: "notice",
-          agentId: job.parentAgentId,
-          message: `worker ${job.id} integrated, but cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-        }).then(() => undefined)
-      );
       for (const path of integrated) state.modifiedFiles.add(path);
       if (integrated.length > 0) {
         state.revision += 1;
         delete state.completion;
       }
       await session.saveRunState(state);
+      try {
+        await worktrees.dispose(worktree);
+        delete job.worktree;
+      } catch (error) {
+        await events.emit({
+          type: "notice",
+          agentId: job.parentAgentId,
+          message: `worker ${job.id} integrated, but cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
       return integrated;
     };
     scheduler = new SubagentScheduler(
@@ -385,6 +409,7 @@ export class SessionController {
       ...(autonomy === "read" ? memoryTools().filter((tool) => tool.readOnly) : memoryTools()),
       ...ruleTools(rules),
       astGrepTool,
+      ...(autonomy === "read" ? [] : [astGrepReplaceTool]),
       ...gitTools(),
       lspTool,
       ...(autonomy === "read" ? processTools(processes).filter((tool) => tool.readOnly) : processTools(processes)),
@@ -417,6 +442,7 @@ export class SessionController {
       maxOutputBytes: config.maxOutputBytes,
       contextWindow: resolved.contextWindow,
       ...(resolved.reasoningEffort ? { reasoningEffort: resolved.reasoningEffort } : {}),
+      ...(resolved.vision ? { vision: true } : {}),
       ...(loaded?.session.messages ? { messages: loaded.session.messages as ProviderMessage[] } : {}),
       subagents: scheduler,
       permissions,
@@ -443,10 +469,17 @@ export class SessionController {
       sandbox: config.sandbox,
       workspaceRoot,
       autonomy,
+      contextWindow: resolved.contextWindow,
       processes,
       mcp,
       worktrees,
     });
+    } catch (error) {
+      await processes.disposeAll().catch(() => undefined);
+      await connectedMcp?.dispose().catch(() => undefined);
+      disposeLspClients();
+      throw error;
+    }
   }
 
   run(prompt: string, signal: AbortSignal): Promise<AgentResult> {
@@ -478,21 +511,28 @@ export class SessionController {
       await this.#session.setStatus(result.status);
       return result;
     } catch (error) {
-      await this.#scheduler.cancelAll("parent agent failed");
-      await this.#reclaimTerminalWorktrees();
+      if (!signal.aborted) {
+        await this.#scheduler.cancelAll("parent agent failed");
+        await this.#reclaimTerminalWorktrees();
+      }
       await this.#session.setStatus(signal.aborted ? "cancelled" : "failed");
       throw error;
     }
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    this.#closePromise ??= this.#close();
+    return this.#closePromise;
+  }
+
+  async #close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
     this.#runAbort?.abort(new Error("session closed"));
     await this.#running?.catch(() => undefined);
-    await this.#scheduler.cancelAll();
+    await this.#scheduler.cancelAll().catch(() => undefined);
     await this.#reclaimTerminalWorktrees();
-    this.#processes.disposeAll();
+    await this.#processes.disposeAll();
     disposeLspClients();
     await this.#mcp.dispose().catch(() => undefined);
     await this.events.emit({
@@ -584,13 +624,16 @@ export class SessionController {
 
   async retryWorker(jobId: string, signal: AbortSignal): Promise<string> {
     await this.#scheduler.reclaimJobWorktree(jobId, async (job, worktree) => {
-      await this.#worktrees.dispose(worktree).catch((error: unknown) =>
-        this.events.emit({
+      try {
+        await this.#worktrees.dispose(worktree);
+      } catch (error) {
+        await this.events.emit({
           type: "notice",
           agentId: job.parentAgentId,
           message: `worker ${job.id} retry cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-        }).then(() => undefined)
-      );
+        });
+        throw error;
+      }
     });
     return this.#scheduler.retry(jobId, signal);
   }
@@ -679,19 +722,32 @@ export class SessionController {
     };
   }
 
-  integrateWorker(jobId: string): Promise<string> {
-    return this.#scheduler.integrate(jobId);
+  async integrateWorker(jobId: string): Promise<string> {
+    if (this.#closed) throw new Error("session is closed");
+    if (this.#running) throw new Error("cannot integrate child-agent work while the session is running");
+    await this.#checkpoint.beginTurn(this.#agent.messages.length, this.#state.agentId, this.#state);
+    try {
+      const result = await this.#scheduler.integrate(jobId);
+      await this.#checkpoint.finalizeTurn();
+      return result;
+    } catch (error) {
+      await this.#checkpoint.finalizeTurn().catch(() => undefined);
+      throw error;
+    }
   }
 
   async #reclaimTerminalWorktrees(): Promise<void> {
     await this.#scheduler.reclaimTerminalWorktrees(async (job, worktree) => {
-      await this.#worktrees.dispose(worktree).catch((error: unknown) =>
-        this.events.emit({
+      try {
+        await this.#worktrees.dispose(worktree);
+      } catch (error) {
+        await this.events.emit({
           type: "notice",
           agentId: job.parentAgentId,
           message: `worker ${job.id} terminal cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-        }).then(() => undefined)
-      );
-    });
+        });
+        throw error;
+      }
+    }).catch(() => undefined);
   }
 }

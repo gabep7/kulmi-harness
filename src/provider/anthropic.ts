@@ -1,14 +1,25 @@
 import type { ResolvedModel } from "../config/config.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type {
-  FunctionToolCall,
-  ModelProvider,
-  ProviderContentPart,
-  ProviderMessage,
-  ProviderRequest,
-  ProviderResponse,
+import {
+  ProviderError,
+  type FunctionToolCall,
+  type ModelProvider,
+  type ProviderContentPart,
+  type ProviderMessage,
+  type ProviderRequest,
+  type ProviderResponse,
 } from "./types.js";
+import {
+  createProviderHttpError,
+  createProviderStreamError,
+  DEFAULT_IDLE_TIMEOUT_MS,
+  DEFAULT_MAX_RETRY_AFTER_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  DEFAULT_TOTAL_TIMEOUT_MS,
+  parseSse,
+  withProviderRetries,
+} from "./stream.js";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -89,6 +100,16 @@ const wireEventSchema = z.object({
   }).passthrough().optional(),
 }).passthrough();
 type WireEvent = z.infer<typeof wireEventSchema>;
+
+const progressEventTypes: Partial<Record<string, true>> = {
+  message_start: true,
+  content_block_start: true,
+  content_block_delta: true,
+  content_block_stop: true,
+  message_delta: true,
+  message_stop: true,
+  error: true,
+};
 type WireUsage = z.infer<typeof wireUsageSchema>;
 
 const stopReasonMap: Record<string, string> = {
@@ -101,6 +122,18 @@ const stopReasonMap: Record<string, string> = {
 interface CacheState {
   anchor: string;
   messages: string[];
+  lastBreakpointIndex?: number;
+}
+
+export interface AnthropicProviderOptions {
+  idleTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  totalTimeoutMs?: number;
+  maxRetryAfterMs?: number;
+  maxAttempts?: number;
+  retryBaseDelayMs?: number;
+  random?: () => number;
+  thinkingBudgetTokens?: number;
 }
 
 export class AnthropicProvider implements ModelProvider {
@@ -108,17 +141,29 @@ export class AnthropicProvider implements ModelProvider {
   readonly model: string;
   readonly #config: ResolvedModel;
   readonly #idleTimeoutMs: number;
+  readonly #requestTimeoutMs: number;
+  readonly #totalTimeoutMs: number;
+  readonly #maxRetryAfterMs: number;
+  readonly #maxAttempts: number | undefined;
+  readonly #retryBaseDelayMs: number;
+  readonly #random: (() => number) | undefined;
   readonly #thinkingBudgetTokens: number;
   readonly #cacheStates = new Map<string, CacheState>();
 
   constructor(
     config: ResolvedModel,
-    options: { idleTimeoutMs?: number; thinkingBudgetTokens?: number } = {},
+    options: AnthropicProviderOptions = {},
   ) {
     this.#config = config;
     this.name = config.name;
     this.model = config.model;
-    this.#idleTimeoutMs = options.idleTimeoutMs ?? 300_000;
+    this.#idleTimeoutMs = options.idleTimeoutMs ?? config.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.#totalTimeoutMs = options.totalTimeoutMs ?? config.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
+    this.#maxRetryAfterMs = options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
+    this.#maxAttempts = options.maxAttempts;
+    this.#retryBaseDelayMs = options.retryBaseDelayMs ?? 1_000;
+    this.#random = options.random;
     this.#thinkingBudgetTokens = options.thinkingBudgetTokens ?? DEFAULT_THINKING_BUDGET_TOKENS;
   }
 
@@ -126,6 +171,9 @@ export class AnthropicProvider implements ModelProvider {
     for (const scope of this.#cacheStates.keys()) {
       if (scope.startsWith(prefix)) this.#cacheStates.delete(scope);
     }
+  }
+  resetCacheScope(scope: string): void {
+    this.#cacheStates.delete(scope);
   }
 
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
@@ -145,8 +193,52 @@ export class AnthropicProvider implements ModelProvider {
     if (lastTool) lastTool.cache_control = { type: "ephemeral" };
     const lastSystem = system[system.length - 1];
     if (lastSystem && lastSystem.type === "text") lastSystem.cache_control = { type: "ephemeral" };
-    const lastMessage = messages[messages.length - 1];
-    if (lastMessage) placeCacheBreakpoint(lastMessage.content);
+
+    const previous = request.cacheScope ? this.#cacheStates.get(request.cacheScope) : undefined;
+    let anchor: string | undefined;
+    let messageHashes: string[] | undefined;
+    if (request.cacheScope) {
+      anchor = createHash("sha256").update(JSON.stringify({
+        model: this.model,
+        thinking,
+        system,
+        tools,
+      })).digest("hex");
+      messageHashes = request.messages.map((message) =>
+        createHash("sha256").update(JSON.stringify(message)).digest("hex")
+      );
+      if (previous && previous.anchor !== anchor) {
+        throw new Error(`cache prefix changed inside scope ${request.cacheScope}`);
+      }
+      const appendOnly = previous === undefined ||
+        (previous.messages.length <= messageHashes.length &&
+          previous.messages.every((hash, index) => messageHashes?.[index] === hash));
+      if (!appendOnly) {
+        throw new Error(`message history was rewritten inside cache scope ${request.cacheScope}`);
+      }
+    }
+
+    const tailBreakpointIndex = findCacheableMessageIndex(messages);
+    const laggingBreakpointIndex = previous?.lastBreakpointIndex;
+    if (
+      laggingBreakpointIndex !== undefined &&
+      laggingBreakpointIndex !== tailBreakpointIndex
+    ) {
+      const lagging = messages[laggingBreakpointIndex];
+      if (lagging) placeCacheBreakpoint(lagging.content);
+    }
+    if (tailBreakpointIndex !== undefined) {
+      const tail = messages[tailBreakpointIndex];
+      if (tail) placeCacheBreakpoint(tail.content);
+    }
+    if (request.cacheScope && anchor && messageHashes) {
+      this.#cacheStates.set(request.cacheScope, {
+        anchor,
+        messages: messageHashes,
+        ...(tailBreakpointIndex === undefined ? {} : { lastBreakpointIndex: tailBreakpointIndex }),
+      });
+    }
+
     const budgetTokens = Math.max(
       MIN_THINKING_BUDGET_TOKENS,
       Math.min(this.#thinkingBudgetTokens, maxTokens - 1),
@@ -160,85 +252,28 @@ export class AnthropicProvider implements ModelProvider {
       stream: true,
       ...(thinking ? { thinking: { type: "enabled", budget_tokens: budgetTokens } } : {}),
     });
-    if (request.cacheScope) {
-      const anchor = createHash("sha256").update(JSON.stringify({
-        model: this.model,
-        thinking,
-        system,
-        tools,
-      })).digest("hex");
-      const messageHashes = request.messages.map((message) =>
-        createHash("sha256").update(JSON.stringify(message)).digest("hex")
-      );
-      const previous = this.#cacheStates.get(request.cacheScope);
-      if (previous && previous.anchor !== anchor) {
-        throw new Error(`cache prefix changed inside scope ${request.cacheScope}`);
-      }
-      const appendOnly = previous === undefined ||
-        (previous.messages.length <= messageHashes.length &&
-          previous.messages.every((hash, index) => messageHashes[index] === hash));
-      if (!appendOnly) {
-        throw new Error(`message history was rewritten inside cache scope ${request.cacheScope}`);
-      }
-      this.#cacheStates.set(request.cacheScope, { anchor, messages: messageHashes });
-    }
 
-    const controller = new AbortController();
-    const relayAbort = () => controller.abort(request.signal.reason);
-    request.signal.addEventListener("abort", relayAbort, { once: true });
-    if (request.signal.aborted) relayAbort();
-
-    let idleTimer: NodeJS.Timeout | undefined;
-    const clearIdleTimer = () => {
-      clearTimeout(idleTimer);
-      idleTimer = undefined;
-    };
-    const resetIdleTimer = () => {
-      clearIdleTimer();
-      idleTimer = setTimeout(
-        () => controller.abort(new Error("stream stalled")),
-        this.#idleTimeoutMs,
-      );
-      idleTimer.unref();
-    };
-
-    try {
-      let lastError: unknown;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        let emitted = false;
-        try {
-          resetIdleTimer();
-          try {
-            const response = await this.#fetch(body, controller.signal);
-            return await this.#readResponse(
-              response,
-              request,
-              controller.signal,
-              resetIdleTimer,
-              () => { emitted = true; },
-            );
-          } finally {
-            clearIdleTimer();
-          }
-        } catch (error) {
-          if (
-            controller.signal.aborted ||
-            emitted ||
-            attempt === 2 ||
-            (error instanceof AnthropicHttpError && !error.retryable)
-          ) throw error;
-          lastError = error;
-          const delay = error instanceof AnthropicHttpError && error.retryAfterMs !== undefined
-            ? error.retryAfterMs
-            : 500 * 2 ** attempt + Math.floor(Math.random() * 200);
-          await sleep(delay, controller.signal);
-        }
-      }
-      throw lastError instanceof Error ? lastError : new Error("stream failed");
-    } finally {
-      request.signal.removeEventListener("abort", relayAbort);
-      clearIdleTimer();
-    }
+    return withProviderRetries({
+      callerSignal: request.signal,
+      idleTimeoutMs: this.#idleTimeoutMs,
+      requestTimeoutMs: this.#requestTimeoutMs,
+      totalTimeoutMs: this.#totalTimeoutMs,
+      maxRetryAfterMs: this.#maxRetryAfterMs,
+      retryBaseDelayMs: this.#retryBaseDelayMs,
+      ...(this.#maxAttempts === undefined ? {} : { maxAttempts: this.#maxAttempts }),
+      ...(this.#random === undefined ? {} : { random: this.#random }),
+      ...(request.onRetry === undefined ? {} : { onRetry: request.onRetry }),
+      runAttempt: async ({ signal, resetIdleTimer, markEmitted }) => {
+        const response = await this.#fetch(body, signal);
+        return this.#readResponse(
+          response,
+          request,
+          signal,
+          resetIdleTimer,
+          markEmitted,
+        );
+      },
+    });
   }
 
   async #readResponse(
@@ -271,7 +306,7 @@ export class AnthropicProvider implements ModelProvider {
     };
 
     resetIdleTimer();
-    for await (const data of parseSse(response.body, signal, resetIdleTimer)) {
+    for await (const data of parseSse(response.body, signal)) {
       let event: WireEvent;
       try {
         event = wireEventSchema.parse(JSON.parse(data));
@@ -279,8 +314,13 @@ export class AnthropicProvider implements ModelProvider {
         const detail = error instanceof z.ZodError ? z.prettifyError(error) : String(error);
         throw new Error(`invalid stream event: ${detail}; data=${data.slice(0, 300)}`);
       }
+      if (progressEventTypes[event.type]) resetIdleTimer();
       if (event.type === "error") {
-        throw new Error(event.error?.message ?? "anthropic stream error");
+        throw createProviderStreamError(
+          "Anthropic",
+          event.error?.message ?? "anthropic stream error",
+          event.error?.type,
+        );
       }
       if (event.type === "message_stop") {
         sawStop = true;
@@ -401,10 +441,12 @@ export class AnthropicProvider implements ModelProvider {
     });
     if (response.ok) return response;
     const errorBody = (await response.text()).slice(0, 2_000);
-    throw new AnthropicHttpError(
-      `HTTP ${response.status}: ${errorBody}`,
-      [408, 409, 429].includes(response.status) || response.status >= 500,
-      parseRetryAfter(response.headers.get("retry-after")),
+    throw createProviderHttpError(
+      "Anthropic",
+      response.status,
+      errorBody,
+      response.headers.get("retry-after"),
+      this.#maxRetryAfterMs,
     );
   }
 }
@@ -507,6 +549,18 @@ function parseToolInput(call: FunctionToolCall): unknown {
   }
 }
 
+function findCacheableMessageIndex(messages: readonly WireMessage[]): number | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message) continue;
+    if (message.content.some((block) => block.type !== "thinking" && block.type !== "redacted_thinking")) {
+      return index;
+    }
+  }
+  return undefined;
+}
+
+
 function placeCacheBreakpoint(blocks: WireBlock[]): void {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
@@ -544,23 +598,14 @@ function validateConversation(messages: readonly ProviderMessage[], thinking: bo
 function validateToolCalls(calls: FunctionToolCall[]): void {
   const ids = new Set<string>();
   for (const call of calls) {
-    if (!call.function.name.trim()) throw new Error(`tool call without a function name`);
-    if (ids.has(call.id)) throw new Error(`duplicate tool call id ${call.id}`);
+    if (!call.id.trim()) throw new ProviderError("tool call without an id", { kind: "invalid_request", retryable: false });
+    if (!call.function.name.trim()) throw new ProviderError("tool call without a function name", { kind: "invalid_request", retryable: false });
+    if (ids.has(call.id)) throw new ProviderError(`duplicate tool call id ${call.id}`, { kind: "invalid_request", retryable: false });
     ids.add(call.id);
   }
 }
 
-class AnthropicHttpError extends Error {
-  readonly retryable: boolean;
-  readonly retryAfterMs: number | undefined;
 
-  constructor(message: string, retryable: boolean, retryAfterMs?: number) {
-    super(message);
-    this.name = "AnthropicHttpError";
-    this.retryable = retryable;
-    this.retryAfterMs = retryAfterMs;
-  }
-}
 
 function normalizeUsage(usage: WireUsage): ProviderResponse["usage"] {
   const cacheRead = usage.cache_read_input_tokens ?? 0;
@@ -600,64 +645,5 @@ function mergeWireUsage(previous: WireUsage, next: WireUsage): WireUsage {
   return merged;
 }
 
-function parseRetryAfter(value: string | null): number | undefined {
-  if (!value) return undefined;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
-  const at = Date.parse(value);
-  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
-}
 
-async function* parseSse(
-  body: ReadableStream<Uint8Array>,
-  signal: AbortSignal,
-  onActivity: () => void,
-): AsyncGenerator<string> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  try {
-    while (true) {
-      if (signal.aborted) throw signal.reason ?? new Error("request aborted");
-      const { done, value } = await reader.read();
-      if (done) break;
-      onActivity();
-      buffer += decoder.decode(value, { stream: true });
-      buffer = buffer.replaceAll("\r\n", "\n");
-      let boundary = buffer.indexOf("\n\n");
-      while (boundary >= 0) {
-        const event = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        const data = event.split("\n")
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trimStart())
-          .join("\n");
-        if (data) yield data;
-        boundary = buffer.indexOf("\n\n");
-      }
-    }
-    buffer += decoder.decode();
-    buffer = buffer.replaceAll("\r\n", "\n");
-    const data = buffer.split("\n")
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trimStart())
-      .join("\n");
-    if (data) yield data;
-  } finally {
-    reader.releaseLock();
-  }
-}
 
-function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  const timer = setTimeout(() => {
-    signal.removeEventListener("abort", abort);
-    resolve();
-  }, milliseconds);
-  const abort = () => {
-    clearTimeout(timer);
-    reject(signal.reason ?? new Error("request aborted"));
-  };
-  signal.addEventListener("abort", abort, { once: true });
-  return promise;
-}

@@ -1,4 +1,50 @@
 import type { TokenUsage } from "../core/types.js";
+export type ProviderErrorKind =
+  | "auth"
+  | "rate_limit"
+  | "quota"
+  | "context_length"
+  | "invalid_request"
+  | "overloaded"
+  | "server"
+  | "transport";
+
+export interface ProviderErrorOptions {
+  kind: ProviderErrorKind;
+  status?: number;
+  providerErrorType?: string;
+  retryable: boolean;
+  retryAfterMs?: number;
+  cause?: unknown;
+}
+
+export class ProviderError extends Error {
+  readonly kind: ProviderErrorKind;
+  readonly status: number | undefined;
+  readonly providerErrorType: string | undefined;
+  readonly retryable: boolean;
+  readonly retryAfterMs: number | undefined;
+  readonly cause: unknown;
+
+  constructor(message: string, options: ProviderErrorOptions) {
+    super(message);
+    this.name = "ProviderError";
+    this.kind = options.kind;
+    this.status = options.status;
+    this.providerErrorType = options.providerErrorType;
+    this.retryable = options.retryable;
+    this.retryAfterMs = options.retryAfterMs;
+    this.cause = options.cause;
+  }
+}
+
+export interface ProviderRetryNotice {
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  error: ProviderError;
+}
+
 
 export interface FunctionToolCall {
   id: string;
@@ -56,6 +102,7 @@ export interface ProviderRequest {
   onTextDelta?: (text: string) => void | Promise<void>;
   onToolCallStart?: (call: FunctionToolCall) => void | Promise<void>;
   onCitations?: (citations: WebCitation[]) => void | Promise<void>;
+  onRetry?: (notice: ProviderRetryNotice) => void | Promise<void>;
 }
 
 export interface ProviderResponse {
@@ -71,4 +118,5 @@ export interface ModelProvider {
   readonly model: string;
   complete(request: ProviderRequest): Promise<ProviderResponse>;
   invalidateCacheScopes?(prefix: string): void;
+  resetCacheScope?(scope: string): void;
 }

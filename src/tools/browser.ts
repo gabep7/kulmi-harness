@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { chromium } from "playwright-core";
 import { z } from "zod";
 import { defineTool } from "./types.js";
 import { assertPublicUrl } from "./web-search.js";
@@ -23,14 +24,32 @@ export const browserQaTool = defineTool({
   }),
   readOnly: true,
   async execute(context, input) {
+    if (context.signal.aborted) throw context.signal.reason ?? new Error("browser_qa aborted");
     await assertPublicUrl(new URL(input.url), { allowLoopback: true });
     const executablePath = chromiumCandidates.find((path) => existsSync(path));
     if (!executablePath) throw new Error("Chromium not found. Install Chrome/Chromium or set KULMI_CHROMIUM to the executable path.");
-    const { chromium } = await import("playwright-core");
     const browser = await chromium.launch({ executablePath, headless: true });
+    let closing: Promise<void> | undefined;
+    const closeBrowser = (): Promise<void> => closing ??= browser.close();
+    const closeOnAbort = (): void => {
+      void closeBrowser().catch(() => undefined);
+    };
+    context.signal.addEventListener("abort", closeOnAbort, { once: true });
     try {
-      const page = await browser.newPage();
+      if (context.signal.aborted) throw context.signal.reason ?? new Error("browser_qa aborted");
+      const browserContext = await browser.newContext({ serviceWorkers: "block" });
+      await browserContext.route("**/*", async (route) => {
+        try {
+          await assertPublicUrl(new URL(route.request().url()), { allowLoopback: true });
+        } catch {
+          await route.abort("blockedbyclient");
+          return;
+        }
+        await route.continue();
+      });
+      const page = await browserContext.newPage();
       await page.goto(input.url, { waitUntil: input.wait_until, timeout: context.commandTimeoutMs });
+      await assertPublicUrl(new URL(page.url()), { allowLoopback: true });
       const title = await page.title();
       const bodyText = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
       const textBytes = Buffer.from(bodyText, "utf8");
@@ -49,8 +68,12 @@ export const browserQaTool = defineTool({
         lines.push("", `screenshot: ${attachment.attachmentId} ${attachment.path} ${attachment.size} bytes`);
       }
       return { content: lines.join("\n") };
+    } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? new Error("browser_qa aborted");
+      throw error;
     } finally {
-      await browser.close();
+      context.signal.removeEventListener("abort", closeOnAbort);
+      await closeBrowser().catch(() => undefined);
     }
   },
 });

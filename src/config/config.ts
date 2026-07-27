@@ -16,15 +16,20 @@ export type ModelProtocol = "openai" | "anthropic";
 
 export interface ModelConfig {
   model: string;
-  provider?: string;
   protocol?: ModelProtocol;
   baseUrl: string;
   apiKeyEnv: string;
   thinking: boolean;
   reasoningEffort?: string;
   reasoningEfforts?: string[];
+  reasoningStyle?: "openai-o" | "reasoning_content" | "anthropic-thinking" | "none";
+  vision?: boolean;
   contextWindow: number;
   maxOutputTokens: number;
+  streamUsage?: boolean;
+  idleTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  totalTimeoutMs?: number;
 }
 
 export interface McpServerConfig {
@@ -86,6 +91,7 @@ const modelDefaults: ModelConfig = {
   baseUrl: "",
   apiKeyEnv: "API_KEY",
   thinking: false,
+  streamUsage: true,
   contextWindow: 128_000,
   maxOutputTokens: 16_384,
 };
@@ -93,10 +99,10 @@ const modelDefaults: ModelConfig = {
 const defaults: KulmiConfig = {
   defaultModel: "",
   defaultAutonomy: "medium",
-  maxSteps: 80,
+  maxSteps: 200,
   maxSubagents: 3,
   commandTimeoutSeconds: 120,
-  maxOutputBytes: 200_000,
+  maxOutputBytes: 524_288,
   models: {},
   search: {
     mode: "free",
@@ -129,7 +135,6 @@ const mcpServerFileSchema = z.object({
   env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()).optional(),
 }).strict();
 const modelFileSchema = z.object({
-  provider: z.string().min(1).optional(),
   protocol: z.enum(["openai", "anthropic"]).optional(),
   model: z.string().min(1).optional(),
   base_url: httpUrlSchema.optional(),
@@ -137,14 +142,25 @@ const modelFileSchema = z.object({
   api_key_env: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
   apiKeyEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*$/).optional(),
   thinking: z.boolean().optional(),
+  stream_usage: z.boolean().optional(),
+  streamUsage: z.boolean().optional(),
   reasoning_effort: z.string().min(1).optional(),
   reasoningEffort: z.string().min(1).optional(),
   reasoning_efforts: z.array(z.string().min(1)).optional(),
   reasoningEfforts: z.array(z.string().min(1)).optional(),
+  reasoning_style: z.enum(["openai-o", "reasoning_content", "anthropic-thinking", "none"]).optional(),
+  reasoningStyle: z.enum(["openai-o", "reasoning_content", "anthropic-thinking", "none"]).optional(),
+  vision: z.boolean().optional(),
   context_window: positiveInt.optional(),
   contextWindow: positiveInt.optional(),
   max_output_tokens: positiveInt.optional(),
   maxOutputTokens: positiveInt.optional(),
+  idle_timeout_ms: positiveInt.max(3_600_000).optional(),
+  idleTimeoutMs: positiveInt.max(3_600_000).optional(),
+  request_timeout_ms: positiveInt.max(3_600_000).optional(),
+  requestTimeoutMs: positiveInt.max(3_600_000).optional(),
+  total_timeout_ms: positiveInt.max(86_400_000).optional(),
+  totalTimeoutMs: positiveInt.max(86_400_000).optional(),
 }).strict();
 const searchFileSchema = z.object({
   mode: z.enum(["off", "free"]).optional(),
@@ -192,8 +208,6 @@ const fileConfigSchema = z.object({
   max_subagents: z.number().int().min(1).max(64).optional(),
   command_timeout_seconds: z.number().int().min(1).max(1_800).optional(),
   max_output_bytes: z.number().int().min(1_024).max(100_000_000).optional(),
-  api_keys: z.record(z.string(), z.unknown()).optional(),
-  apiKeys: z.record(z.string(), z.unknown()).optional(),
   default: defaultFileSchema.optional(),
   search: searchFileSchema.optional(),
   sandbox: sandboxFileSchema.optional(),
@@ -249,16 +263,30 @@ export type ConfigTrustLevel = "user" | "project";
 // (which would send the bound API key and full transcript to an attacker), cannot
 // force default_model when the user already chose one, and cannot redirect search.
 
+function parseTomlFile(path: string): unknown {
+  let content: string;
+  try {
+    content = readFileSync(path, "utf8");
+  } catch (error) {
+    throw new Error(`${path}: cannot read TOML: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    return parse(content);
+  } catch (error) {
+    throw new Error(`${path}: invalid TOML: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 export function loadConfig(cwd: string): KulmiConfig {
   const root = findWorkspaceRoot(cwd);
   let config = structuredClone(defaults);
   const userPath = join(homedir(), ".config", "kulmi", "config.toml");
   const projectPath = join(root, ".kulmi", "config.toml");
   if (existsSync(userPath)) {
-    config = mergeConfig(config, parseFileConfig(parse(readFileSync(userPath, "utf8")), userPath, "user"));
+    config = mergeConfig(config, parseFileConfig(parseTomlFile(userPath), userPath, "user"));
   }
   if (existsSync(projectPath)) {
-    const projectFile = parseFileConfig(parse(readFileSync(projectPath, "utf8")), projectPath, "project");
+    const projectFile = parseFileConfig(parseTomlFile(projectPath), projectPath, "project");
     config = mergeConfig(config, restrictProjectNetworkSurface(projectFile, config, projectPath));
   }
   registerSecretEnvNames(Object.values(config.models).map((model) => model.apiKeyEnv));
@@ -291,19 +319,34 @@ function mergeConfig(base: KulmiConfig, file: FileConfig): KulmiConfig {
     }
     models[name] = {
       model,
-      ...(raw.provider ?? previous.provider ? { provider: raw.provider ?? previous.provider } : {}),
       ...(raw.protocol ?? previous.protocol ? { protocol: raw.protocol ?? previous.protocol } : {}),
       baseUrl,
       apiKeyEnv,
       thinking: raw.thinking ?? previous.thinking,
+      streamUsage: raw.stream_usage ?? raw.streamUsage ?? previous.streamUsage ?? true,
       ...(raw.reasoning_effort ?? raw.reasoningEffort ?? previous.reasoningEffort
         ? { reasoningEffort: raw.reasoning_effort ?? raw.reasoningEffort ?? previous.reasoningEffort }
         : {}),
       ...(raw.reasoning_efforts ?? raw.reasoningEfforts ?? previous.reasoningEfforts
         ? { reasoningEfforts: raw.reasoning_efforts ?? raw.reasoningEfforts ?? previous.reasoningEfforts }
         : {}),
+      ...(raw.reasoning_style ?? raw.reasoningStyle ?? previous.reasoningStyle
+        ? { reasoningStyle: raw.reasoning_style ?? raw.reasoningStyle ?? previous.reasoningStyle }
+        : {}),
+      ...(raw.vision !== undefined || previous.vision !== undefined
+        ? { vision: raw.vision ?? previous.vision }
+        : {}),
       contextWindow: raw.context_window ?? raw.contextWindow ?? previous.contextWindow,
       maxOutputTokens: raw.max_output_tokens ?? raw.maxOutputTokens ?? previous.maxOutputTokens,
+      ...(raw.idle_timeout_ms ?? raw.idleTimeoutMs ?? previous.idleTimeoutMs
+        ? { idleTimeoutMs: raw.idle_timeout_ms ?? raw.idleTimeoutMs ?? previous.idleTimeoutMs }
+        : {}),
+      ...(raw.request_timeout_ms ?? raw.requestTimeoutMs ?? previous.requestTimeoutMs
+        ? { requestTimeoutMs: raw.request_timeout_ms ?? raw.requestTimeoutMs ?? previous.requestTimeoutMs }
+        : {}),
+      ...(raw.total_timeout_ms ?? raw.totalTimeoutMs ?? previous.totalTimeoutMs
+        ? { totalTimeoutMs: raw.total_timeout_ms ?? raw.totalTimeoutMs ?? previous.totalTimeoutMs }
+        : {}),
     };
   }
   const search = file.search;
@@ -562,6 +605,9 @@ export function writeUserModelProfile(options: {
   maxOutputTokens?: number;
   makeDefault?: boolean;
 }): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(options.profileName)) {
+    throw new Error(`invalid model profile name ${options.profileName}`);
+  }
   const path = userConfigPath();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 
@@ -571,10 +617,10 @@ export function writeUserModelProfile(options: {
     try {
       parse(existing);
     } catch (error) {
-      throw new Error(`cannot add model profile: existing user config is invalid: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`${path}: cannot add model profile because the existing TOML is invalid: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  const withoutDefault = removeTopLevelDefaultModel(existing);
+  const withoutProfile = removeModelProfile(removeTopLevelDefaultModel(existing), options.profileName);
   const profile = [
     `[models.${options.profileName}]`,
     `model = ${tomlValue(options.model)}`,
@@ -586,12 +632,29 @@ export function writeUserModelProfile(options: {
     `context_window = ${String(options.contextWindow ?? 128_000)}`,
     `max_output_tokens = ${String(options.maxOutputTokens ?? 16_384)}`,
   ].join("\n");
-  const prefix = withoutDefault ? `${withoutDefault}\n\n` : "";
+  const prefix = withoutProfile ? `${withoutProfile}\n\n` : "";
   const defaultLine = options.makeDefault === false ? "" : `default_model = ${tomlValue(options.profileName)}\n\n`;
   writeFileSync(path, `${defaultLine}${prefix}${profile}\n`, { encoding: "utf8", mode: 0o600 });
   return path;
 }
 
+
+function removeModelProfile(source: string, profileName: string): string {
+  const header = `[models.${profileName}]`;
+  const lines = source.split("\n");
+  const kept: string[] = [];
+  let removing = false;
+  for (const line of lines) {
+    const isTable = /^\s*\[[^\]]+\]\s*$/.test(line);
+    if (isTable && line.trim() === header) {
+      removing = true;
+      continue;
+    }
+    if (isTable && removing) removing = false;
+    if (!removing) kept.push(line);
+  }
+  return kept.join("\n").trimEnd();
+}
 
 function removeTopLevelDefaultModel(source: string): string {
   const lines = source.split("\n");

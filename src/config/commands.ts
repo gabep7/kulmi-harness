@@ -44,7 +44,11 @@ export function discoverCommands(workspaceRoot: string): CommandDefinition[] {
       } catch {
         command = undefined;
       }
-      if (command) commands.set(command.name, command);
+      if (command) {
+        const previous = commands.get(command.name);
+        if (previous) process.stderr.write(`warning: command ${command.name} from ${command.path} overrides ${previous.path}\n`);
+        commands.set(command.name, command);
+      }
     }
   }
   return [...commands.values()].sort((a, b) => a.name.localeCompare(b.name));

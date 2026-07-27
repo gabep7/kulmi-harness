@@ -78,11 +78,11 @@ class LineBuffer {
 
   private push(line: string): void {
     this.lines.push(line);
-    this.bytes += line.length + 1;
+    this.bytes += Buffer.byteLength(line, "utf8") + 1;
     while (this.lines.length > this.maxLines || this.bytes > this.maxBytes) {
       const dropped = this.lines.shift();
       if (dropped === undefined) break;
-      this.bytes -= dropped.length + 1;
+      this.bytes -= Buffer.byteLength(dropped, "utf8") + 1;
     }
   }
 }
@@ -96,20 +96,43 @@ interface ManagedProcess {
   buffer: LineBuffer;
   exited: Promise<ProcessExit>;
   exit?: ProcessExit;
+  stopping?: Promise<ProcessExit>;
 }
 
 export class ProcessManager {
-  private readonly processes = new Map<string, ManagedProcess>();
+  static readonly #active = new Set<ProcessManager>();
+  static #lifecycleHandlersInstalled = false;
+  static #shutdownSignal: NodeJS.Signals | undefined;
+  static readonly #onExit = (): void => {
+    for (const manager of ProcessManager.#active) manager.#disposeImmediately();
+  };
+  static readonly #onSigterm = (): void => ProcessManager.#handleSignal("SIGTERM");
+  static readonly #onSighup = (): void => ProcessManager.#handleSignal("SIGHUP");
 
-  constructor(private readonly stopGraceMs = 3_000) {}
+  readonly #processes = new Map<string, ManagedProcess>();
+  #disposed = false;
+  #disposePromise: Promise<void> | undefined;
+
+  constructor(
+    private readonly stopGraceMs = 3_000,
+    private readonly maxExitedProcesses = 20,
+  ) {
+    if (!Number.isInteger(maxExitedProcesses) || maxExitedProcesses < 0) {
+      throw new Error("max exited process count must be a non-negative integer");
+    }
+    ProcessManager.#active.add(this);
+    ProcessManager.#installLifecycleHandlers();
+  }
 
   async start(options: StartProcessOptions): Promise<StartProcessResult> {
-    const existing = this.processes.get(options.name);
+    if (this.#disposed) throw new Error("process manager is disposed");
+    const existing = this.#processes.get(options.name);
     if (existing && !existing.exit) {
       throw new Error(
         `process "${options.name}" is already running (pid ${existing.pid}); stop_process it first or pick another name`,
       );
     }
+    if (existing) this.#processes.delete(options.name);
     if (options.signal?.aborted) throw options.signal.reason ?? new Error("start_process aborted");
 
     const childEnv = safeChildEnvironment();
@@ -132,13 +155,19 @@ export class ProcessManager {
       disposeChildEnvironment(childEnv);
       throw error instanceof Error ? error : new Error(String(error));
     }
+    const pid = child.pid;
+    if (!Number.isSafeInteger(pid) || pid === undefined || pid <= 1) {
+      disposeChildEnvironment(childEnv);
+      child.kill("SIGKILL");
+      throw new Error(`spawned process "${options.name}" has an invalid pid`);
+    }
 
     const buffer = new LineBuffer(options.maxLines ?? 2_000, options.maxBytes ?? 1_048_576);
     const exitGate = Promise.withResolvers<ProcessExit>();
     const entry: ManagedProcess = {
       name: options.name,
       command: options.command,
-      pid: child.pid ?? -1,
+      pid,
       startedAt: Date.now(),
       child,
       buffer,
@@ -158,8 +187,9 @@ export class ProcessManager {
       disposeChildEnvironment(childEnv);
       exitGate.resolve(entry.exit);
       notify?.();
+      this.#pruneExitedProcesses();
     });
-    this.processes.set(options.name, entry);
+    this.#processes.set(options.name, entry);
 
     if (!options.readyPattern) {
       return { name: options.name, pid: entry.pid, ready: true, output: buffer.snapshot().slice(-40) };
@@ -169,7 +199,10 @@ export class ProcessManager {
     const readiness = Promise.withResolvers<"ready" | "exit" | "timeout" | "abort">();
     notify = () => {
       if (entry.exit) readiness.resolve("exit");
-      else if (pattern.test(buffer.text())) readiness.resolve("ready");
+      else {
+        pattern.lastIndex = 0;
+        if (pattern.test(buffer.text())) readiness.resolve("ready");
+      }
     };
     notify();
     const timeoutMs = options.readyTimeoutMs ?? 30_000;
@@ -193,7 +226,7 @@ export class ProcessManager {
         `process "${options.name}" exited (code ${entry.exit?.code ?? "unknown"}) before ready pattern matched; last output:\n${tail}`,
       );
     }
-    this.killGroup(entry, "SIGKILL");
+    this.#killGroup(entry, "SIGKILL");
     await entry.exited;
     if (outcome === "abort") throw options.signal?.reason ?? new Error("start_process aborted");
     throw new Error(
@@ -202,7 +235,7 @@ export class ProcessManager {
   }
 
   logs(name: string): { running: boolean; exit?: ProcessExit; lines: string[] } {
-    const entry = this.require(name);
+    const entry = this.#require(name);
     return {
       running: !entry.exit,
       ...(entry.exit ? { exit: entry.exit } : {}),
@@ -211,7 +244,7 @@ export class ProcessManager {
   }
 
   send(name: string, message: { text?: string; signal?: NodeJS.Signals }): void {
-    const entry = this.require(name);
+    const entry = this.#require(name);
     if (entry.exit) {
       throw new Error(
         `process "${name}" already exited (code ${entry.exit.code ?? "null"}, signal ${entry.exit.signal ?? "null"}); its logs remain readable via process_logs`,
@@ -221,27 +254,19 @@ export class ProcessManager {
       if (!entry.child.stdin.writable) throw new Error(`stdin of process "${name}" is no longer writable`);
       entry.child.stdin.write(`${message.text}\n`);
     }
-    if (message.signal) this.killGroup(entry, message.signal);
+    if (message.signal) this.#killGroup(entry, message.signal);
   }
 
   async stop(name: string): Promise<{ found: boolean; wasRunning: boolean; exit?: ProcessExit }> {
-    const entry = this.processes.get(name);
+    const entry = this.#processes.get(name);
     if (!entry) return { found: false, wasRunning: false };
-    this.processes.delete(name);
     if (entry.exit) return { found: true, wasRunning: false, exit: entry.exit };
-    this.killGroup(entry, "SIGTERM");
-    const grace = Promise.withResolvers<"exit" | "grace">();
-    const timer = setTimeout(() => grace.resolve("grace"), this.stopGraceMs);
-    void entry.exited.then(() => grace.resolve("exit"));
-    const first = await grace.promise;
-    clearTimeout(timer);
-    if (first === "grace") this.killGroup(entry, "SIGKILL");
-    const exit = await entry.exited;
+    const exit = await this.#terminate(entry);
     return { found: true, wasRunning: true, exit };
   }
 
   list(): ProcessStatus[] {
-    return [...this.processes.values()].map((entry) => ({
+    return [...this.#processes.values()].map((entry) => ({
       name: entry.name,
       command: entry.command,
       pid: entry.pid,
@@ -252,30 +277,99 @@ export class ProcessManager {
     }));
   }
 
-  disposeAll(): void {
-    for (const entry of this.processes.values()) {
-      if (!entry.exit) this.killGroup(entry, "SIGKILL");
-    }
-    this.processes.clear();
+  disposeAll(): Promise<void> {
+    if (this.#disposePromise) return this.#disposePromise;
+    this.#disposed = true;
+    ProcessManager.#unregister(this);
+    const entries = [...this.#processes.values()];
+    this.#disposePromise = Promise.allSettled(entries.map((entry) => this.#terminate(entry)))
+      .then(() => {
+        this.#processes.clear();
+      });
+    return this.#disposePromise;
   }
 
-  private require(name: string): ManagedProcess {
-    const entry = this.processes.get(name);
+  #disposeImmediately(): void {
+    this.#disposed = true;
+    ProcessManager.#unregister(this);
+    for (const entry of this.#processes.values()) {
+      if (!entry.exit) this.#killGroup(entry, "SIGKILL");
+    }
+    this.#processes.clear();
+  }
+
+  #terminate(entry: ManagedProcess): Promise<ProcessExit> {
+    if (entry.exit) return Promise.resolve(entry.exit);
+    if (entry.stopping) return entry.stopping;
+    entry.stopping = (async () => {
+      this.#killGroup(entry, "SIGTERM");
+      const grace = Promise.withResolvers<"exit" | "grace">();
+      const timer = setTimeout(() => grace.resolve("grace"), this.stopGraceMs);
+      void entry.exited.then(() => grace.resolve("exit"));
+      const first = await grace.promise;
+      clearTimeout(timer);
+      if (first === "grace" && !entry.exit) this.#killGroup(entry, "SIGKILL");
+      return entry.exited;
+    })();
+    return entry.stopping;
+  }
+
+  #pruneExitedProcesses(): void {
+    const exited = [...this.#processes.values()]
+      .filter((entry) => entry.exit)
+      .sort((left, right) => (left.exit?.at ?? 0) - (right.exit?.at ?? 0));
+    for (const entry of exited.slice(0, Math.max(0, exited.length - this.maxExitedProcesses))) {
+      this.#processes.delete(entry.name);
+    }
+  }
+
+  #require(name: string): ManagedProcess {
+    const entry = this.#processes.get(name);
     if (!entry) {
-      const known = [...this.processes.keys()].sort().join(", ");
+      const known = [...this.#processes.keys()].sort().join(", ");
       throw new Error(`no process named "${name}"; known processes: ${known || "none"}`);
     }
     return entry;
   }
 
-  private killGroup(entry: ManagedProcess, signal: NodeJS.Signals): void {
-    try {
-      process.kill(-entry.pid, signal);
-    } catch {
+  #killGroup(entry: ManagedProcess, signal: NodeJS.Signals): void {
+    signalProcessGroup(entry.pid, signal, () => entry.child.kill(signal));
+  }
+
+  static #installLifecycleHandlers(): void {
+    if (ProcessManager.#lifecycleHandlersInstalled) return;
+    ProcessManager.#lifecycleHandlersInstalled = true;
+    process.once("exit", ProcessManager.#onExit);
+    process.on("SIGTERM", ProcessManager.#onSigterm);
+    process.on("SIGHUP", ProcessManager.#onSighup);
+  }
+
+  static #unregister(manager: ProcessManager): void {
+    ProcessManager.#active.delete(manager);
+    if (ProcessManager.#active.size > 0 || ProcessManager.#shutdownSignal) return;
+    ProcessManager.#removeLifecycleHandlers();
+  }
+
+  static #removeLifecycleHandlers(): void {
+    if (!ProcessManager.#lifecycleHandlersInstalled) return;
+    ProcessManager.#lifecycleHandlersInstalled = false;
+    process.off("exit", ProcessManager.#onExit);
+    process.off("SIGTERM", ProcessManager.#onSigterm);
+    process.off("SIGHUP", ProcessManager.#onSighup);
+  }
+
+  static #handleSignal(signal: NodeJS.Signals): void {
+    if (ProcessManager.#shutdownSignal) return;
+    ProcessManager.#shutdownSignal = signal;
+    const managers = [...ProcessManager.#active];
+    void Promise.allSettled(managers.map((manager) => manager.disposeAll())).finally(() => {
+      ProcessManager.#removeLifecycleHandlers();
       try {
-        entry.child.kill(signal);
-      } catch {}
-    }
+        process.kill(process.pid, signal);
+      } catch {
+        process.exit(signal === "SIGHUP" ? 129 : 143);
+      }
+    });
   }
 }
 
@@ -450,6 +544,24 @@ export function processTools(manager: ProcessManager): AnyTool[] {
   });
 
   return [startProcessTool, processLogsTool, sendProcessInputTool, stopProcessTool, listProcessesTool];
+}
+
+export function signalProcessGroup(
+  pid: number | undefined,
+  signal: NodeJS.Signals,
+  fallback: () => unknown,
+): void {
+  if (pid !== undefined && Number.isSafeInteger(pid) && pid > 1) {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // Fall back to the direct child when the process group no longer exists.
+    }
+  }
+  try {
+    fallback();
+  } catch {}
 }
 
 function isHardBlockedDenial(reason: string): boolean {

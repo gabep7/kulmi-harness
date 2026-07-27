@@ -12,7 +12,7 @@ import { defineTool, type AnyTool, type ToolContext } from "./types.js";
 const execFileAsync = promisify(execFile);
 
 export function gitTools(): AnyTool[] {
-  return [listConflictsTool, readConflictTool, resolveConflictTool, commitChangesTool, createPullRequestTool];
+  return [listConflictsTool, readConflictTool, resolveConflictTool, commitChangesTool, createPullRequestTool, gitLogTool, gitDiffTool];
 }
 
 const listConflictsTool = defineTool({
@@ -173,6 +173,53 @@ const createPullRequestTool = defineTool({
     const url = output.match(/https:\/\/\S+/)?.[0];
     if (!url) throw new Error(`gh did not report a pull request URL: ${output.trim() || "empty output"}`);
     return { content: JSON.stringify({ branch, url }, null, 2), mutated: false };
+  },
+});
+
+const gitLogTool = defineTool({
+  name: "git_log",
+  description: "Show recent commit history as 'hash subject' lines. Optional path filters to a file or directory.",
+  schema: z.object({
+    limit: z.number().int().min(1).max(100).default(20),
+    path: z.string().optional(),
+  }),
+  readOnly: true,
+  async execute(context, input) {
+    const args = ["log", "--oneline", "--format=%h %s", `-n${input.limit}`];
+    if (input.path) {
+      const abs = await resolveWorkspacePath({ workspaceRoot: context.workspaceRoot, cwd: context.cwd, input: input.path, mustExist: true });
+      assertNotSensitivePath(abs);
+      args.push("--", relativeConflictPath(context.workspaceRoot, abs));
+    }
+    const output = await git(context.workspaceRoot, args);
+    return { content: output.trim() || "no commits" };
+  },
+});
+
+const gitDiffTool = defineTool({
+  name: "git_diff",
+  description: "Show uncommitted changes. Set staged for the index, or pass a ref to compare against. Optional path restricts scope.",
+  schema: z.object({
+    path: z.string().optional(),
+    staged: z.boolean().default(false),
+    ref: z.string().optional(),
+  }),
+  readOnly: true,
+  async execute(context, input) {
+    if (input.ref?.startsWith("-")) {
+      throw new Error("git_diff ref must not start with '-' because option-like refs are unsafe");
+    }
+    const args = ["diff"];
+    if (input.staged) args.push("--staged");
+    args.push("--end-of-options");
+    if (input.ref) args.push(input.ref);
+    if (input.path) {
+      const abs = await resolveWorkspacePath({ workspaceRoot: context.workspaceRoot, cwd: context.cwd, input: input.path, mustExist: true });
+      assertNotSensitivePath(abs);
+      args.push("--", relativeConflictPath(context.workspaceRoot, abs));
+    }
+    const output = await git(context.workspaceRoot, args);
+    return { content: output.trim() || "no changes" };
   },
 });
 

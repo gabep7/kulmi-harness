@@ -17,23 +17,35 @@ export const MEMORY_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
 export const MAX_MEMORY_BYTES = 128_000;
 const MAX_INVENTORY_ENTRIES = 40;
 const importanceRank: Record<MemoryImportance, number> = { high: 0, normal: 1, low: 2 };
+interface MemoryCacheEntry {
+  signature: string;
+  memories: MemoryDefinition[];
+}
+
+const memoryCache = new Map<string, MemoryCacheEntry>();
+
 
 export function projectMemoryDirectory(workspaceRoot: string): string {
   return join(workspaceRoot, ".kulmi", "memory");
 }
 
 export function discoverMemory(workspaceRoot: string): MemoryDefinition[] {
+  const resolvedWorkspace = resolve(workspaceRoot);
   const roots: Array<{ path: string; source: MemoryDefinition["source"] }> = [
     { path: join(homedir(), ".config", "kulmi", "memory"), source: "user" },
-    { path: join(workspaceRoot, ".agents", "memory"), source: "project" },
-    { path: projectMemoryDirectory(workspaceRoot), source: "project" },
+    { path: join(resolvedWorkspace, ".agents", "memory"), source: "project" },
+    { path: projectMemoryDirectory(resolvedWorkspace), source: "project" },
   ];
+  const cacheKey = `${homedir()}\0${resolvedWorkspace}`;
+  const signature = roots.map((root) => memoryDirectorySignature(root.path)).join("\0");
+  const cached = memoryCache.get(cacheKey);
+  if (cached?.signature === signature) return cloneMemories(cached.memories);
+
   const memories = new Map<string, MemoryDefinition>();
   for (const root of roots) {
     if (!existsSync(root.path)) continue;
     for (const entry of readdirSync(root.path, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-      if (!entry.isFile()) continue;
-      if (!entry.name.endsWith(".md")) continue;
+      if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith(".md")) continue;
       const path = join(root.path, entry.name);
       if (!isContainedFile(root.path, path)) continue;
       let memory: MemoryDefinition | undefined;
@@ -44,14 +56,31 @@ export function discoverMemory(workspaceRoot: string): MemoryDefinition[] {
       } catch {
         memory = undefined;
       }
-      if (memory) memories.set(memory.name, memory);
+      if (memory) {
+        const previous = memories.get(memory.name);
+        if (previous) warnMemoryCollision(memory.name, previous.path, memory.path);
+        memories.set(memory.name, memory);
+      }
     }
   }
-  return [...memories.values()].sort((a, b) => {
+  const discovered = [...memories.values()].sort((a, b) => {
     const rankDiff = importanceRank[a.importance] - importanceRank[b.importance];
     if (rankDiff !== 0) return rankDiff;
     return a.name.localeCompare(b.name);
   });
+  memoryCache.set(cacheKey, { signature, memories: discovered });
+  return cloneMemories(discovered);
+}
+
+export function invalidateMemoryDiscovery(workspaceRoot?: string): void {
+  if (!workspaceRoot) {
+    memoryCache.clear();
+    return;
+  }
+  const suffix = `\0${resolve(workspaceRoot)}`;
+  for (const key of memoryCache.keys()) {
+    if (key.endsWith(suffix)) memoryCache.delete(key);
+  }
 }
 
 export function readMemory(memory: MemoryDefinition): string {
@@ -72,6 +101,29 @@ export function memoryPromptInventory(memories: MemoryDefinition[]): string {
     lines.push(`…and ${memories.length - shown.length} more; use list_memory to see all.`);
   }
   return lines.join("\n");
+}
+
+function memoryDirectorySignature(directory: string): string {
+  try {
+    return readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith(".md"))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((entry) => {
+        const stat = lstatSync(join(directory, entry.name));
+        return `${entry.name}:${stat.mtimeMs}:${stat.size}`;
+      })
+      .join("|");
+  } catch {
+    return "missing";
+  }
+}
+
+function cloneMemories(memories: readonly MemoryDefinition[]): MemoryDefinition[] {
+  return memories.map((memory) => ({ ...memory, tags: [...memory.tags] }));
+}
+
+function warnMemoryCollision(name: string, previousPath: string, winningPath: string): void {
+  process.stderr.write(`warning: memory ${name} from ${winningPath} overrides ${previousPath}\n`);
 }
 
 function readMemoryFile(path: string): string {

@@ -1,14 +1,33 @@
 import type { ResolvedModel } from "../config/config.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type {
-  FunctionToolCall,
-  ModelProvider,
-  ProviderMessage,
-  ProviderRequest,
-  ProviderResponse,
-  WebCitation,
+import {
+  ProviderError,
+  type FunctionToolCall,
+  type ModelProvider,
+  type ProviderMessage,
+  type ProviderRequest,
+  type ProviderResponse,
+  type WebCitation,
 } from "./types.js";
+import {
+  createProviderHttpError,
+  createProviderStreamError,
+  DEFAULT_IDLE_TIMEOUT_MS,
+  DEFAULT_MAX_RETRY_AFTER_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  DEFAULT_TOTAL_TIMEOUT_MS,
+  parseSse,
+  withProviderRetries,
+} from "./stream.js";
+
+const wireContentPartSchema = z.union([
+  z.string(),
+  z.object({
+    text: z.string().optional(),
+    content: z.string().optional(),
+  }).passthrough(),
+]);
 
 interface WireCitation {
   type?: string | undefined;
@@ -23,7 +42,7 @@ interface WireCitation {
 const wireChunkSchema = z.object({
   choices: z.array(z.object({
     delta: z.object({
-      content: z.string().nullable().optional(),
+      content: z.union([z.string(), z.array(wireContentPartSchema), z.null()]).optional(),
       reasoning_content: z.string().nullable().optional(),
       error_message: z.string().nullable().optional(),
       annotations: z.array(z.object({
@@ -36,9 +55,9 @@ const wireChunkSchema = z.object({
         logo_url: z.string().optional(),
       }).passthrough()).nullable().optional(),
       tool_calls: z.array(z.object({
-        index: z.number().int().nonnegative(),
+        index: z.number().int().nonnegative().optional(),
         id: z.string().optional(),
-        type: z.literal("function").optional(),
+        type: z.string().optional(),
         function: z.object({
           name: z.string().optional(),
           arguments: z.string().optional(),
@@ -64,7 +83,11 @@ const wireChunkSchema = z.object({
       page_usage: z.number().int().nonnegative().optional(),
     }).passthrough().optional(),
   }).passthrough().nullable().optional(),
-  error: z.object({ message: z.string().optional() }).passthrough().optional(),
+  error: z.object({
+    message: z.string().optional(),
+    type: z.string().optional(),
+    code: z.string().optional(),
+  }).passthrough().optional(),
 }).passthrough();
 type WireChunk = z.infer<typeof wireChunkSchema>;
 type WireUsage = NonNullable<WireChunk["usage"]>;
@@ -74,21 +97,56 @@ interface CacheState {
   messages: string[];
 }
 
+type ReasoningStyle = "openai-o" | "reasoning_content" | "anthropic-thinking" | "none";
+
+function resolveReasoningStyle(config: ResolvedModel): ReasoningStyle {
+  if (config.reasoningStyle) {
+    if (config.reasoningStyle === "anthropic-thinking") return "none";
+    return config.reasoningStyle;
+  }
+  const id = config.model.toLowerCase();
+  if (/\b(o1|o3|o4|gpt-5)\b/.test(id) || id.includes("gpt-5")) return "openai-o";
+  if (id.includes("deepseek") || id.includes("qwen") || id.includes("r1") || id.includes("reason")) return "reasoning_content";
+  return "none";
+}
+
+export interface OpenAIProviderOptions {
+  idleTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  totalTimeoutMs?: number;
+  maxRetryAfterMs?: number;
+  maxAttempts?: number;
+  retryBaseDelayMs?: number;
+  random?: () => number;
+}
+
 export class OpenAIProvider implements ModelProvider {
   readonly name: string;
   readonly model: string;
   readonly #config: ResolvedModel;
   readonly #idleTimeoutMs: number;
+  readonly #requestTimeoutMs: number;
+  readonly #totalTimeoutMs: number;
+  readonly #maxRetryAfterMs: number;
+  readonly #maxAttempts: number | undefined;
+  readonly #retryBaseDelayMs: number;
+  readonly #random: (() => number) | undefined;
   readonly #cacheStates = new Map<string, CacheState>();
 
   constructor(
     config: ResolvedModel,
-    options: { idleTimeoutMs?: number } = {},
+    options: OpenAIProviderOptions = {},
   ) {
     this.#config = config;
     this.name = config.name;
     this.model = config.model;
-    this.#idleTimeoutMs = options.idleTimeoutMs ?? 300_000;
+    this.#idleTimeoutMs = options.idleTimeoutMs ?? config.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+    this.#requestTimeoutMs = options.requestTimeoutMs ?? config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.#totalTimeoutMs = options.totalTimeoutMs ?? config.totalTimeoutMs ?? DEFAULT_TOTAL_TIMEOUT_MS;
+    this.#maxRetryAfterMs = options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
+    this.#maxAttempts = options.maxAttempts;
+    this.#retryBaseDelayMs = options.retryBaseDelayMs ?? 1_000;
+    this.#random = options.random;
   }
 
   invalidateCacheScopes(prefix: string): void {
@@ -96,10 +154,14 @@ export class OpenAIProvider implements ModelProvider {
       if (scope.startsWith(prefix)) this.#cacheStates.delete(scope);
     }
   }
+  resetCacheScope(scope: string): void {
+    this.#cacheStates.delete(scope);
+  }
 
   async complete(request: ProviderRequest): Promise<ProviderResponse> {
     const thinking = request.thinking ?? this.#config.thinking;
     const reasoningEffort = request.reasoningEffort ?? this.#config.reasoningEffort;
+    const reasoningStyle = resolveReasoningStyle(this.#config);
     const maxCompletionTokens = Math.min(
       this.#config.maxOutputTokens,
       Math.max(1, Math.trunc(request.maxCompletionTokens ?? this.#config.maxOutputTokens)),
@@ -109,15 +171,16 @@ export class OpenAIProvider implements ModelProvider {
       function: { ...tool.function, strict: true },
     }));
     const messages = request.messages.map(toWireMessage);
-    validateConversation(messages, thinking);
+    validateConversation(messages, thinking, reasoningStyle);
     const body = JSON.stringify({
       model: this.model,
       messages,
       ...(tools.length ? { tools } : {}),
       stream: true,
       max_completion_tokens: maxCompletionTokens,
-      ...(thinking ? { thinking: { type: "enabled" } } : {}),
-      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      ...(this.#config.streamUsage ?? true ? { stream_options: { include_usage: true } } : {}),
+      ...(reasoningStyle === "reasoning_content" && thinking ? { thinking: { type: "enabled" } } : {}),
+      ...(reasoningStyle === "openai-o" && reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
     });
     if (request.cacheScope) {
       const anchor = createHash("sha256").update(JSON.stringify({
@@ -139,62 +202,27 @@ export class OpenAIProvider implements ModelProvider {
       this.#cacheStates.set(request.cacheScope, { anchor, messages: messageHashes });
     }
 
-    const controller = new AbortController();
-    const relayAbort = () => controller.abort(request.signal.reason);
-    request.signal.addEventListener("abort", relayAbort, { once: true });
-    if (request.signal.aborted) relayAbort();
-
-    let idleTimer: NodeJS.Timeout | undefined;
-    const clearIdleTimer = () => {
-      clearTimeout(idleTimer);
-      idleTimer = undefined;
-    };
-    const resetIdleTimer = () => {
-      clearIdleTimer();
-      idleTimer = setTimeout(
-        () => controller.abort(new Error("stream stalled")),
-        this.#idleTimeoutMs,
-      );
-      idleTimer.unref();
-    };
-
-    try {
-      let lastError: unknown;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        let emitted = false;
-        try {
-          resetIdleTimer();
-          try {
-            const response = await this.#fetch(body, controller.signal);
-            return await this.#readResponse(
-              response,
-              request,
-              controller.signal,
-              resetIdleTimer,
-              () => { emitted = true; },
-            );
-          } finally {
-            clearIdleTimer();
-          }
-        } catch (error) {
-          if (
-            controller.signal.aborted ||
-            emitted ||
-            attempt === 2 ||
-            (error instanceof OpenAIHttpError && !error.retryable)
-          ) throw error;
-          lastError = error;
-          const delay = error instanceof OpenAIHttpError && error.retryAfterMs !== undefined
-            ? error.retryAfterMs
-            : 500 * 2 ** attempt + Math.floor(Math.random() * 200);
-          await sleep(delay, controller.signal);
-        }
-      }
-      throw lastError instanceof Error ? lastError : new Error("stream failed");
-    } finally {
-      request.signal.removeEventListener("abort", relayAbort);
-      clearIdleTimer();
-    }
+    return withProviderRetries({
+      callerSignal: request.signal,
+      idleTimeoutMs: this.#idleTimeoutMs,
+      requestTimeoutMs: this.#requestTimeoutMs,
+      totalTimeoutMs: this.#totalTimeoutMs,
+      maxRetryAfterMs: this.#maxRetryAfterMs,
+      retryBaseDelayMs: this.#retryBaseDelayMs,
+      ...(this.#maxAttempts === undefined ? {} : { maxAttempts: this.#maxAttempts }),
+      ...(this.#random === undefined ? {} : { random: this.#random }),
+      ...(request.onRetry === undefined ? {} : { onRetry: request.onRetry }),
+      runAttempt: async ({ signal, resetIdleTimer, markEmitted }) => {
+        const response = await this.#fetch(body, signal);
+        return this.#readResponse(
+          response,
+          request,
+          signal,
+          resetIdleTimer,
+          markEmitted,
+        );
+      },
+    });
   }
 
   async #readResponse(
@@ -217,8 +245,7 @@ export class OpenAIProvider implements ModelProvider {
     const announcedCalls = new Set<number>();
     let sawDone = false;
 
-    resetIdleTimer();
-    for await (const data of parseSse(response.body, signal, resetIdleTimer)) {
+    for await (const data of parseSse(response.body, signal)) {
       if (data === "[DONE]") {
         sawDone = true;
         break;
@@ -230,10 +257,22 @@ export class OpenAIProvider implements ModelProvider {
         const detail = error instanceof z.ZodError ? z.prettifyError(error) : String(error);
         throw new Error(`invalid stream chunk: ${detail}; data=${data.slice(0, 300)}`);
       }
-      if (chunk.error?.message) throw new Error(chunk.error.message);
-
       const choice = chunk.choices?.[0];
       const delta = choice?.delta;
+      const textDelta = wireContentText(delta?.content);
+      if (
+        chunk.usage ||
+        chunk.error ||
+        choice?.finish_reason ||
+        delta?.reasoning_content ||
+        textDelta ||
+        delta?.error_message ||
+        (delta?.annotations?.length ?? 0) > 0 ||
+        (delta?.tool_calls?.length ?? 0) > 0
+      ) resetIdleTimer();
+      if (chunk.error?.message) {
+        throw createProviderStreamError("OpenAI", chunk.error.message, chunk.error.type ?? chunk.error.code);
+      }
       if (delta?.reasoning_content) {
         reasoning += delta.reasoning_content;
         if (request.onReasoningDelta) {
@@ -241,11 +280,11 @@ export class OpenAIProvider implements ModelProvider {
           await request.onReasoningDelta(delta.reasoning_content);
         }
       }
-      if (delta?.content) {
-        content += delta.content;
+      if (textDelta) {
+        content += textDelta;
         if (request.onTextDelta) {
           markEmitted();
-          await request.onTextDelta(delta.content);
+          await request.onTextDelta(textDelta);
         }
       }
       if (delta?.annotations?.length) {
@@ -265,21 +304,22 @@ export class OpenAIProvider implements ModelProvider {
         }
       }
       if (delta?.error_message) searchError = delta.error_message;
-      for (const part of delta?.tool_calls ?? []) {
-        let call = calls.get(part.index);
+      for (const [position, part] of (delta?.tool_calls ?? []).entries()) {
+        const index = part.index ?? position;
+        let call = calls.get(index);
         if (!call) {
           call = {
-            id: part.id ?? `call_${part.index}`,
+            id: part.id ?? `call_${index}`,
             type: "function",
             function: { name: "", arguments: "" },
           };
-          calls.set(part.index, call);
+          calls.set(index, call);
         }
         if (part.id) call.id = part.id;
         if (part.function?.name) call.function.name += part.function.name;
         if (part.function?.arguments) call.function.arguments += part.function.arguments;
-        if (!announcedCalls.has(part.index) && call.function.name && request.onToolCallStart) {
-          announcedCalls.add(part.index);
+        if (!announcedCalls.has(index) && call.function.name && request.onToolCallStart) {
+          announcedCalls.add(index);
           markEmitted();
           await request.onToolCallStart(call);
         }
@@ -297,7 +337,7 @@ export class OpenAIProvider implements ModelProvider {
       .map(([, call]) => call);
     validateToolCalls(toolCalls);
     const message: ProviderResponse["message"] = { role: "assistant", content: content || null };
-    if ((request.thinking ?? this.#config.thinking) && toolCalls.length > 0) message.reasoning_content = reasoning;
+    if ((request.thinking ?? this.#config.thinking) && resolveReasoningStyle(this.#config) === "reasoning_content" && toolCalls.length > 0) message.reasoning_content = reasoning;
     if (toolCalls.length > 0) message.tool_calls = toolCalls;
     return {
       message,
@@ -322,13 +362,25 @@ export class OpenAIProvider implements ModelProvider {
     });
     if (response.ok) return response;
     const errorBody = (await response.text()).slice(0, 2_000);
-    const quotaExhausted = response.status === 429 && /(?:quota|credit|exhaust|套餐|额度)/i.test(errorBody);
-    throw new OpenAIHttpError(
-      `HTTP ${response.status}: ${errorBody}`,
-      !quotaExhausted && ([408, 409, 429].includes(response.status) || response.status >= 500),
-      parseRetryAfter(response.headers.get("retry-after")),
+    throw createProviderHttpError(
+      "OpenAI",
+      response.status,
+      errorBody,
+      response.headers.get("retry-after"),
+      this.#maxRetryAfterMs,
     );
   }
+}
+
+function wireContentText(
+  content: string | Array<z.infer<typeof wireContentPartSchema>> | null | undefined,
+): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => {
+    if (typeof part === "string") return part;
+    return part.text ?? part.content ?? "";
+  }).join("");
 }
 
 function toWireMessage(message: ProviderMessage): ProviderMessage {
@@ -344,7 +396,7 @@ function isPrefix(previous: readonly string[], current: readonly string[]): bool
   return previous.length <= current.length && previous.every((message, index) => current[index] === message);
 }
 
-function validateConversation(messages: readonly ProviderMessage[], thinking: boolean): void {
+function validateConversation(messages: readonly ProviderMessage[], thinking: boolean, reasoningStyle: ReasoningStyle): void {
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index];
     if (!message) continue;
@@ -352,7 +404,7 @@ function validateConversation(messages: readonly ProviderMessage[], thinking: bo
       throw new Error(`tool result ${message.tool_call_id} has no preceding assistant tool call`);
     }
     if (message.role !== "assistant" || !message.tool_calls?.length) continue;
-    if (thinking && !("reasoning_content" in message)) {
+    if (thinking && reasoningStyle === "reasoning_content" && !("reasoning_content" in message)) {
       throw new Error(`assistant tool-call history is missing reasoning_content`);
     }
     for (const [offset, call] of message.tool_calls.entries()) {
@@ -368,23 +420,14 @@ function validateConversation(messages: readonly ProviderMessage[], thinking: bo
 function validateToolCalls(calls: FunctionToolCall[]): void {
   const ids = new Set<string>();
   for (const call of calls) {
-    if (!call.function.name.trim()) throw new Error(`tool call without a function name`);
-    if (ids.has(call.id)) throw new Error(`duplicate tool call id ${call.id}`);
+    if (!call.id.trim()) throw new ProviderError("tool call without an id", { kind: "invalid_request", retryable: false });
+    if (!call.function.name.trim()) throw new ProviderError("tool call without a function name", { kind: "invalid_request", retryable: false });
+    if (ids.has(call.id)) throw new ProviderError(`duplicate tool call id ${call.id}`, { kind: "invalid_request", retryable: false });
     ids.add(call.id);
   }
 }
 
-class OpenAIHttpError extends Error {
-  readonly retryable: boolean;
-  readonly retryAfterMs: number | undefined;
 
-  constructor(message: string, retryable: boolean, retryAfterMs?: number) {
-    super(message);
-    this.name = "OpenAIHttpError";
-    this.retryable = retryable;
-    this.retryAfterMs = retryAfterMs;
-  }
-}
 
 function emptyUsage(): ProviderResponse["usage"] {
   return {
@@ -493,64 +536,4 @@ function toCitation(value: WireCitation): WebCitation | undefined {
   };
 }
 
-function parseRetryAfter(value: string | null): number | undefined {
-  if (!value) return undefined;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
-  const at = Date.parse(value);
-  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
-}
 
-async function* parseSse(
-  body: ReadableStream<Uint8Array>,
-  signal: AbortSignal,
-  onActivity: () => void,
-): AsyncGenerator<string> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  try {
-    while (true) {
-      if (signal.aborted) throw signal.reason ?? new Error("request aborted");
-      const { done, value } = await reader.read();
-      if (done) break;
-      onActivity();
-      buffer += decoder.decode(value, { stream: true });
-      buffer = buffer.replaceAll("\r\n", "\n");
-      let boundary = buffer.indexOf("\n\n");
-      while (boundary >= 0) {
-        const event = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        const data = event.split("\n")
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice(5).trimStart())
-          .join("\n");
-        if (data) yield data;
-        boundary = buffer.indexOf("\n\n");
-      }
-    }
-    buffer += decoder.decode();
-    buffer = buffer.replaceAll("\r\n", "\n");
-    const data = buffer.split("\n")
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trimStart())
-      .join("\n");
-    if (data) yield data;
-  } finally {
-    reader.releaseLock();
-  }
-}
-
-function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  const timer = setTimeout(() => {
-    signal.removeEventListener("abort", abort);
-    resolve();
-  }, milliseconds);
-  const abort = () => {
-    clearTimeout(timer);
-    reject(signal.reason ?? new Error("request aborted"));
-  };
-  signal.addEventListener("abort", abort, { once: true });
-  return promise;
-}

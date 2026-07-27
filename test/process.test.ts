@@ -181,10 +181,10 @@ describe("command sandbox", () => {
     expect(result.stdout).toBe("");
   });
 
-  it("shares the output byte budget across stdout and stderr", async () => {
+  it("gives stdout and stderr separate output byte budgets", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "kulmi-process-budget-"));
     const result = await runShell({
-      command: "printf 1234567890; printf abcdefghij >&2",
+      command: "printf 123456789012345; printf abcdefghijklmnop >&2",
       cwd: workspace,
       workspaceRoot: workspace,
       sandbox: { mode: "off", network: false },
@@ -193,7 +193,8 @@ describe("command sandbox", () => {
       maxOutputBytes: 12,
     });
 
-    expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(12);
+    expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(12);
+    expect(Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(12);
     expect(result.truncated).toBe(true);
   });
 

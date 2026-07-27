@@ -12,9 +12,11 @@ permissions:
 jobs:
   check:
     strategy:
+      fail-fast: false
       matrix:
         node: [22, 24]
-    runs-on: ubuntu-latest
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -22,6 +24,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - name: Install Linux sandbox
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y bubblewrap
@@ -30,6 +33,7 @@ jobs:
           fi
       - run: npm ci
       - run: npm run check
+      - run: npm test
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { z } from "zod";
 import type { AnyTool } from "../tools/types.js";
+import { VERSION } from "../core/version.js";
 
 export interface McpServerConfig {
   name: string;
@@ -16,7 +17,9 @@ export interface McpConnection {
   dispose(): Promise<void>;
 }
 
-const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
+const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
+const MAX_STDERR_TAIL = 16_384;
 const MAX_TOOL_NAME_LENGTH = 64;
 
 const looseInputSchema = z.record(z.string(), z.unknown());
@@ -39,15 +42,16 @@ interface ListedMcpTool {
 
 export async function connectMcpServers(
   configs: McpServerConfig[],
-  options: { cwd: string; timeoutMs?: number },
+  options: { cwd: string; startupTimeoutMs?: number; timeoutMs?: number },
 ): Promise<McpConnection> {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+  const toolTimeoutMs = options.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
   const clients: Client[] = [];
   const tools: AnyTool[] = [];
   const errors: string[] = [];
   await Promise.all(configs.map(async (config) => {
     try {
-      const connected = await connectServer(config, options.cwd, timeoutMs);
+      const connected = await connectServer(config, options.cwd, startupTimeoutMs, toolTimeoutMs);
       clients.push(connected.client);
       tools.push(...connected.tools);
     } catch (error) {
@@ -78,24 +82,32 @@ export async function connectMcpServers(
 async function connectServer(
   config: McpServerConfig,
   cwd: string,
-  timeoutMs: number,
+  startupTimeoutMs: number,
+  toolTimeoutMs: number,
 ): Promise<{ client: Client; tools: AnyTool[] }> {
   const transport = new StdioClientTransport({
     command: config.command,
     args: config.args ?? [],
     env: { ...getDefaultEnvironment(), ...config.env },
     cwd,
-    stderr: "ignore",
+    stderr: "pipe",
   });
-  const client = new Client({ name: "kulmi", version: "1.0.0" });
-  await client.connect(transport, { timeout: timeoutMs });
+  let stderrTail = "";
+  transport.stderr?.on("data", (chunk: unknown) => {
+    const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    stderrTail = `${stderrTail}${text}`.slice(-MAX_STDERR_TAIL);
+  });
+  const client = new Client({ name: "kulmi", version: VERSION });
   try {
-    const listed = await client.listTools(undefined, { timeout: timeoutMs });
-    const tools = listed.tools.map((tool) => bridgeTool(config.name, tool, client, timeoutMs));
+    await client.connect(transport, { timeout: startupTimeoutMs });
+    const listed = await client.listTools(undefined, { timeout: startupTimeoutMs });
+    const tools = listed.tools.map((tool) => bridgeTool(config.name, tool, client, toolTimeoutMs));
     return { client, tools };
   } catch (error) {
     await client.close().catch(() => {});
-    throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    const diagnostic = stderrTail.trim();
+    throw new Error(diagnostic ? `${message}; stderr: ${diagnostic}` : message);
   }
 }
 

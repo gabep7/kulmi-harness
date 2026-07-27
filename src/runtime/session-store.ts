@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile, appendFile, unlink, rm, readdir } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile, appendFile, unlink, rm, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -17,7 +17,12 @@ import {
   encodeMetadata,
   encodeState,
   encodeWorkers,
+  NewerSessionVersionError,
 } from "./session-schema.js";
+
+const MAX_EVENT_LOG_BYTES = 4 * 1024 * 1024;
+const EVENT_BATCH_BYTES = 64 * 1024;
+const EVENT_FLUSH_DELAY_MS = 25;
 
 export interface SessionMetadata {
   id: string;
@@ -55,6 +60,12 @@ export class SessionStore {
   #metadata: SessionMetadata;
   #writeQueue = Promise.resolve();
   #unsubscribe: (() => void) | undefined;
+  #eventBuffer: string[] = [];
+  #eventBufferBytes = 0;
+  #eventFlushTimer: NodeJS.Timeout | undefined;
+  #eventFlushPromise: Promise<void> | undefined;
+  #closePromise: Promise<void> | undefined;
+  #closed = false;
 
   private constructor(path: string, metadata: SessionMetadata) {
     this.id = metadata.id;
@@ -141,14 +152,30 @@ export class SessionStore {
         event.event.type === "assistant.text.delta"
       ) return;
       return this.appendEvent(event);
-    }, { critical: true });
+    });
   }
 
   async appendEvent(event: EventEnvelope): Promise<void> {
-    await this.#enqueue(() => appendFile(this.#eventsPath, `${JSON.stringify(event)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    }));
+    if (this.#closed) return;
+    let line = `${JSON.stringify(event)}\n`;
+    if (Buffer.byteLength(line, "utf8") > MAX_EVENT_LOG_BYTES) {
+      line = `${JSON.stringify({
+        sequence: event.sequence,
+        timestamp: event.timestamp,
+        event: { type: "notice", message: "event omitted because it exceeded the session event log limit" },
+      })}\n`;
+    }
+    this.#eventBuffer.push(line);
+    this.#eventBufferBytes += Buffer.byteLength(line, "utf8");
+    while (this.#eventBufferBytes > MAX_EVENT_LOG_BYTES && this.#eventBuffer.length > 1) {
+      const dropped = this.#eventBuffer.shift()!;
+      this.#eventBufferBytes -= Buffer.byteLength(dropped, "utf8");
+    }
+    if (this.#eventBufferBytes >= EVENT_BATCH_BYTES) {
+      void this.#flushEvents().catch(() => undefined);
+    } else {
+      this.#scheduleEventFlush();
+    }
   }
 
   async saveMessages(messages: ProviderMessage[]): Promise<void> {
@@ -212,10 +239,44 @@ export class SessionStore {
   }
 
   async close(status: AgentStatus): Promise<void> {
-    await this.setStatus(status);
+    this.#closePromise ??= this.#close(status);
+    await this.#closePromise;
+  }
+
+  async #close(status: AgentStatus): Promise<void> {
+    this.#closed = true;
     this.#unsubscribe?.();
     this.#unsubscribe = undefined;
+    if (this.#eventFlushTimer) {
+      clearTimeout(this.#eventFlushTimer);
+      this.#eventFlushTimer = undefined;
+    }
+    await this.#flushEvents();
+    await this.setStatus(status);
     await this.#writeQueue;
+  }
+
+  #scheduleEventFlush(): void {
+    if (this.#eventFlushTimer || this.#closed) return;
+    this.#eventFlushTimer = setTimeout(() => {
+      this.#eventFlushTimer = undefined;
+      void this.#flushEvents().catch(() => undefined);
+    }, EVENT_FLUSH_DELAY_MS);
+    this.#eventFlushTimer.unref?.();
+  }
+
+  #flushEvents(): Promise<void> {
+    if (this.#eventFlushPromise) return this.#eventFlushPromise.then(() => this.#flushEvents());
+    if (this.#eventBuffer.length === 0) return Promise.resolve();
+    const batch = this.#eventBuffer.join("");
+    this.#eventBuffer = [];
+    this.#eventBufferBytes = 0;
+    const operation = this.#enqueue(() => appendBoundedEvents(this.#eventsPath, batch));
+    this.#eventFlushPromise = operation.finally(() => {
+      this.#eventFlushPromise = undefined;
+      if (this.#eventBuffer.length > 0 && !this.#closed) this.#scheduleEventFlush();
+    });
+    return this.#eventFlushPromise;
   }
 
   #writeMetadata(): Promise<void> {
@@ -250,18 +311,18 @@ export async function pruneSessions(options: {
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_SESSION_MAX_AGE_MS;
   const now = options.now ?? Date.now();
   const keep = new Set(options.keepIds ?? []);
-  const sessions = await loadAllSessionMetadata();
-  sessions.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  const sessions = await loadSessionCandidates();
+  sessions.sort((left, right) => right.updatedAtMs - left.updatedAtMs || right.id.localeCompare(left.id));
 
   const removed: string[] = [];
   for (let index = 0; index < sessions.length; index += 1) {
     const session = sessions[index]!;
     if (keep.has(session.id)) continue;
-    const ageMs = now - Date.parse(session.updatedAt);
+    const ageMs = now - session.updatedAtMs;
     const tooOld = Number.isFinite(ageMs) && ageMs > maxAgeMs;
     const overCount = index >= maxCount;
     if (!tooOld && !overCount) continue;
-    await rm(join(dataRoot(), "sessions", session.id), { recursive: true, force: true });
+    await rm(session.path, { recursive: true, force: true });
     removed.push(session.id);
   }
   return removed;
@@ -295,22 +356,55 @@ export async function forkSession(id: string): Promise<SessionMetadata> {
   return (await SessionStore.open(store.id)).session.metadata;
 }
 
+interface SessionCandidate {
+  id: string;
+  path: string;
+  metadata?: SessionMetadata;
+  updatedAtMs: number;
+}
+
 async function loadAllSessionMetadata(): Promise<SessionMetadata[]> {
+  const candidates = await loadSessionCandidates();
+  return candidates.flatMap((candidate) => candidate.metadata ? [candidate.metadata] : []);
+}
+
+async function loadSessionCandidates(): Promise<SessionCandidate[]> {
   const root = join(dataRoot(), "sessions");
   if (!existsSync(root)) return [];
   const entries = await readdir(root, { withFileTypes: true });
-  const sessions: SessionMetadata[] = [];
+  const sessions: SessionCandidate[] = [];
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || !/^session_[a-f0-9]{16}$/.test(entry.name)) continue;
+    const path = join(root, entry.name);
     try {
-      sessions.push(
-        decodeMetadata(JSON.parse(await readFile(join(root, entry.name, "session.json"), "utf8"))).value,
-      );
+      const metadata = decodeMetadata(JSON.parse(await readFile(join(path, "session.json"), "utf8"))).value;
+      if (metadata.id !== entry.name) throw new Error("session ID does not match its directory");
+      sessions.push({ id: entry.name, path, metadata, updatedAtMs: Date.parse(metadata.updatedAt) });
     } catch {
-      continue;
+      sessions.push({ id: entry.name, path, updatedAtMs: await unreadableSessionTimestamp(path) });
     }
   }
   return sessions;
+}
+
+async function unreadableSessionTimestamp(path: string): Promise<number> {
+  try {
+    const raw = await readFile(join(path, "session.json"), "utf8");
+    const match = raw.match(/"updatedAt"\s*:\s*"([^"]+)"/);
+    const parsed = match ? Date.parse(match[1]!) : Number.NaN;
+    if (Number.isFinite(parsed)) return parsed;
+  } catch {
+    // Fall back to filesystem age when the metadata file cannot be read.
+  }
+  try {
+    return (await stat(join(path, "session.json"))).mtimeMs;
+  } catch {
+    try {
+      return (await stat(path)).mtimeMs;
+    } catch {
+      return Number.NaN;
+    }
+  }
 }
 
 function dataRoot(): string {
@@ -327,6 +421,42 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
       encoding: "utf8",
       mode: 0o600,
     });
+    await rename(temporary, path);
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
+}
+
+async function appendBoundedEvents(path: string, batch: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const batchBytes = Buffer.from(batch, "utf8");
+  let currentSize = 0;
+  try {
+    currentSize = (await stat(path)).size;
+  } catch (error) {
+    if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  if (currentSize + batchBytes.length <= MAX_EVENT_LOG_BYTES) {
+    await appendFile(path, batchBytes, { mode: 0o600 });
+    return;
+  }
+
+  let existing = Buffer.alloc(0);
+  try {
+    existing = await readFile(path);
+  } catch (error) {
+    if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  const combined = existing.length > 0 ? Buffer.concat([existing, batchBytes]) : batchBytes;
+  let retained = combined;
+  if (combined.length > MAX_EVENT_LOG_BYTES) {
+    const minimum = combined.length - MAX_EVENT_LOG_BYTES;
+    const newline = combined.indexOf(0x0a, minimum);
+    retained = combined.subarray(newline >= 0 ? newline + 1 : minimum);
+  }
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    await writeFile(temporary, retained, { mode: 0o600 });
     await rename(temporary, path);
   } finally {
     await unlink(temporary).catch(() => undefined);
@@ -358,6 +488,7 @@ function decodeFile<T>(
   try {
     return decode(raw);
   } catch (error) {
+    if (error instanceof NewerSessionVersionError) throw error;
     throw new Error(`invalid ${label}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

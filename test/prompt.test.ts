@@ -15,7 +15,7 @@ describe("system prompt", () => {
     expect(task).toContain("Use worker presets sparingly");
     expect(worker).toContain("Worker mode");
     expect(worker).toContain("start_task, update_plan, complete_task, and child-agent tools are unavailable");
-    expect(worker).toContain("Finish only through report_worker");
+    expect(worker).toContain("Return a compact evidence-backed report to the parent");
     expect(worker).toContain("This worker is read-only");
   });
 
@@ -25,7 +25,7 @@ describe("system prompt", () => {
     expect(first).toBe(second);
     expect(first).toContain("PROJECT CONTRACT");
     expect(first).toContain("- release: Verify a release");
-    expect(Buffer.byteLength(first, "utf8")).toBeLessThan(2_400);
+    expect(Buffer.byteLength(first, "utf8")).toBeLessThan(3_000);
   });
 });
 

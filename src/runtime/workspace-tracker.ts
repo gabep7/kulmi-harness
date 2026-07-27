@@ -58,6 +58,10 @@ export class WorkspaceSnapshot {
       const baseMode = recordedBefore || !base ? undefined : await gitMode(this.#root, path);
       const beforeState = recordedBefore ?? bufferState(base, baseMode);
       const afterState = recordedAfter ?? await currentFileState(this.#root, path);
+      if (recordedBefore && recordedBefore.content === undefined && recordedBefore.hash.startsWith("skipped-large-file:")) {
+        if (!sameState(recordedBefore, recordedAfter)) changed.push({ path });
+        continue;
+      }
       if (sameState(beforeState, afterState)) continue;
       const absolute = resolve(this.#root, path);
       assertWithin(this.#root, absolute);
@@ -136,7 +140,8 @@ async function dirtyFileStates(root: string): Promise<Map<string, FileState>> {
         continue;
       }
       if (info.size > 10_000_000 || totalBytes + info.size > 100_000_000) {
-        throw new Error(`workspace tracking cannot safely snapshot large dirty file: ${path}`);
+        states.set(path, { existed: true, hash: `skipped-large-file:${info.size}` });
+        continue;
       }
       const content = await readFile(absolute);
       totalBytes += content.length;

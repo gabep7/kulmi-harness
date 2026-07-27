@@ -11,6 +11,7 @@ import type { ToolRegistry } from "../tools/registry.js";
 import type { PermissionApi, SubagentApi, ToolContext } from "../tools/types.js";
 import type { HooksConfig, SandboxConfig } from "../config/config.js";
 import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
+import { renderTextToFrames, serializeForImaging } from "../compaction/image-encoder.js";
 
 export interface AgentOptions {
   provider: ModelProvider;
@@ -29,6 +30,7 @@ export interface AgentOptions {
   maxOutputBytes: number;
   contextWindow: number;
   reasoningEffort?: string;
+  vision?: boolean;
   sandbox?: SandboxConfig;
   messages?: ProviderMessage[];
   subagents?: SubagentApi;
@@ -191,8 +193,8 @@ export class Agent {
       let repeatedErrors = 0;
       let providerTools = this.#providerTools();
       let promptTokens = estimateTokens(this.#messages, providerTools);
-
-      for (let step = 0; step < this.#options.maxSteps; step++) {
+      let step = 0;
+      for (step = 0; step < this.#options.maxSteps; step++) {
         if (signal.aborted) throw signal.reason ?? new Error("agent cancelled");
         if (this.#steering.length > 0) {
           const steering = this.#steering.splice(0);
@@ -200,6 +202,10 @@ export class Agent {
             role: "user",
             content: `<parent-steering>\n${steering.join("\n\n")}\n</parent-steering>`,
           });
+          await this.#options.session.saveMessages(this.#messages);
+        }
+        if (step === Math.floor(this.#options.maxSteps * 0.9)) {
+          this.#messages.push({ role: "user", content: "<budget-notice>\nYou are near the step budget. Finalize your work, run verification, and report completion now.\n</budget-notice>" });
           await this.#options.session.saveMessages(this.#messages);
         }
         if (promptTokens >= this.#options.contextWindow * 0.78) {
@@ -364,7 +370,11 @@ export class Agent {
         });
         await this.#options.session.saveMessages(this.#messages);
       }
-      throw new Error(`agent exceeded the ${this.#options.maxSteps}-step limit`);
+      state.completion = { status: "blocked", summary: `agent reached the ${this.#options.maxSteps}-step limit before completing`, evidence: [`step budget exhausted at step ${step}`] };
+      state.status = "blocked";
+      await this.#options.session.saveRunState(state);
+      await events.emit({ type: "agent.finished", agentId: state.agentId, status: state.status, result: state.completion.summary });
+      return { status: state.status, text: state.completion.summary, messages: this.#messages };
     } catch (error) {
       state.status = signal.aborted ? "cancelled" : "failed";
       await this.#options.session.saveRunState(state);
@@ -420,7 +430,18 @@ export class Agent {
     while (boundary > 1 && this.#messages[boundary]?.role === "tool") boundary -= 1;
     if (boundary <= 1) throw new Error("context limit reached before a safe compaction boundary was available");
 
-    const { messages: compacted, prunedToolResults } = pruneCompactionMessages(this.#messages.slice(1, boundary));
+    const { messages: compacted, prunedToolResults } = await pruneCompactionMessages(this.#messages.slice(1, boundary), this.#options.artifacts);
+    const compactedBytes = Buffer.byteLength(JSON.stringify(compacted), "utf8");
+    const maxCompactedBytes = Math.floor(this.#options.contextWindow * 3 * 0.6);
+    if (compactedBytes > maxCompactedBytes) {
+      for (const message of compacted) {
+        if (message.role === "tool" && Buffer.byteLength(message.content, "utf8") > 2_000) {
+          const bytes = Buffer.byteLength(message.content, "utf8");
+          const encoded = Buffer.from(message.content, "utf8");
+          message.content = `[Tool result pruned for size: ${bytes} bytes]\n${encoded.subarray(0, 500).toString("utf8")}\n\n[...pruned...]\n\n${encoded.subarray(Math.max(0, encoded.length - 300)).toString("utf8")}`;
+        }
+      }
+    }
     const { readFiles, modifiedFiles } = extractFileOps(compacted);
     const fileOpsSection = formatFileOpsSection(readFiles, modifiedFiles);
     const fileOpsMsg: ProviderMessage[] = fileOpsSection
@@ -444,23 +465,43 @@ export class Agent {
     const summary = response.message.content?.trim();
     if (!summary || response.message.tool_calls?.length) throw new Error("context compaction did not produce a summary");
     await this.#options.session.archiveMessages(this.#messages, "compaction");
-    this.#messages.splice(
-      1,
-      boundary - 1,
-      { role: "user", content: `<compaction-summary>\n${summary}\n</compaction-summary>${fileOpsSection ? `\n${fileOpsSection}` : ""}` },
-    );
+    let compactionContent: string | ProviderContentPart[] = `<compaction-summary>\n${summary}\n</compaction-summary>${fileOpsSection ? `\n${fileOpsSection}` : ""}`;
+    if (this.#options.vision) {
+      const imageText = serializeForImaging(compacted);
+      const frames = renderTextToFrames(imageText, { maxFrames: 40 });
+      if (frames.length > 0) {
+        const parts: ProviderContentPart[] = [
+          { type: "text", text: `<compaction-summary>\n${summary}\n\nThe full conversation history before compaction is rendered as ${frames.length} image frame${frames.length === 1 ? "" : "s"} below. Read the images to recover the original context.\n</compaction-summary>${fileOpsSection ? `\n${fileOpsSection}` : ""}` },
+        ];
+        for (const frame of frames) {
+          const attachment = await this.#options.artifacts.storeAttachment({
+            source: "compaction",
+            bytes: frame.png,
+            mimeType: "image/png",
+            extension: "png",
+          });
+          parts.push({
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${frame.png.toString("base64")}` },
+          });
+        }
+        compactionContent = parts;
+      }
+    }
+    this.#messages.splice(1, boundary - 1, { role: "user", content: compactionContent });
     if (this.#stickyContext) {
       const last = this.#messages.at(-1);
       if (!(last?.role === "user" && typeof last.content === "string" && last.content.includes("<sticky-context>"))) {
         this.#messages.push({ role: "user", content: `<sticky-context>\n${this.#stickyContext}\n</sticky-context>` });
       }
     }
-    this.#advanceCacheEpoch();
+    const scope = `${this.#options.state.agentId}:${this.#options.state.mode}:${this.#cacheEpoch}`;
+    this.#options.provider.resetCacheScope?.(scope);
     await this.#options.session.saveMessages(this.#messages);
     await this.#options.events.emit({
       type: "notice",
       agentId: this.#options.state.agentId,
-      message: `compacted ${compacted.length} messages after reaching the context threshold${prunedToolResults > 0 ? `; pruned ${prunedToolResults} old tool results from the summary input` : ""}`,
+      message: `compacted ${compacted.length} messages after reaching the context threshold${this.#options.vision ? " (with image frames)" : ""}${prunedToolResults > 0 ? `; pruned ${prunedToolResults} old tool results from the summary input` : ""}`,
     });
     await this.#options.events.emit({
       type: "usage",
@@ -547,28 +588,38 @@ function mimeTypeFor(path: string): string {
 }
 
 
-function pruneCompactionMessages(messages: ProviderMessage[]): { messages: ProviderMessage[]; prunedToolResults: number } {
+async function pruneCompactionMessages(messages: ProviderMessage[], artifacts?: ArtifactStore): Promise<{ messages: ProviderMessage[]; prunedToolResults: number }> {
   let prunedToolResults = 0;
-  const pruned = messages.map((message): ProviderMessage => {
-    if (message.role !== "tool") return structuredClone(message);
+  const pruned: ProviderMessage[] = [];
+  for (const message of messages) {
+    if (message.role !== "tool") { pruned.push(structuredClone(message)); continue; }
     const content = message.content.trim();
     if (content === "no matches" || content === "[]" || content === "{}") {
       prunedToolResults += 1;
-      return { ...message, content: "[Uneventful result elided]" };
+      pruned.push({ ...message, content: "[Uneventful result elided]" });
+      continue;
     }
     const bytes = Buffer.byteLength(message.content, "utf8");
-    if (bytes <= 8_000 || message.content.startsWith("[tool output truncated:")) {
-      return structuredClone(message);
+    if (bytes <= 8_000 || message.content.startsWith("[tool output truncated:") || message.content.startsWith("[Tool result archived:")) {
+      pruned.push(structuredClone(message));
+      continue;
     }
     prunedToolResults += 1;
+    if (artifacts) {
+      const { artifactId } = await artifacts.materialize(message.name ?? "compact", message.tool_call_id ?? "compact", message.content);
+      if (artifactId) {
+        const encoded = Buffer.from(message.content, "utf8");
+        const head = encoded.subarray(0, 800).toString("utf8");
+        const tail = encoded.subarray(Math.max(0, encoded.length - 400)).toString("utf8");
+        pruned.push({ ...message, content: `[Tool result archived: ${artifactId}]\n${head}\n\n[...full output in artifact ${artifactId}...]\n\n${tail}` });
+        continue;
+      }
+    }
     const encoded = Buffer.from(message.content, "utf8");
     const head = encoded.subarray(0, 1_500).toString("utf8");
     const tail = encoded.subarray(Math.max(0, encoded.length - 800)).toString("utf8");
-    return {
-      ...message,
-      content: `[Tool result pruned before compaction: ${bytes} bytes]\n${head}\n\n[...pruned...]\n\n${tail}`,
-    };
-  });
+    pruned.push({ ...message, content: `[Tool result pruned before compaction: ${bytes} bytes]\n${head}\n\n[...pruned...]\n\n${tail}` });
+  }
   return { messages: pruned, prunedToolResults };
 }
 
@@ -603,7 +654,7 @@ function isUndoContext(message: ProviderMessage | undefined, checkpointId: strin
 }
 
 function estimateTokens(messages: ProviderMessage[], tools: ProviderTool[] = []): number {
-  return Math.ceil(Buffer.byteLength(JSON.stringify({ messages, tools }), "utf8") / 3);
+  return Math.ceil(Buffer.byteLength(JSON.stringify({ messages, tools }), "utf8") / 3.5);
 }
 
 export function sanitizeToolPairing(messages: ProviderMessage[]): ProviderMessage[] {

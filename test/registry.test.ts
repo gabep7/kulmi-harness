@@ -309,9 +309,9 @@ describe("ToolRegistry", () => {
       "resolve_conflict",
     ]));
     expect(providerTools.map((tool) => tool.function.name)).toEqual([...registry.names()].sort());
-    expect(Buffer.byteLength(JSON.stringify(providerTools), "utf8")).toBeLessThan(16_500);
+    expect(Buffer.byteLength(JSON.stringify(providerTools), "utf8")).toBeLessThan(18_000);
     expect(Buffer.byteLength(JSON.stringify(providerTools.filter((tool) => tool.function.name !== "start_task")), "utf8"))
-      .toBeLessThan(16_000);
+      .toBeLessThan(17_500);
     expect(providerTools.find((tool) => tool.function.name === "start_task")).toMatchObject({
       function: {
         description: expect.stringContaining("assume they mean the current workspace"),

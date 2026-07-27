@@ -16,8 +16,8 @@ export const MAX_RULE_BYTES = 128_000;
 export function discoverRules(workspaceRoot: string): RuleDefinition[] {
   const roots: Array<{ path: string; source: RuleDefinition["source"] }> = [
     { path: join(homedir(), ".config", "kulmi", "rules"), source: "user" },
-    { path: join(workspaceRoot, ".kulmi", "rules"), source: "project" },
     { path: join(workspaceRoot, ".agents", "rules"), source: "project" },
+    { path: join(workspaceRoot, ".kulmi", "rules"), source: "project" },
   ];
   const rules = new Map<string, RuleDefinition>();
   for (const root of roots) {
@@ -35,7 +35,11 @@ export function discoverRules(workspaceRoot: string): RuleDefinition[] {
       } catch {
         rule = undefined;
       }
-      if (rule) rules.set(rule.name, rule);
+      if (rule) {
+        const previous = rules.get(rule.name);
+        if (previous) process.stderr.write(`warning: rule ${rule.name} from ${rule.path} overrides ${previous.path}\n`);
+        rules.set(rule.name, rule);
+      }
     }
   }
   return [...rules.values()].sort((a, b) => a.name.localeCompare(b.name));

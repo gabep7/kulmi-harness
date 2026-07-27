@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
 import type { AgentMode, AutonomyLevel, PlanStep } from "../core/types.js";
 import type { PermissionRequest } from "../tools/types.js";
@@ -10,6 +10,7 @@ export interface TuiAppProps {
   model: string;
   sessionId: string;
   cwd: string;
+  contextWindow: number;
   autonomy: AutonomyLevel;
   mode?: AgentMode;
   customCommands?: ReadonlyArray<{ name: string; description: string }>;
@@ -47,6 +48,7 @@ export interface TuiRuntimeInfo {
   sessionId: string;
   cwd: string;
   autonomy: AutonomyLevel;
+  contextWindow: number;
   mode: AgentMode;
 }
 
@@ -86,6 +88,11 @@ export function TuiApp(props: TuiAppProps) {
   const [input, setInput] = useState("");
   const [help, setHelp] = useState(false);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const setBusyState = (next: boolean) => {
+    busyRef.current = next;
+    setBusy(next);
+  };
   const [sessions, setSessions] = useState<TuiSessionOption[] | undefined>();
   const [sessionCursor, setSessionCursor] = useState(0);
   const [models, setModels] = useState<TuiModelOption[] | undefined>();
@@ -98,6 +105,7 @@ export function TuiApp(props: TuiAppProps) {
     cwd: props.cwd,
     autonomy: props.autonomy,
     mode: props.mode ?? "chat",
+    contextWindow: props.contextWindow,
   });
 
   useEffect(() => {
@@ -123,7 +131,7 @@ export function TuiApp(props: TuiAppProps) {
         exit();
         return;
       }
-      if (busy) return;
+      if (busyRef.current) return;
       if (key.escape) {
         setSessions(undefined);
         return;
@@ -147,13 +155,13 @@ export function TuiApp(props: TuiAppProps) {
           setSessions(undefined);
           return;
         }
-        setBusy(true);
+        setBusyState(true);
         void props.onSwitchSession(selected.id).then((next) => {
           setRuntime(next);
           setSessions(undefined);
         }, (error: unknown) => {
           props.store.addNotice(error instanceof Error ? error.message : String(error), true);
-        }).finally(() => setBusy(false));
+        }).finally(() => setBusyState(false));
         return;
       }
       return;
@@ -164,7 +172,7 @@ export function TuiApp(props: TuiAppProps) {
         exit();
         return;
       }
-      if (busy) return;
+      if (busyRef.current) return;
       if (key.escape) {
         setModels(undefined);
         return;
@@ -191,14 +199,14 @@ export function TuiApp(props: TuiAppProps) {
           openEffortPicker();
           return;
         }
-        setBusy(true);
+        setBusyState(true);
         void props.onSwitchModel(selected.name).then((next) => {
           setRuntime(next);
           props.store.addNotice(`Switched to ${next.model}`);
           openEffortPicker();
         }, (error: unknown) => {
           props.store.addNotice(error instanceof Error ? error.message : String(error), true);
-        }).finally(() => setBusy(false));
+        }).finally(() => setBusyState(false));
         return;
       }
       return;
@@ -209,7 +217,7 @@ export function TuiApp(props: TuiAppProps) {
         exit();
         return;
       }
-      if (busy) return;
+      if (busyRef.current) return;
       if (key.escape) {
         setEfforts(undefined);
         return;
@@ -240,11 +248,11 @@ export function TuiApp(props: TuiAppProps) {
         setHelp(false);
         return;
       }
-      if (busy) props.onCancel();
+      if (busyRef.current) props.onCancel();
       return;
     }
     if (key.ctrl && value === "c") {
-      if (busy) props.onCancel();
+      if (busyRef.current) props.onCancel();
       else {
         props.onExit();
         exit();
@@ -255,14 +263,14 @@ export function TuiApp(props: TuiAppProps) {
       props.store.toggleThinking();
       return;
     }
-    if (key.shift && key.tab && !busy && props.onCycleAutonomy) {
-      setBusy(true);
+    if (key.shift && key.tab && !busyRef.current && props.onCycleAutonomy) {
+      setBusyState(true);
       void props.onCycleAutonomy().then((next) => {
         setRuntime(next);
         props.store.addNotice(`Autonomy: ${autonomyLabel(next.autonomy)}`);
       }, (error: unknown) => {
         props.store.addNotice(error instanceof Error ? error.message : String(error), true);
-      }).finally(() => setBusy(false));
+      }).finally(() => setBusyState(false));
       return;
     }
     if (value === "?" && input.length === 0) {
@@ -274,7 +282,7 @@ export function TuiApp(props: TuiAppProps) {
   const submit = async (raw: string) => {
     const value = raw.trim();
     if (!value) return;
-    if (busy) {
+    if (busyRef.current) {
       if (value.startsWith("/") || !props.onSteer) return;
       setInput("");
       try {
@@ -301,7 +309,7 @@ export function TuiApp(props: TuiAppProps) {
         props.store.toggleThinking();
         return;
       }
-      setBusy(true);
+      setBusyState(true);
       try {
         const result = await props.onCommand(command, parts.join(" "));
         if (typeof result === "string") {
@@ -332,24 +340,24 @@ export function TuiApp(props: TuiAppProps) {
       } catch (error) {
         props.store.addNotice(error instanceof Error ? error.message : String(error), true);
       } finally {
-        setBusy(false);
+        setBusyState(false);
       }
       return;
     }
-    setBusy(true);
+    setBusyState(true);
     try {
       await props.onSubmit(value);
     } finally {
-      setBusy(false);
+      setBusyState(false);
     }
   };
 
-  const width = Math.max(40, size.columns - 4);
+  const width = Math.max(1, size.columns - 4);
   const idle = snapshot.transcript.length === 0 && snapshot.live.length === 0 && !snapshot.streaming && !snapshot.reasoning;
 
   return (
     <Box flexDirection="column">
-      <Static items={snapshot.transcript}>
+      <Static key={snapshot.transcriptVersion} items={snapshot.transcript}>
         {(item) => <FeedRow key={item.id} item={item} width={width} />}
       </Static>
 
@@ -360,16 +368,21 @@ export function TuiApp(props: TuiAppProps) {
           const tools = snapshot.live.filter((item) => item.kind === "tool");
           const workers = snapshot.live.filter((item): item is Extract<FeedItem, { kind: "worker" }> => item.kind === "worker");
           const runningAgents = workers.filter((item) => item.status === "running").length;
+          const liveLimit = Math.max(1, Math.min(12, Math.floor((size.rows - 8) / 2)));
+          const visibleWorkers = workers.slice(-liveLimit);
+          const toolLimit = Math.max(1, liveLimit - visibleWorkers.length);
+          const visibleTools = tools.slice(-toolLimit);
           return (
             <>
-              {tools.length > 8 && <Text color={theme.faint}>  +{tools.length - 8} more tools…</Text>}
-              {tools.slice(-8).map((item) => <FeedRow key={item.id} item={item} width={width} />)}
+              {tools.length > visibleTools.length && <Text color={theme.faint}>  +{tools.length - visibleTools.length} more tools…</Text>}
+              {visibleTools.map((item) => <FeedRow key={item.id} item={item} width={width} />)}
               {workers.length > 0 && (
                 <Box marginTop={1} flexDirection="column">
                   <Text color={theme.sand} bold>
                     agents  <Text color={theme.faint}>{runningAgents}/{workers.length} running</Text>
                   </Text>
-                  {workers.map((item) => <FeedRow key={item.id} item={item} width={width} />)}
+                  {workers.length > visibleWorkers.length && <Text color={theme.faint}>  +{workers.length - visibleWorkers.length} more agents…</Text>}
+                  {visibleWorkers.map((item) => <FeedRow key={item.id} item={item} width={width} />)}
                 </Box>
               )}
             </>
@@ -402,8 +415,7 @@ export function TuiApp(props: TuiAppProps) {
               : efforts
                 ? <EffortPicker efforts={efforts} cursor={effortCursor} model={runtime.model} />
                 : <Composer value={input} onChange={setInput} onSubmit={submit} busy={busy} />}
-
-        <Footer runtime={runtime} status={snapshot.status} busy={busy} agents={snapshot.live.filter((item) => item.kind === "worker").length} />
+        <Footer runtime={runtime} status={snapshot.status} busy={busy} agents={snapshot.live.filter((item) => item.kind === "worker").length} contextTokens={snapshot.contextTokens} contextWindow={runtime.contextWindow} />
       </Box>
     </Box>
   );
@@ -503,20 +515,31 @@ function CompletionBlock({ completion }: { completion: CompletionSummary }) {
 }
 
 function Composer({ value, onChange, onSubmit, busy }: { value: string; onChange: (value: string) => void; onSubmit: (value: string) => void; busy: boolean }) {
+  const valueRef = useRef(value);
+  valueRef.current = value;
   useInput((input, key) => {
+    const current = valueRef.current;
     if (key.ctrl || key.meta || key.tab || key.escape || key.upArrow || key.downArrow) return;
     if (key.return) {
-      onSubmit(value);
+      if (!current) return;
+      valueRef.current = "";
+      onSubmit(current);
       return;
     }
     if (key.backspace || key.delete) {
-      if (value.length > 0) onChange(value.slice(0, -1));
+      if (current.length > 0) {
+        const next = current.slice(0, -1);
+        valueRef.current = next;
+        onChange(next);
+      }
       return;
     }
     if (!input) return;
     // Parent owns the empty-"?" help hotkey; never insert it into the composer.
-    if (input === "?" && value.length === 0) return;
-    onChange(value + input);
+    if (input === "?" && current.length === 0) return;
+    const next = current + input;
+    valueRef.current = next;
+    onChange(next);
   });
   const placeholder = busy ? "Kulmi is working. Enter to steer, Esc to stop." : "What should we build?";
   return (
@@ -683,20 +706,36 @@ function MarkdownBlock({ text, width }: { text: string; width: number }) {
   );
 }
 
-function Footer({ runtime, status, busy, agents }: { runtime: TuiRuntimeInfo; status: string; busy: boolean; agents: number }) {
+function Footer({ runtime, status, busy, agents, contextTokens, contextWindow }: { runtime: TuiRuntimeInfo; status: string; busy: boolean; agents: number; contextTokens: number; contextWindow: number }) {
+  const fillRatio = contextWindow > 0 ? Math.min(1, contextTokens / contextWindow) : 0;
+  const fillPercent = Math.round(fillRatio * 100);
+  const barWidth = 20;
+  const filled = Math.round(fillRatio * barWidth);
+  const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
+  const barColor = fillRatio >= 0.9 ? "red" : fillRatio >= 0.78 ? "yellow" : theme.faint;
   return (
-    <Box>
-      <Text color={theme.faint} wrap="truncate-end">
-        {runtime.model}  ·  <Text color={statusColor(status)}>{status}</Text>  ·  {runtime.mode === "task" ? "goal" : "chat"}  ·  {autonomyLabel(runtime.autonomy)}
-        {agents > 0 ? `  ·  ${agents} agent${agents === 1 ? "" : "s"}` : ""}
-        {"  ·  "}{busy ? "esc stop" : "? help"}
-      </Text>
+    <Box flexDirection="column">
+      <Box>
+        <Text color={theme.faint} wrap="truncate-end">
+          {runtime.model}  ·  <Text color={statusColor(status)}>{status}</Text>  ·  {runtime.mode === "task" ? "goal" : "chat"}  ·  {autonomyLabel(runtime.autonomy)}
+          {agents > 0 ? `  ·  ${agents} agent${agents === 1 ? "" : "s"}` : ""}
+          {"  ·  "}{busy ? "esc stop" : "? help"}
+        </Text>
+      </Box>
+      {contextTokens > 0 && (
+        <Box>
+          <Text color={barColor}>{bar}</Text>
+          <Text color={theme.faint}>  {fillPercent}% context{fillRatio >= 0.78 ? " (compacting soon)" : ""}</Text>
+        </Box>
+      )}
     </Box>
   );
 }
 
 function terminalSize(stdout: NodeJS.WriteStream): { columns: number; rows: number } {
-  return { columns: Math.max(60, stdout.columns ?? 100), rows: Math.max(20, stdout.rows ?? 30) };
+  const columns = typeof stdout.columns === "number" && stdout.columns > 0 ? stdout.columns : 80;
+  const rows = typeof stdout.rows === "number" && stdout.rows > 0 ? stdout.rows : 30;
+  return { columns, rows };
 }
 
 function InlineMarkdown({ text }: { text: string }) {

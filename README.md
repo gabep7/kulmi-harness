@@ -113,6 +113,7 @@ model = "your-model-id"
 base_url = "https://api.example.com/v1"
 api_key_env = "MY_PROVIDER_API_KEY"
 thinking = false
+reasoning_style = "none" # openai-o, reasoning_content, anthropic-thinking, or none
 context_window = 128000
 max_output_tokens = 16384
 ```
@@ -166,6 +167,10 @@ The safe defaults require an available OS sandbox, deny command network access, 
 
 On Ubuntu systems that restrict unprivileged user namespaces through AppArmor, `bwrap` can be installed but unusable. `kulmi doctor` performs a real namespace probe and reports this state. Configure an administrator-approved AppArmor exception for `bwrap`. Do not disable Kulmi's sandbox merely to bypass the check.
 
+### Defaults
+
+The built-in defaults are `max_steps = 200`, `max_subagents = 3`, `command_timeout_seconds = 120`, and `max_output_bytes = 524288` (512 KB). The default autonomy for `kulmi` and `kulmi exec` is `medium`, so a headless run can run tests and project scripts without an extra flag. Override any of these in user or project configuration, except for the privileged keys listed above.
+
 ## Terminal interface
 
 Running `kulmi` opens the responsive TUI.
@@ -218,7 +223,7 @@ kulmi --session-id session_0123456789abcdef
 
 ### Footer and approvals
 
-The footer shows autonomy, free-search state, cumulative tokens, and cache-hit rate. While a run is active, a status line above the composer rotates a shuffled spinner through messages such as `selling your data`, `barking up the wrong tree`, `opening a can of worms`, and `mining bitcoin briefly`.
+The footer shows autonomy, free-search state, cumulative tokens, and cache-hit rate, plus a context fill bar that tracks how close the active transcript is to the model's context window. While a run is active, a status line above the composer rotates a shuffled spinner through messages such as `selling your data`, `barking up the wrong tree`, `opening a can of worms`, and `mining bitcoin briefly`.
 
 Risky commands replace the composer with an explicit allow-once, allow-always, or deny prompt. Pressing Enter without choosing defaults to denial. Allow-always persists a per-workspace command-prefix entry to a user-level allowlist and auto-approves future matches. High-risk requests are never auto-approved and are never offered the option.
 
@@ -350,10 +355,12 @@ Each server's tools appear to the agent as `mcp_<server>_<tool>` with the server
 
 ## Git workflow
 
-Git workflow tools list, read, and resolve merge conflicts, then stage the resolved file.
+Git workflow tools list, read, and resolve merge conflicts, then stage the resolved file. `git_log` shows recent commit history with an optional path filter, and `git_diff` shows uncommitted changes, the staged index, or a diff against a ref.
 
 - `commit_changes` creates local commits from inside the harness and never pushes.
 - `create_pull_request` pushes the current branch to origin and opens a PR through the `gh` CLI. It always requires explicit approval, refuses detached HEADs and branches with nothing to publish, and never force-pushes.
+
+`ast_grep` runs structural code search by AST pattern, matching syntax shape rather than text, and `ast_grep_replace` applies a rewrite template to those matches in place for codemods where a text replace would be unsafe.
 
 Browser QA can open a URL in headless Chromium and store screenshots as session attachments when Chrome or Chromium is available. Prompts can attach images with `@image path/to/image.png`.
 
@@ -412,9 +419,9 @@ File edits, replacements, and deletions require a current read hash, so the mode
 
 `edit_files` preflights multiple exact replacements across already-read files, then applies them as one revision and rolls back completed writes if a later write fails. When exact text matching fails, a single whitespace-tolerant fallback applies only on an unambiguous unique match, and the result is labeled so the model knows the match was not verbatim.
 
-Successful edits to recognized source files append compact LSP error diagnostics to the tool result within a bounded time budget of a few seconds, so the model sees the type errors it just introduced without a build round trip.
+Successful edits to recognized source files append compact LSP error diagnostics to the tool result within a bounded time budget of a few seconds, so the model sees the type errors it just introduced without a build round trip. The `lsp` tool exposes definition, references, hover, and workspace symbol queries, auto-detecting TypeScript and Python, with `pyright-langserver` required in PATH for Python.
 
-File edits, writes, deletions, and shell-created changes emit bounded redacted unified diffs to clients. Shell tracking also records permission-only changes. No-op writes do not advance the workspace revision or invalidate accepted completion evidence.
+`grep` searches text with ripgrep and supports `case_insensitive` matching and a `context` line count around each hit, in addition to fixed-string mode. File edits, writes, deletions, and shell-created changes emit bounded redacted unified diffs to clients. Shell tracking also records permission-only changes. No-op writes do not advance the workspace revision or invalidate accepted completion evidence.
 
 ## Prompt caching
 
@@ -422,7 +429,11 @@ Prompt caching is automatic and prefix-based on supported providers. Kulmi optim
 
 Chat and task mode use separate cache scopes, so the one deliberate tool-catalog expansion cannot invalidate either stable prefix. Compaction happens only near the context boundary, and only at a complete message boundary.
 
-Large tool output is stored as a retrievable artifact with a bounded preview, and state-changing tools return compact acknowledgements instead of duplicating state into the next fresh prompt tail.
+Large tool output is archived to an ArtifactStore with a recoverable artifact ID and a bounded preview in the transcript, instead of being silently truncated. State-changing tools return compact acknowledgements instead of duplicating state into the next fresh prompt tail. A soft step limit fires at 90% of `max_steps`, injecting a budget notice that tells the agent to finalize, verify, and report, before the hard `max_steps` limit blocks the run.
+
+### Image compaction
+
+When a model profile has `vision = true`, compaction renders the full discarded conversation history onto PNG frames and attaches them as image content parts alongside the text summary. The model can read the old conversation from the images, preserving far more context than a text-only summary. This is useful for long-horizon tasks where the agent needs to recall earlier reproduction output, file reads, and decisions. The frames use a compact 6x8 bitmap font at 1568px width, capped at 40 frames. The text summary and file-operation index are still included as plain text. If the model does not support vision, compaction falls back to the text-only summary.
 
 Providers that report cache reads through `usage.prompt_tokens_details.cached_tokens` are fully supported. Kulmi reports cached and fresh tokens independently for every request.
 
@@ -445,10 +456,12 @@ npm run check
 
 That runs the version check, typecheck, the vitest suite, and a build.
 
+CI runs the full gate on both `ubuntu-latest` and `macos-latest`, across Node 22 and 24, so a change must pass on both platforms before it merges.
+
 Two suites stay outside `npm run check`:
 
 - `npm run test:live` performs a low-output two-request smoke test covering thinking, tool-call reasoning replay, tool-result pairing, streaming, and cache telemetry. It needs a real key and incurs provider usage.
-- `npm run eval` runs the SWE-style eval suite under `evals/`. Each task copies a fixture repo to a temporary directory, runs `kulmi exec` against a prompt, and judges the result solely by the task's verify command. Use it to regression-test harness changes. `KULMI_EVAL_BIN` swaps the executable under test and `KULMI_EVAL_MODEL` selects the model profile.
+- `npm run eval` runs the SWE-style eval suite under `evals/`. Each task copies a fixture repo to a temporary directory, runs `kulmi exec` against a prompt, and judges the result solely by the task's verify command. Use it to regression-test harness changes. `KULMI_EVAL_BIN` swaps the executable under test and `KULMI_EVAL_MODEL` selects the model profile. Pass `--json` for machine-readable results, `--task <name>` to run a single task, and `--keep` to retain the temporary working directory. A task may define `repo_url` and `base_commit` to run against a real upstream repository instead of a fixture, and `fail_to_pass` plus `pass_to_pass` test lists to record per-test outcomes alongside the verify command. The runner also extracts the model's patch, changed files, and best-effort usage lines for each result.
 
 The release gate and tag procedure is in [docs/releasing.md](docs/releasing.md).
 

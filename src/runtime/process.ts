@@ -9,6 +9,7 @@ import {
   statSync,
 } from "node:fs";
 import { constants } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { SandboxConfig } from "../config/config.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
@@ -71,27 +72,28 @@ export async function runShell(options: {
 
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
-  let remainingBytes = options.maxOutputBytes;
+  const stdoutBudget = { value: options.maxOutputBytes };
+  const stderrBudget = { value: options.maxOutputBytes };
   let truncated = false;
   let timedOut = false;
   let escalationTimer: NodeJS.Timeout | undefined;
 
-  const collect = (target: Buffer[], chunk: Buffer): void => {
-    if (remainingBytes <= 0) {
+  const collect = (target: Buffer[], chunk: Buffer, remaining: { value: number }): void => {
+    if (remaining.value <= 0) {
       truncated = true;
       return;
     }
-    const retained = chunk.subarray(0, remainingBytes);
+    const retained = chunk.subarray(0, remaining.value);
     target.push(retained);
-    remainingBytes -= retained.length;
+    remaining.value -= retained.length;
     if (chunk.length > retained.length) truncated = true;
   };
 
   child.stdout.on("data", (chunk: Buffer) => {
-    collect(stdoutChunks, chunk);
+    collect(stdoutChunks, chunk, stdoutBudget);
   });
   child.stderr.on("data", (chunk: Buffer) => {
-    collect(stderrChunks, chunk);
+    collect(stderrChunks, chunk, stderrBudget);
   });
 
   const kill = () => {
@@ -319,11 +321,14 @@ function readableRoots(
     ? ["/System", "/Library", "/Applications", "/usr", "/bin", "/sbin", "/opt", "/nix/store", "/private/etc", "/private/var/db", "/dev"]
     : ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/nix/store"];
   candidates.push(workspaceRoot, sandboxRoot, toolRoot(shell), toolRoot(process.execPath));
+  const userHome = canonicalPath(homedir());
   for (const entry of (env.PATH ?? "").split(delimiter)) {
     if (!entry || !isAbsolute(entry) || !existsSync(entry)) continue;
     const directory = toolRoot(entry);
+    if (directory === userHome || isInside(directory, userHome)) continue;
     candidates.push(directory);
-    if (executable(join(directory, "node"))) candidates.push(dirname(directory));
+    const globalModules = join(dirname(directory), "lib", "node_modules");
+    if (executable(join(directory, "node")) && existsSync(globalModules)) candidates.push(globalModules);
   }
   return minimizeRoots(candidates.filter((path) => existsSync(path)).map(canonicalPath));
 }

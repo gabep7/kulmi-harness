@@ -147,7 +147,7 @@ describe("file tools", () => {
     expect(exact.content).toContain(" 7\texport function important(input: string): string {");
     expect(exact.content).toContain(' 8\t  const secretBody = "body must only appear in exact mode";');
     expect(exact.content).toContain("10\t}");
-    expect(exact.content).toContain(`[4 of ${content.split("\n").length} lines, sha256:${digest(content)}]`);
+    expect(exact.content).toContain(`[4 of ${lines.length - 1} lines, sha256:${digest(content)}]`);
   });
 
   it("emits a bounded diff and does not count no-op edits as revisions", async () => {

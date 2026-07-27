@@ -15,8 +15,8 @@ const MAX_AGENT_BYTES = 128_000;
 export function discoverAgents(workspaceRoot: string): AgentDefinition[] {
   const roots: Array<{ path: string; source: AgentDefinition["source"] }> = [
     { path: join(homedir(), ".config", "kulmi", "agents"), source: "user" },
-    { path: join(workspaceRoot, ".kulmi", "agents"), source: "project" },
     { path: join(workspaceRoot, ".agents", "agents"), source: "project" },
+    { path: join(workspaceRoot, ".kulmi", "agents"), source: "project" },
   ];
   const agents = new Map<string, AgentDefinition>();
   for (const root of roots) {
@@ -34,7 +34,11 @@ export function discoverAgents(workspaceRoot: string): AgentDefinition[] {
       } catch {
         agent = undefined;
       }
-      if (agent) agents.set(agent.name, agent);
+      if (agent) {
+        const previous = agents.get(agent.name);
+        if (previous) process.stderr.write(`warning: agent ${agent.name} from ${agent.path} overrides ${previous.path}\n`);
+        agents.set(agent.name, agent);
+      }
     }
   }
   return [...agents.values()].sort((a, b) => a.name.localeCompare(b.name));

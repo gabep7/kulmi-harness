@@ -48,7 +48,7 @@ download_url() {
   url="$1"
   destination="$2"
   partial="$destination.part"
-  http_code="$(curl --proto '=https' --fail --location --silent --show-error --output "$partial" --write-out '%{http_code}' "$url")" && {
+  http_code="$(curl --proto '=https' --proto-redir '=https' --fail --location --silent --show-error --output "$partial" --write-out '%{http_code}' "$url")" && {
     mv "$partial" "$destination"
     return 0
   }
@@ -87,7 +87,7 @@ download_release_asset() {
   asset="$1"
   destination="$2"
   if [ -n "$RELEASE_URL" ]; then
-    if [ "$asset" = "kulmi-node.tar.gz" ]; then
+    if [ "$asset" = "$release_asset" ]; then
       asset_url="$RELEASE_URL"
     elif [ -n "$RELEASE_CHECKSUM_URL" ]; then
       asset_url="$RELEASE_CHECKSUM_URL"
@@ -126,10 +126,13 @@ verify_release_checksum() {
 download_source() {
   destination="$1"
   if has_authenticated_gh; then
-    gh api --hostname github.com "repos/$REPO/tarball/$SOURCE_REF" > "$destination"
+    gh api --hostname github.com "repos/$REPO/tarball/$SOURCE_REF" > "$destination.part" || {
+      rm -f "$destination.part"
+      return 1
+    }
+    mv "$destination.part" "$destination"
   else
-    curl --fail --location --silent --show-error \
-      "https://github.com/$REPO/archive/$SOURCE_REF.tar.gz" -o "$destination"
+    download_url "https://github.com/$REPO/archive/$SOURCE_REF.tar.gz" "$destination"
   fi
 }
 
@@ -138,36 +141,58 @@ command -v npm >/dev/null 2>&1 || fail "npm is required"
 command -v git >/dev/null 2>&1 || fail "git is required"
 
 case "$(uname -s)" in
-  Darwin) [ -x /usr/bin/sandbox-exec ] || fail "macOS sandbox-exec is required" ;;
+  Darwin)
+    asset_os="darwin"
+    [ -x /usr/bin/sandbox-exec ] || fail "macOS sandbox-exec is required"
+    ;;
   Linux)
+    asset_os="linux"
     command -v bwrap >/dev/null 2>&1 || fail "bubblewrap is required on Linux; install the bubblewrap package"
     bwrap --die-with-parent --unshare-all --ro-bind / / -- /bin/true 2>/dev/null || \
       fail "bubblewrap cannot create the required namespaces; check Ubuntu AppArmor user-namespace policy"
     ;;
   *) fail "only macOS and Linux are supported" ;;
 esac
+case "$(uname -m)" in
+  arm64|aarch64) asset_arch="arm64" ;;
+  x86_64|amd64) asset_arch="x64" ;;
+  *) fail "unsupported architecture $(uname -m)" ;;
+esac
+release_asset="kulmi-${asset_os}-${asset_arch}.tar.gz"
 
 major="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$major" -ge 22 ] || fail "Node.js 22 or newer is required, found $(node --version)"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/kulmi-install.XXXXXX")"
+install_parent="$(dirname "$INSTALL_DIR")"
+swap_root=""
+stage=""
 backup=""
+install_placed=0
+committed=0
 cleanup() {
-  # If the old install was moved aside but the new one never landed, restore it
-  # before deleting the temp dir (which holds the backup). Ctrl-C mid-swap must
-  # not destroy both copies.
-  if [ -n "${backup:-}" ] && { [ -e "$backup" ] || [ -L "$backup" ]; }; then
-    if [ ! -e "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ]; then
-      mv "$backup" "$INSTALL_DIR" 2>/dev/null || true
-    fi
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "${committed:-0}" -ne 1 ] && [ "${install_placed:-0}" -eq 1 ]; then
+    rm -rf "$INSTALL_DIR" 2>/dev/null || true
+  fi
+  if [ "${committed:-0}" -ne 1 ] && [ -n "${backup:-}" ] && { [ -e "$backup" ] || [ -L "$backup" ]; }; then
+    rm -rf "$INSTALL_DIR" 2>/dev/null || true
+    mv "$backup" "$INSTALL_DIR" 2>/dev/null || true
   fi
   if [ "${KULMI_KEEP_INSTALL_TEMP:-0}" != "1" ]; then
-    rm -rf "$work"
+    [ -z "${swap_root:-}" ] || rm -rf "$swap_root" 2>/dev/null || true
+    rm -rf "$work" 2>/dev/null || true
   fi
+  exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-mkdir -p "$(dirname "$INSTALL_DIR")" "$BIN_DIR"
+mkdir -p "$install_parent" "$BIN_DIR"
+swap_root="$(mktemp -d "$install_parent/.kulmi-swap.XXXXXX")"
 
 legacy_data_dir="$HOME/.local/share/kulmi"
 if [ "$INSTALL_DIR" != "$legacy_data_dir" ]; then
@@ -231,10 +256,12 @@ else
     else
       release_base_url="https://github.com/$REPO/releases/download/$VERSION"
     fi
-    printf 'Downloading prebuilt kulmi %s...\n' "$VERSION"
-    if download_release_asset kulmi-node.tar.gz "$work/kulmi-node.tar.gz"; then
-      if download_release_asset kulmi-node.tar.gz.sha256 "$work/kulmi-node.tar.gz.sha256"; then
-        verify_release_checksum "$work/kulmi-node.tar.gz" "$work/kulmi-node.tar.gz.sha256"
+    printf 'Downloading prebuilt kulmi %s (%s)...\n' "$VERSION" "$release_asset"
+    release_archive="$work/$release_asset"
+    release_checksum="$release_archive.sha256"
+    if download_release_asset "$release_asset" "$release_archive"; then
+      if download_release_asset "$release_asset.sha256" "$release_checksum"; then
+        verify_release_checksum "$release_archive" "$release_checksum"
       else
         checksum_status=$?
         if [ "$checksum_status" -eq 2 ]; then
@@ -242,15 +269,17 @@ else
         fi
         fail "could not download release checksum"
       fi
-      tar -xzf "$work/kulmi-node.tar.gz" -C "$package"
+      tar -xzf "$release_archive" -C "$package"
       [ -f "$package/dist/cli.js" ] || fail "release bundle is missing dist/cli.js"
       [ -d "$package/node_modules" ] || fail "release bundle is missing production dependencies"
       prebuilt=1
     else
       release_status=$?
       [ "$release_status" -eq 2 ] || fail "could not download prebuilt release"
-      printf 'No prebuilt release found; falling back to source %s...\n' "$SOURCE_REF"
-      download_source "$work/kulmi-source.tar.gz"
+      [ "${KULMI_ALLOW_UNVERIFIED_SOURCE:-0}" = "1" ] || \
+        fail "prebuilt release is unavailable; set KULMI_ALLOW_UNVERIFIED_SOURCE=1 to build the unverified source fallback"
+      printf 'No prebuilt release found; using explicitly allowed source fallback %s...\n' "$SOURCE_REF"
+      download_source "$work/kulmi-source.tar.gz" || fail "could not download source fallback"
       tar -xzf "$work/kulmi-source.tar.gz" --strip-components=1 -C "$package"
     fi
   fi
@@ -263,22 +292,27 @@ else
   install_kind="installed"
 fi
 
-backup=""
+if [ -n "$candidate" ]; then
+  stage="$swap_root/stage"
+  mv "$candidate" "$stage" || fail "could not stage installation on target filesystem"
+fi
+
 if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then
   if [ "$MODE" = "link" ] && [ -L "$INSTALL_DIR" ] && [ "$(readlink "$INSTALL_DIR")" = "$SOURCE_DIR" ]; then
     candidate=""
   else
-    backup="$work/previous"
-    mv "$INSTALL_DIR" "$backup"
+    backup="$swap_root/previous"
+    mv "$INSTALL_DIR" "$backup" || fail "could not preserve previous installation"
   fi
 fi
 
-if [ -n "$candidate" ] && ! mv "$candidate" "$INSTALL_DIR"; then
-  [ -z "$backup" ] || mv "$backup" "$INSTALL_DIR"
-  fail "could not install to $INSTALL_DIR"
+if [ -n "$candidate" ]; then
+  install_placed=1
+  mv "$stage" "$INSTALL_DIR" || fail "could not install to $INSTALL_DIR"
 fi
 
 ln -sfn "$INSTALL_DIR/dist/cli.js" "$BIN_DIR/kulmi"
+committed=1
 
 case "$BIN_DIR" in
   "$HOME"/*)

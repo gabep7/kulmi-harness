@@ -1,11 +1,12 @@
 import { type ChildProcessByStdio, spawn } from "node:child_process";
 import type { Readable } from "node:stream";
-import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
+import type { Stats } from "node:fs";
 import { dirname, extname, isAbsolute, relative } from "node:path";
 import fg from "fast-glob";
 import { z } from "zod";
-import { combineDiffs, createTextDiff } from "../core/diff.js";
+import { combineDiffs, createTextDiff, type TextDiff } from "../core/diff.js";
 import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
 import { resolveToolBinary } from "../runtime/binaries.js";
@@ -13,6 +14,7 @@ import { lspSourceExtensions, probeDiagnostics } from "./lsp.js";
 import { defineTool, type AnyTool, type ToolContext } from "./types.js";
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
+const MAX_TEXT_FILE_BYTES = 2_000_000;
 const summarizableSourceExtensions: Record<string, true> = {
   ".cjs": true,
   ".cts": true,
@@ -47,11 +49,8 @@ const readFileTool = defineTool({
       mustExist: true,
     });
     assertNotSensitivePath(path);
-    const info = await stat(path);
-    if (!info.isFile()) throw new Error(`${input.path} is not a file`);
-    if (info.size > 2_000_000) throw new Error(`${input.path} exceeds the 2 MB read limit`);
-    const content = textDecoder.decode(await readFile(path));
-    const lines = content.split("\n");
+    const content = await readTextFileBounded(path, input.path);
+    const { lines } = splitLogicalLines(content);
     if (input.mode === "summary") {
       const summary = summarizeSource(input.path, content, lines, input.limit);
       if (summary) return { content: summary };
@@ -70,6 +69,19 @@ function renderNumberedLines(content: string, lines: string[], offset: number, l
     .map((line, index) => `${String(start + index + 1).padStart(width)}\t${line}`)
     .join("\n");
   return `${rendered}\n\n[${selected.length} of ${lines.length} lines, sha256:${sha256(content)}]`;
+}
+
+interface LogicalLines {
+  lines: string[];
+  trailingNewline: boolean;
+}
+
+function splitLogicalLines(content: string): LogicalLines {
+  if (content === "") return { lines: [], trailingNewline: false };
+  const trailingNewline = content.endsWith("\n");
+  const lines = content.split("\n");
+  if (trailingNewline) lines.pop();
+  return { lines, trailingNewline };
 }
 
 function summarizeSource(path: string, content: string, lines: string[], limit: number): string | undefined {
@@ -216,6 +228,8 @@ const grepTool = defineTool({
     path: z.string().default("."),
     glob: z.string().optional(),
     fixed_strings: z.boolean().default(false),
+    case_insensitive: z.boolean().default(false),
+    context: z.number().int().min(0).max(10).default(0),
     limit: z.number().int().positive().max(2_000).default(500),
   }),
   readOnly: true,
@@ -238,6 +252,8 @@ const grepTool = defineTool({
       "--glob", "!**/*.key", "--glob", "!**/.npmrc", "--glob", "!**/.pypirc",
     );
     if (input.fixed_strings) args.push("--fixed-strings");
+    if (input.case_insensitive) args.push("-i");
+    if (input.context > 0) args.push("-C", String(input.context));
     args.push("--", input.pattern, ".");
     const env = safeChildEnvironment();
     let child: ChildProcessByStdio<null, Readable, Readable>;
@@ -303,7 +319,7 @@ const writeFileTool = defineTool({
       input: input.path,
     });
     assertNotSensitivePath(path);
-    const previous = await readExistingText(path);
+    const previous = await readExistingText(path, input.path);
     if (previous.exists) {
       const fingerprint = sha256(previous.content);
       if (!input.expected_sha256) {
@@ -322,6 +338,7 @@ const writeFileTool = defineTool({
     }
     await context.checkpoint.capture(path);
     await writeAtomic(path, input.content);
+    await verifyFileContent(path, input.content, input.path);
     const diff = createTextDiff(rel, previous.content, input.content);
     context.state.modifiedFiles.add(rel);
     context.state.revision += 1;
@@ -360,10 +377,9 @@ const editFileTool = defineTool({
       workspaceRoot: context.workspaceRoot,
       cwd: context.cwd,
       input: input.path,
-      mustExist: true,
     });
     assertNotSensitivePath(path);
-    const current = textDecoder.decode(await readFile(path));
+    const current = await readTextFileBounded(path, input.path, true);
     const fingerprint = sha256(current);
     let staleRecoveryWarning: string | undefined;
     if (input.expected_sha256 !== fingerprint) {
@@ -404,10 +420,7 @@ const editFileTool = defineTool({
     }
     await context.checkpoint.capture(path);
     await writeAtomic(path, next);
-    const actualContent = textDecoder.decode(await readFile(path));
-    if (next !== actualContent) {
-      throw new Error(`post-edit verification failed for ${input.path}: file content does not match expected state after write. This may indicate a concurrent modification.`);
-    }
+    const actualContent = await verifyFileContent(path, next, input.path);
     const diff = createTextDiff(rel, current, next);
     context.state.modifiedFiles.add(rel);
     context.state.revision += 1;
@@ -455,7 +468,7 @@ const editFilesTool = defineTool({
       current: string;
       next: string;
       replacements: number;
-      diff: ReturnType<typeof createTextDiff>;
+      diff: TextDiff | undefined;
       normalized: boolean;
     }> = [];
 
@@ -464,13 +477,12 @@ const editFilesTool = defineTool({
         workspaceRoot: context.workspaceRoot,
         cwd: context.cwd,
         input: file.path,
-        mustExist: true,
       });
       assertNotSensitivePath(path);
       const rel = relative(context.workspaceRoot, path);
       if (paths.has(rel)) throw new Error(`duplicate edit_files path ${file.path}`);
       paths.add(rel);
-      const current = textDecoder.decode(await readFile(path));
+      const current = await readTextFileBounded(path, file.path, true);
       const fingerprint = sha256(current);
       if (file.expected_sha256 !== fingerprint) {
         throw new Error(`stale edit for ${file.path}: expected ${file.expected_sha256}, found ${fingerprint}`);
@@ -504,12 +516,14 @@ const editFilesTool = defineTool({
       for (const file of changed) {
         await writeAtomic(file.path, file.next);
         written.push(file);
+        await verifyFileContent(file.path, file.next, file.rel);
       }
     } catch (error) {
       const rollbackErrors: string[] = [];
       for (const file of written.reverse()) {
         try {
           await writeAtomic(file.path, file.current);
+          await verifyFileContent(file.path, file.current, file.rel);
         } catch (rollbackError) {
           rollbackErrors.push(`${file.rel}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
         }
@@ -517,7 +531,7 @@ const editFilesTool = defineTool({
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(rollbackErrors.length > 0
         ? `edit_files failed: ${detail}; rollback failed for ${rollbackErrors.join(", ")}`
-        : `edit_files failed before all writes completed: ${detail}`);
+        : `edit_files failed and all completed writes were rolled back: ${detail}`);
     }
 
     for (const file of changed) context.state.modifiedFiles.add(file.rel);
@@ -528,8 +542,7 @@ const editFilesTool = defineTool({
       const diagnostics = await maybeProbeDiagnostics(context, file.path);
       if (diagnostics) diagnosticsByRel.set(file.rel, diagnostics);
     }));
-    const diffs = changed.flatMap((file) => file.diff ? [file.diff.text] : []);
-    const combinedDiff = combineDiffs(diffs);
+    const combinedDiff = combineDiffs(changed.flatMap((file) => file.diff ? [file.diff.text] : []));
     return {
       content: JSON.stringify({
         files: prepared.map((file) => ({
@@ -559,7 +572,6 @@ const replaceByLineRangeTool = defineTool({
     end_line: z.number().int().min(1),
     new_text: z.string(),
     expected_sha256: z.string().regex(/^[a-f0-9]{16}$/),
-    allow_stale_sha256: z.boolean().default(false),
   }),
   readOnly: false,
   async execute(context, input) {
@@ -568,27 +580,29 @@ const replaceByLineRangeTool = defineTool({
       workspaceRoot: context.workspaceRoot,
       cwd: context.cwd,
       input: input.path,
-      mustExist: true,
     });
     assertNotSensitivePath(path);
-    const current = textDecoder.decode(await readFile(path));
+    const current = await readTextFileBounded(path, input.path, true);
     const fingerprint = sha256(current);
-    let staleRecoveryWarning: string | undefined;
     if (input.expected_sha256 !== fingerprint) {
-      if (input.allow_stale_sha256) {
-        staleRecoveryWarning = `Warning: expected sha256 ${input.expected_sha256} is stale (found ${fingerprint}). Proceeding with replace_by_line_range despite stale hash.`;
-      } else {
-        throw new Error(`stale edit for ${input.path}: expected ${input.expected_sha256}, found ${fingerprint}`);
-      }
+      throw new Error(`stale edit for ${input.path}: expected ${input.expected_sha256}, found ${fingerprint}`);
     }
-    const lines = current.split("\n");
-    if (input.start_line < 1) throw new Error(`start_line must be >= 1`);
-    if (input.end_line > lines.length) throw new Error(`end_line ${input.end_line} exceeds file length ${lines.length}`);
-    if (input.start_line > input.end_line) throw new Error(`start_line ${input.start_line} > end_line ${input.end_line}`);
-    const replacement = input.new_text.split("\n");
-    const before = lines.slice(0, input.start_line - 1);
-    const after = lines.slice(input.end_line);
-    const next = [...before, ...replacement, ...after].join("\n");
+    const currentLines = splitLogicalLines(current);
+    if (input.end_line > currentLines.lines.length) {
+      throw new Error(`end_line ${input.end_line} exceeds file length ${currentLines.lines.length}`);
+    }
+    if (input.start_line > input.end_line) {
+      throw new Error(`start_line ${input.start_line} > end_line ${input.end_line}`);
+    }
+    const replacement = splitLogicalLines(input.new_text).lines;
+    const merged = [
+      ...currentLines.lines.slice(0, input.start_line - 1),
+      ...replacement,
+      ...currentLines.lines.slice(input.end_line),
+    ];
+    const next = merged.length === 0
+      ? ""
+      : `${merged.join("\n")}${currentLines.trailingNewline ? "\n" : ""}`;
     const rel = relative(context.workspaceRoot, path);
     if (next === current) {
       return {
@@ -598,10 +612,7 @@ const replaceByLineRangeTool = defineTool({
     }
     await context.checkpoint.capture(path);
     await writeAtomic(path, next);
-    const actualContent = textDecoder.decode(await readFile(path));
-    if (next !== actualContent) {
-      throw new Error(`post-edit verification failed for ${input.path}: file content does not match expected state after write. This may indicate a concurrent modification.`);
-    }
+    const actualContent = await verifyFileContent(path, next, input.path);
     const diff = createTextDiff(rel, current, next);
     context.state.modifiedFiles.add(rel);
     context.state.revision += 1;
@@ -613,7 +624,6 @@ const replaceByLineRangeTool = defineTool({
       deletions: diff?.deletions ?? 0,
       sha256: sha256(actualContent),
     };
-    if (staleRecoveryWarning) resultContent.warning = staleRecoveryWarning;
     const diagnostics = await maybeProbeDiagnostics(context, path);
     if (diagnostics) resultContent.diagnostics = diagnostics;
     return {
@@ -622,7 +632,6 @@ const replaceByLineRangeTool = defineTool({
     };
   },
 });
-
 const deleteFileTool = defineTool({
   name: "delete_file",
   description:
@@ -640,9 +649,7 @@ const deleteFileTool = defineTool({
       input: input.path,
     });
     assertNotSensitivePath(path);
-    const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink()) throw new Error(`${input.path} is not a regular file`);
-    const content = await readFile(path);
+    const content = await readFileBytesBounded(path, input.path, true);
     const fingerprint = sha256(content);
     if (input.expected_sha256 !== fingerprint) {
       throw new Error(`stale deletion for ${input.path}: expected ${input.expected_sha256}, found ${fingerprint}`);
@@ -650,7 +657,7 @@ const deleteFileTool = defineTool({
     await context.checkpoint.capture(path);
     await unlink(path);
     const rel = relative(context.workspaceRoot, path);
-    let diff;
+    let diff: TextDiff | undefined;
     try {
       diff = createTextDiff(rel, textDecoder.decode(content), "");
     } catch {
@@ -665,16 +672,110 @@ const deleteFileTool = defineTool({
     };
   },
 });
-
-async function readExistingText(path: string): Promise<{ exists: boolean; content: string }> {
+async function readExistingText(path: string, displayPath: string): Promise<{ exists: boolean; content: string }> {
   try {
-    return { exists: true, content: textDecoder.decode(await readFile(path)) };
+    await lstat(path);
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
-      return { exists: false, content: "" };
-    }
+    if (isFileSystemError(error, "ENOENT")) return { exists: false, content: "" };
     throw error;
   }
+  return { exists: true, content: await readTextFileBounded(path, displayPath, true) };
+}
+
+async function readTextFileBounded(path: string, displayPath: string, rejectLinked = false): Promise<string> {
+  const content = await readFileBytesBounded(path, displayPath, rejectLinked);
+  try {
+    return textDecoder.decode(content);
+  } catch (error) {
+    throw new Error(`${displayPath} is not valid UTF-8 text; binary files are not supported by text tools`, { cause: error });
+  }
+}
+
+async function readFileBytesBounded(path: string, displayPath: string, rejectLinked = false): Promise<Buffer> {
+  const before = await inspectRegularFile(path, displayPath, rejectLinked);
+  if (before.size > MAX_TEXT_FILE_BYTES) {
+    throw new Error(`${displayPath} exceeds the 2 MB text file limit`);
+  }
+  const handle = await open(path, "r");
+  try {
+    const opened = await handle.stat();
+    if (opened.dev !== before.dev || opened.ino !== before.ino) {
+      throw new Error(`${displayPath} changed while it was being opened; read it again before retrying`);
+    }
+    const content = Buffer.allocUnsafe(before.size);
+    let offset = 0;
+    while (offset < content.length) {
+      const { bytesRead } = await handle.read(content, offset, content.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    const after = await handle.stat();
+    if (offset !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs) {
+      throw new Error(`${displayPath} changed while it was being read; read it again before retrying`);
+    }
+    return content;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function inspectRegularFile(path: string, displayPath: string, rejectLinked: boolean): Promise<Stats> {
+  let info: Stats;
+  try {
+    info = await lstat(path);
+  } catch (error) {
+    if (isFileSystemError(error, "ENOENT")) throw new Error(`${displayPath} does not exist`, { cause: error });
+    throw error;
+  }
+  if (info.isSymbolicLink()) {
+    throw new Error(`${displayPath} is a symbolic link; file mutations do not replace links`);
+  }
+  if (!info.isFile()) throw new Error(`${displayPath} is not a regular file`);
+  if (rejectLinked && info.nlink > 1) {
+    throw new Error(`${displayPath} has ${info.nlink} hard links; replacement is refused`);
+  }
+  return info;
+}
+
+async function verifyFileContent(path: string, expected: string, displayPath: string): Promise<string> {
+  const before = await inspectRegularFile(path, displayPath, true);
+  const expectedBytes = Buffer.byteLength(expected, "utf8");
+  if (before.size !== expectedBytes) {
+    throw new Error(`post-edit verification failed for ${displayPath}: expected ${expectedBytes} bytes, found ${before.size}`);
+  }
+  const handle = await open(path, "r");
+  try {
+    const opened = await handle.stat();
+    if (opened.dev !== before.dev || opened.ino !== before.ino) {
+      throw new Error(`post-edit verification failed for ${displayPath}: file changed before verification`);
+    }
+    const digest = createHash("sha256");
+    const chunk = Buffer.allocUnsafe(Math.max(1, Math.min(64 * 1024, expectedBytes)));
+    let offset = 0;
+    while (offset < expectedBytes) {
+      const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, expectedBytes - offset), offset);
+      if (bytesRead === 0) break;
+      digest.update(chunk.subarray(0, bytesRead));
+      offset += bytesRead;
+    }
+    const after = await handle.stat();
+    const expectedDigest = createHash("sha256").update(expected, "utf8").digest("hex");
+    if (
+      offset !== expectedBytes ||
+      after.size !== before.size ||
+      after.mtimeMs !== before.mtimeMs ||
+      digest.digest("hex") !== expectedDigest
+    ) {
+      throw new Error(`post-edit verification failed for ${displayPath}: file content does not match the requested write`);
+    }
+    return expected;
+  } finally {
+    await handle.close();
+  }
+}
+
+function isFileSystemError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
 }
 
 function applyReplacements(
@@ -719,23 +820,22 @@ interface WhitespaceNormalizedEdit {
 }
 
 function applyWhitespaceNormalizedEdit(content: string, oldText: string, newText: string): WhitespaceNormalizedEdit {
-  const pattern = oldText.split("\n").map((line) => line.trimEnd());
-  if (pattern.length > 1 && pattern[pattern.length - 1] === "") pattern.pop();
+  const pattern = splitLogicalLines(oldText).lines.map((line) => line.trimEnd());
   const patternIndent = commonLeadingIndent(pattern);
   const dedented = pattern.map((line) => line === "" ? "" : line.slice(patternIndent.length));
   const anchorIndex = dedented.findIndex((line) => line !== "");
   if (anchorIndex === -1) return { count: 0, next: undefined };
-  const lines = content.split("\n");
+  const source = splitLogicalLines(content);
   const matches: Array<{ start: number; base: string }> = [];
-  outer: for (let start = 0; start + dedented.length <= lines.length; start += 1) {
-    const anchor = (lines[start + anchorIndex] ?? "").trimEnd();
+  outer: for (let start = 0; start + dedented.length <= source.lines.length; start += 1) {
+    const anchor = (source.lines[start + anchorIndex] ?? "").trimEnd();
     const anchorPattern = dedented[anchorIndex] ?? "";
     if (!anchor.endsWith(anchorPattern)) continue;
     const base = anchor.slice(0, anchor.length - anchorPattern.length);
     if (base.trim() !== "") continue;
     for (let index = 0; index < dedented.length; index += 1) {
       const expected = dedented[index] ?? "";
-      const actual = (lines[start + index] ?? "").trimEnd();
+      const actual = (source.lines[start + index] ?? "").trimEnd();
       if (expected === "" ? actual !== "" : actual !== base + expected) continue outer;
     }
     matches.push({ start, base });
@@ -743,7 +843,12 @@ function applyWhitespaceNormalizedEdit(content: string, oldText: string, newText
   const single = matches.length === 1 ? matches[0] : undefined;
   if (!single) return { count: matches.length, next: undefined };
   const replacement = reindentLines(newText, single.base);
-  const next = [...lines.slice(0, single.start), ...replacement, ...lines.slice(single.start + dedented.length)].join("\n");
+  const merged = [
+    ...source.lines.slice(0, single.start),
+    ...replacement,
+    ...source.lines.slice(single.start + dedented.length),
+  ];
+  const next = merged.length === 0 ? "" : `${merged.join("\n")}${source.trailingNewline ? "\n" : ""}`;
   return { count: 1, next };
 }
 
@@ -764,9 +869,8 @@ function commonLeadingIndent(lines: string[]): string {
 }
 
 function reindentLines(text: string, base: string): string[] {
-  if (text === "") return [];
-  const lines = text.split("\n");
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  const lines = splitLogicalLines(text).lines;
+  if (lines.length === 0) return [];
   const trimmed = lines.map((line) => line.trimEnd());
   const indent = commonLeadingIndent(trimmed);
   return lines.map((line) => line.trimEnd() === "" ? "" : base + line.slice(indent.length));
@@ -778,20 +882,66 @@ async function maybeProbeDiagnostics(context: ToolContext, path: string): Promis
 }
 
 export async function writeAtomic(path: string, content: string): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  let mode: number | undefined;
+  const parent = dirname(path);
+  await mkdir(parent, { recursive: true });
+  let original: Stats | undefined;
   try {
-    mode = (await stat(path)).mode;
-  } catch {
-    mode = undefined;
+    original = await lstat(path);
+    assertSafeReplacementTarget(path, original);
+  } catch (error) {
+    if (!isFileSystemError(error, "ENOENT")) throw error;
   }
-  const temporary = `${path}.${process.pid}.kulmi-tmp`;
+
+  const temporary = `${path}.${process.pid}.${randomUUID()}.kulmi-tmp`;
   try {
-    await writeFile(temporary, content, "utf8");
-    if (mode !== undefined) await chmod(temporary, mode);
+    const mode = original ? original.mode & 0o7777 : 0o666;
+    const handle = await open(temporary, "wx", mode);
+    try {
+      await handle.writeFile(content, "utf8");
+      if (original) await handle.chmod(mode);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+
+    let current: Stats | undefined;
+    try {
+      current = await lstat(path);
+    } catch (error) {
+      if (!isFileSystemError(error, "ENOENT")) throw error;
+    }
+    if (original) {
+      if (!current) throw new Error(`atomic write target disappeared before replacement: ${path}`);
+      assertSafeReplacementTarget(path, current);
+      if (current.dev !== original.dev || current.ino !== original.ino) {
+        throw new Error(`atomic write target changed before replacement: ${path}`);
+      }
+    } else if (current) {
+      throw new Error(`atomic write target appeared before replacement: ${path}`);
+    }
+
     await rename(temporary, path);
+    await syncDirectory(parent);
   } finally {
     await unlink(temporary).catch(() => undefined);
+  }
+}
+
+function assertSafeReplacementTarget(path: string, info: Stats): void {
+  if (info.isSymbolicLink()) throw new Error(`refusing to replace symbolic link: ${path}`);
+  if (!info.isFile()) throw new Error(`refusing to replace non-file path: ${path}`);
+  if (info.nlink > 1) throw new Error(`refusing to replace hard-linked file with ${info.nlink} links: ${path}`);
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(path, "r");
+    await handle.sync();
+  } catch {
+    return;
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 

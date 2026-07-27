@@ -118,7 +118,10 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
         },
         workers: controller.workers(),
       };
-      events.on((envelope) => notify("event", { sessionId, envelope }).then(() => undefined));
+      events.on(
+        (envelope) => notify("event", { sessionId, envelope }).then(() => undefined),
+        { critical: true },
+      );
       sessions.set(sessionId, { controller, running: undefined, pendingPermissions });
       unownedController = undefined;
       return result;
@@ -292,29 +295,44 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
   };
 
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
-  for await (const line of input) {
-    if (!line.trim()) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      await send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
-      continue;
+  const interrupt = () => {
+    process.exitCode = 130;
+    input.close();
+  };
+  const terminate = () => {
+    process.exitCode = 143;
+    input.close();
+  };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
+  try {
+    for await (const line of input) {
+      if (!line.trim()) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        await send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } });
+        continue;
+      }
+      const request = requestSchema.safeParse(parsed);
+      if (!request.success) {
+        await send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request" } });
+        continue;
+      }
+      handle(request.data).catch((error: unknown) => {
+        process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+      });
     }
-    const request = requestSchema.safeParse(parsed);
-    if (!request.success) {
-      await send({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request" } });
-      continue;
-    }
-    handle(request.data).catch((error: unknown) => {
-      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    });
+  } finally {
+    process.removeListener("SIGINT", interrupt);
+    process.removeListener("SIGTERM", terminate);
+    await Promise.all([...sessions.values()].map(async (managed) => {
+      managed.running?.abort(new Error("RPC client disconnected"));
+      await managed.controller.close();
+    }));
+    await outputQueue;
   }
-  await Promise.all([...sessions.values()].map(async (managed) => {
-    managed.running?.abort(new Error("RPC client disconnected"));
-    await managed.controller.close();
-  }));
-  await outputQueue;
 }
 
 class RpcError extends Error {

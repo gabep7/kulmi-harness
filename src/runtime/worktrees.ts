@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { copyFile, lstat, mkdir, unlink } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, copyFile, lstat, mkdir, readdir, rename, rm, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { CheckpointStore } from "./checkpoints.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
@@ -24,6 +24,17 @@ interface WorktreeChange {
   deleted: boolean;
 }
 
+interface IntegrationOperation {
+  path: string;
+  source?: string;
+  sourceMode?: number;
+  destination: string;
+  deleted: boolean;
+  staged?: string;
+  backup?: string;
+  installed: boolean;
+}
+
 export class WorktreeManager {
   readonly #root: string;
   readonly #worktreesRoot: string;
@@ -36,6 +47,44 @@ export class WorktreeManager {
     this.#worktreesRoot = join(data, "kulmi", "worktrees", repositoryId);
   }
 
+  async recover(retained: Iterable<WorktreeInfo> = []): Promise<void> {
+    return this.#exclusive(async () => {
+      await mkdir(this.#worktreesRoot, { recursive: true, mode: 0o700 });
+      const retainedWorktrees = [...retained];
+      const retainedPaths = new Set(retainedWorktrees.map((info) => resolve(info.path)));
+      const retainedBranches = new Set(retainedWorktrees.map((info) => info.branch));
+      await this.#git(this.#root, ["worktree", "prune"]);
+
+      const listing = parseWorktreeListing(
+        await this.#git(this.#root, ["worktree", "list", "--porcelain", "-z"]),
+      );
+      for (const entry of listing) {
+        const path = resolve(entry.path);
+        if (!isManagedWorktreePath(this.#worktreesRoot, path) || retainedPaths.has(path)) continue;
+        await this.#git(this.#root, ["worktree", "remove", "--force", path]);
+      }
+
+      for (const entry of await readdir(this.#worktreesRoot, { withFileTypes: true })) {
+        const path = resolve(this.#worktreesRoot, entry.name);
+        if (retainedPaths.has(path)) continue;
+        if (entry.isDirectory() || entry.name.startsWith(".index-") || entry.name.startsWith(".integrate-")) {
+          await rm(path, { recursive: true, force: true });
+        }
+      }
+
+      const branches = (await this.#git(this.#root, [
+        "for-each-ref",
+        "--format=%(refname:short)",
+        "refs/heads/kulmi/",
+      ])).split("\n").filter(Boolean);
+      for (const branch of branches) {
+        if (retainedBranches.has(branch)) continue;
+        await this.#git(this.#root, ["branch", "-D", branch]);
+      }
+      await this.#git(this.#root, ["worktree", "prune"]);
+    });
+  }
+
   async create(id: string): Promise<WorktreeInfo> {
     return this.#exclusive(async () => {
       assertSafeId(id);
@@ -44,7 +93,13 @@ export class WorktreeManager {
       const baseCommit = await this.#snapshotCommit(id, parentHead);
       const path = join(this.#worktreesRoot, id);
       const branch = `kulmi/${id}`;
-      await this.#git(this.#root, ["worktree", "add", "-b", branch, path, baseCommit]);
+      try {
+        await this.#git(this.#root, ["worktree", "add", "-b", branch, path, baseCommit]);
+      } catch (error) {
+        await this.#git(this.#root, ["worktree", "remove", "--force", path]).catch(() => undefined);
+        await this.#git(this.#root, ["branch", "-D", branch]).catch(() => undefined);
+        throw error;
+      }
       return {
         id,
         path,
@@ -63,11 +118,13 @@ export class WorktreeManager {
         throw new Error(`parent HEAD changed while ${info.id} was running; worktree kept at ${info.path}`);
       }
       const changed = await this.#changes(info);
-      const operations: Array<{ source?: string; destination: string; deleted: boolean }> = [];
+      const token = `.kulmi-integrate-${info.id}-${randomUUID()}`;
+      const operations: IntegrationOperation[] = [];
       for (const change of changed) {
         const { path } = change;
         if (isSensitiveSnapshotPath(path)) throw new Error(`refusing to integrate sensitive path ${path}`);
         const source = resolve(info.path, path);
+        let sourceMode: number | undefined;
         if (!change.deleted) {
           await resolveWorkspacePath({
             workspaceRoot: info.path,
@@ -75,37 +132,89 @@ export class WorktreeManager {
             input: path,
             mustExist: true,
           });
+          const sourceInfo = await lstat(source);
+          if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) {
+            throw new Error(`worktree integration only supports regular files: ${path}`);
+          }
+          sourceMode = sourceInfo.mode & 0o7777;
         }
         const destination = await resolveWorkspacePath({
           workspaceRoot: this.#root,
           cwd: this.#root,
           input: path,
         });
-        if (!change.deleted) {
-          const sourceInfo = await lstat(source);
-          if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) {
-            throw new Error(`worktree integration only supports regular files: ${path}`);
-          }
-        }
         await this.#assertPathUnchanged(info, path, destination, change.deleted ? undefined : source);
         await checkpoint.capture(destination);
         operations.push({
-          ...(change.deleted ? {} : { source }),
+          path,
+          ...(change.deleted ? {} : { source, ...(sourceMode === undefined ? {} : { sourceMode }) }),
           destination,
           deleted: change.deleted,
+          installed: false,
         });
       }
-      for (const operation of operations) {
-        if (operation.deleted) {
-          await unlink(operation.destination).catch((error: unknown) => {
-            if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
-          });
-        } else {
+
+      try {
+        for (const [index, operation] of operations.entries()) {
+          if (operation.deleted) continue;
           await mkdir(dirname(operation.destination), { recursive: true });
-          await copyFile(operation.source!, operation.destination);
+          operation.staged = `${operation.destination}${token}-${index}.new`;
+          await copyFile(operation.source!, operation.staged);
+          await chmod(operation.staged, operation.sourceMode!);
+        }
+
+        const touched: IntegrationOperation[] = [];
+        try {
+          for (const [index, operation] of operations.entries()) {
+            touched.push(operation);
+            try {
+              const destinationInfo = await lstat(operation.destination);
+              if (!destinationInfo.isFile() || destinationInfo.isSymbolicLink()) {
+                throw new Error(`worktree integration only supports regular files: ${operation.path}`);
+              }
+              operation.backup = `${operation.destination}${token}-${index}.old`;
+              await rename(operation.destination, operation.backup);
+            } catch (error) {
+              if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+            }
+            if (!operation.deleted) {
+              await rename(operation.staged!, operation.destination);
+              delete operation.staged;
+              operation.installed = true;
+            }
+          }
+        } catch (error) {
+          const rollbackErrors: string[] = [];
+          for (const operation of touched.reverse()) {
+            try {
+              if (operation.installed) {
+                await unlink(operation.destination).catch((unlinkError: unknown) => {
+                  if (!(unlinkError && typeof unlinkError === "object" && "code" in unlinkError && unlinkError.code === "ENOENT")) {
+                    throw unlinkError;
+                  }
+                });
+                operation.installed = false;
+              }
+              if (operation.backup) {
+                await rename(operation.backup, operation.destination);
+                delete operation.backup;
+              }
+            } catch (rollbackError) {
+              rollbackErrors.push(`${operation.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+            }
+          }
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(rollbackErrors.length > 0
+            ? `worktree integration failed: ${detail}; rollback failed for ${rollbackErrors.join(", ")}`
+            : `worktree integration failed and was rolled back: ${detail}`);
+        }
+        return changed.map((change) => change.path);
+      } finally {
+        for (const operation of operations) {
+          if (operation.staged) await unlink(operation.staged).catch(() => undefined);
+          if (operation.backup) await unlink(operation.backup).catch(() => undefined);
         }
       }
-      return changed.map((change) => change.path);
     });
   }
 
@@ -234,6 +343,26 @@ export class WorktreeManager {
     this.#operationQueue = result.then(() => undefined, () => undefined);
     return result;
   }
+}
+
+function parseWorktreeListing(output: string): Array<{ path: string; branch?: string }> {
+  const entries: Array<{ path: string; branch?: string }> = [];
+  let current: { path: string; branch?: string } | undefined;
+  for (const field of output.split("\0")) {
+    if (field.startsWith("worktree ")) {
+      if (current) entries.push(current);
+      current = { path: field.slice("worktree ".length) };
+    } else if (current && field.startsWith("branch refs/heads/")) {
+      current.branch = field.slice("branch refs/heads/".length);
+    }
+  }
+  if (current) entries.push(current);
+  return entries;
+}
+
+function isManagedWorktreePath(root: string, path: string): boolean {
+  const rel = relative(resolve(root), resolve(path));
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 function assertSafeId(id: string): void {

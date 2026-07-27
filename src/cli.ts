@@ -13,7 +13,7 @@ import { VERSION } from "./core/version.js";
 import type { AutonomyLevel, OutputFormat } from "./core/types.js";
 import { SessionController } from "./runtime/controller.js";
 import { forkSession, listSessions, SessionStore } from "./runtime/session-store.js";
-import { attachRenderer } from "./cli/render.js";
+import { attachRenderer, headlessExitCode, isBrokenPipeError, parseSessionLimit } from "./cli/render.js";
 import { runRpcServer } from "./rpc/server.js";
 import type { PermissionRequest } from "./tools/types.js";
 import { runTui } from "./tui/index.js";
@@ -23,6 +23,13 @@ import { sandboxAvailability } from "./runtime/process.js";
 import { resolveToolBinary } from "./runtime/binaries.js";
 
 type ApprovalMode = "never" | "on-request";
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (error: NodeJS.ErrnoException) => {
+    if (isBrokenPipeError(error)) process.exit(0);
+    throw error;
+  });
+}
+
 
 const program = new Command();
 program
@@ -80,7 +87,7 @@ program
   .description("run one headless task")
   .argument("[prompt...]", "task prompt")
   .option("-m, --model <name>", "model profile")
-  .option("--auto <level>", "autonomy: read, low, medium, high, trusted", "read")
+  .option("--auto <level>", "autonomy: read, low, medium, high, trusted", "medium")
   .option("-o, --output-format <format>", "text, json, or stream-json", "text")
   .option("-s, --session-id <id>", "resume a session")
   .option("--web-search <mode>", "web search: off or free")
@@ -124,7 +131,7 @@ program
   .description("list recent sessions")
   .option("-n, --limit <count>", "number of sessions", "20")
   .action(async (options: { limit: string }) => {
-    const sessions = await listSessions(Number.parseInt(options.limit, 10));
+    const sessions = await listSessions(parseSessionLimit(options.limit));
     for (const session of sessions) {
       process.stdout.write(
         `${session.id}\t${session.status}\t${session.model}\t${session.updatedAt}\t${session.prompt ?? ""}\n`,
@@ -137,7 +144,7 @@ program
   .description("show cumulative token usage")
   .option("-n, --limit <count>", "number of sessions", "100")
   .action(async (options: { limit: string }) => {
-    const sessions = await listSessions(Number.parseInt(options.limit, 10));
+    const sessions = await listSessions(parseSessionLimit(options.limit));
     const totals = { promptTokens: 0, completionTokens: 0, totalTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0 };
     const perModel: Record<string, number> = {};
     let count = 0;
@@ -313,10 +320,20 @@ async function execute(options: {
     ...(approvalReadline ? { requestPermission: (request: PermissionRequest) => askPermission(approvalReadline, request) } : {}),
   });
   const abort = new AbortController();
-  const interrupt = () => abort.abort(new Error("interrupted"));
+  let signalExitCode: number | undefined;
+  const interrupt = () => {
+    signalExitCode = 130;
+    abort.abort(new Error("interrupted"));
+  };
+  const terminate = () => {
+    signalExitCode = 143;
+    abort.abort(new Error("terminated"));
+  };
   process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
   try {
     const result = await controller.run(options.prompt, abort.signal);
+    process.exitCode = headlessExitCode(result.status);
     if (options.format === "json") {
       process.stdout.write(`${JSON.stringify({
         type: "result",
@@ -325,8 +342,12 @@ async function execute(options: {
         result: result.text,
       })}\n`);
     }
+  } catch (error) {
+    if (signalExitCode === undefined) throw error;
+    process.exitCode = signalExitCode;
   } finally {
     process.removeListener("SIGINT", interrupt);
+    process.removeListener("SIGTERM", terminate);
     detach();
     approvalReadline?.close();
     await controller.close();

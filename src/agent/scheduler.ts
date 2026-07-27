@@ -25,6 +25,8 @@ export interface WorkerJob {
     path: string;
     branch: string;
     baseCommit: string;
+    parentHead?: string;
+    parentUnborn?: boolean;
   };
   steering?: Array<{ message: string; sentAt: string }>;
 }
@@ -79,6 +81,7 @@ export class SubagentScheduler implements SubagentApi {
     parentAgentId: string;
     signal: AbortSignal;
   }): Promise<string> {
+    if (input.signal.aborted) throw input.signal.reason ?? new Error("worker spawn cancelled");
     const id = createId("worker");
     const job: WorkerJob = {
       id,
@@ -90,14 +93,23 @@ export class SubagentScheduler implements SubagentApi {
       createdAt: new Date().toISOString(),
     };
     const controller = new AbortController();
-    const relayAbort = () => controller.abort(input.signal.reason);
-    input.signal.addEventListener("abort", relayAbort, { once: true });
+    const relayAbort = (): void => controller.abort(input.signal.reason);
+    if (!input.background) input.signal.addEventListener("abort", relayAbort, { once: true });
     this.#jobs.set(id, job);
     this.#controllers.set(id, controller);
-    await this.persist();
+    try {
+      await this.persist();
+    } catch (error) {
+      this.#jobs.delete(id);
+      this.#controllers.delete(id);
+      if (!input.background) input.signal.removeEventListener("abort", relayAbort);
+      throw error;
+    }
 
     const promise = this.#execute(job, controller.signal).finally(() => {
-      input.signal.removeEventListener("abort", relayAbort);
+      if (!input.background) input.signal.removeEventListener("abort", relayAbort);
+      this.#controllers.delete(id);
+      this.#promises.delete(id);
     });
     this.#promises.set(id, promise);
 
@@ -190,8 +202,8 @@ export class SubagentScheduler implements SubagentApi {
     const job = this.#jobs.get(jobId);
     if (!job?.worktree) return;
     const worktree = job.worktree;
-    delete job.worktree;
     await dispose(job, worktree);
+    delete job.worktree;
     await this.persist();
   }
 
@@ -204,9 +216,9 @@ export class SubagentScheduler implements SubagentApi {
       if (job.status === "queued" || job.status === "running") continue;
       if (job.mode === "implement" && job.status === "completed" && !job.integratedAt) continue;
       const worktree = job.worktree;
+      await dispose(job, worktree);
       delete job.worktree;
       changed = true;
-      await dispose(job, worktree);
     }
     if (changed) await this.persist();
   }
