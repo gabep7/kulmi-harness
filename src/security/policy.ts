@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
 import type { AutonomyLevel } from "../core/types.js";
+import { assertNotSensitivePath } from "./paths.js";
 
 export type CommandRisk = "read" | "low" | "medium" | "high" | "blocked";
 
@@ -14,6 +15,7 @@ export interface CommandDecision {
 interface ParsedCommand {
   argv: string[];
   writesRedirect: boolean;
+  redirectPaths: string[];
 }
 
 const rank: Record<AutonomyLevel, number> = { read: 0, low: 1, medium: 2, high: 3, trusted: 4 };
@@ -28,12 +30,34 @@ const blockedPrograms = new Set([
   "awk", "perl", "ruby", "npx", "cd", "pushd", "popd", "ln",
   "gh", "aws", "gcloud", "az", "twine",
   "builtin", "command", "exec", "nohup", "nice", "timeout", "time",
+  "watch", "parallel", "setsid", "chroot", "nsenter", "unshare", "su", "runuser", "doas", "pkexec",
+  "stdbuf", "script", "taskset", "strace", "dtrace", "ionice",
   "case", "if", "then", "else", "while", "until", "for", "do", "done",
   ".", "busybox",
 ]);
+const shellInterpreters: Record<string, true> = {
+  ash: true,
+  bash: true,
+  csh: true,
+  dash: true,
+  elvish: true,
+  fish: true,
+  ksh: true,
+  ksh93: true,
+  mksh: true,
+  powershell: true,
+  pwsh: true,
+  sh: true,
+  tcsh: true,
+  yash: true,
+  zsh: true,
+};
+const allowedShellInterpreters: Record<string, true> = { bash: true, sh: true, zsh: true };
 const trustedStillBlockedPrograms = new Set([
   "sudo", "eval", "source", "rm", "rmdir", "mkfs", "fdisk", "shutdown", "reboot", "halt",
   "gh", "aws", "gcloud", "az", "twine", "builtin", "command", "exec", ".", "busybox",
+  "nohup", "nice", "timeout", "time", "watch", "parallel", "setsid", "chroot", "nsenter", "unshare",
+  "su", "runuser", "doas", "pkexec", "stdbuf", "script", "taskset", "strace", "dtrace", "ionice",
 ]);
 
 export function decideCommand(
@@ -46,7 +70,6 @@ export function decideCommand(
   if (/[`]|\$\(/.test(trimmed)) return blocked("shell command substitution is blocked");
   if (/\$(?:\{HOME\}|HOME)|(?:^|\s)~(?:\/|\s|$)/.test(trimmed)) return blocked("home-directory shell paths are blocked");
   if (/(?:^|[\s/])\.\.(?:\/|$)/.test(trimmed)) return blocked("parent-directory shell paths are blocked");
-  if (sensitivePathInCommand(trimmed)) return blocked("sensitive file access requires an approval flow");
 
   for (const path of absoluteShellPaths(trimmed)) {
     if (path === "/dev/null") continue;
@@ -65,6 +88,9 @@ export function decideCommand(
     return blocked(`cannot safely parse shell command: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (commands.length === 0) return blocked("empty command");
+  if (commands.some((parsed) => [...parsed.argv, ...parsed.redirectPaths].some(isSensitiveToken))) {
+    return blocked("sensitive file access requires an approval flow");
+  }
 
   let highest = 0;
   let verification = false;
@@ -155,24 +181,30 @@ function collectLineCommands(line: string, commands: ParsedCommand[]): void {
   const entries = collapseAmpersandRedirects(parse(line, (key) => `$${key}`));
   let argv: string[] = [];
   let writesRedirect = false;
+  let redirectPaths: string[] = [];
   let nextIsRedirectPath = false;
   let previousWasInput = false;
 
   const flush = () => {
     // A redirect with no program of its own still writes its target, so it must
-    // not be silently dropped. Attribute it to the preceding command when there
-    // is one, otherwise keep an empty argv that analyzeArgv rejects outright.
+    // not be silently dropped. Attribute it to the preceding command when
+    // there is one, otherwise keep an empty argv that analyzeArgv rejects.
     if (argv.length === 0) {
       if (writesRedirect) {
         const previous = commands.at(-1);
-        if (previous) previous.writesRedirect = true;
-        else commands.push({ argv, writesRedirect });
+        if (previous) {
+          previous.writesRedirect = true;
+          previous.redirectPaths.push(...redirectPaths);
+        } else {
+          commands.push({ argv, writesRedirect, redirectPaths });
+        }
       }
     } else {
-      commands.push({ argv, writesRedirect });
+      commands.push({ argv, writesRedirect, redirectPaths });
     }
     argv = [];
     writesRedirect = false;
+    redirectPaths = [];
     nextIsRedirectPath = false;
   };
 
@@ -181,6 +213,7 @@ function collectLineCommands(line: string, commands: ParsedCommand[]): void {
     previousWasInput = false;
     if (typeof entry === "string") {
       if (nextIsRedirectPath) {
+        redirectPaths.push(entry);
         nextIsRedirectPath = false;
         continue;
       }
@@ -247,14 +280,26 @@ function analyzeArgv(input: string[], trusted: boolean): {
   blocked?: string;
   verification: boolean;
 } {
-  const argv = unwrapEnvironment(input);
+  const unwrapped = unwrapEnvironment(input);
+  if (unwrapped.blocked) return { risk: "read", blocked: unwrapped.blocked, verification: false };
+  const argv = unwrapped.argv;
   const program = basename(argv[0] ?? "");
-  if (!program) return { risk: "read", blocked: "missing program", verification: false };
+  if (!program || program.startsWith("-")) return { risk: "read", blocked: "missing program", verification: false };
   if (blockedPrograms.has(program) && (!trusted || trustedStillBlockedPrograms.has(program))) {
     return { risk: "read", blocked: `${program} is blocked without an approval flow`, verification: false };
   }
-  if (["bash", "sh", "zsh"].includes(program) && argv.slice(1).some((arg) => arg === "-c" || arg === "--command")) {
-    return { risk: "read", blocked: "nested shells are blocked", verification: false };
+  if (shellInterpreters[program]) {
+    if (!allowedShellInterpreters[program]) {
+      return { risk: "read", blocked: `${program} is not an allowed shell interpreter`, verification: false };
+    }
+    if (argv.slice(1).some((arg) => arg === "--command" || arg.startsWith("--command=") || /^-[^-]*c/.test(arg))) {
+      return { risk: "read", blocked: "nested shells are blocked", verification: false };
+    }
+    const script = shellScriptPath(argv.slice(1));
+    if (!script) {
+      return { risk: "read", blocked: "direct shell execution is blocked; invoke a workspace script", verification: false };
+    }
+    return { risk: "medium", verification: isValidator([program, script]) };
   }
   if (["deno", "bun"].includes(program)) {
     return { risk: "read", blocked: `direct ${program} execution is blocked; use a declared project script`, verification: false };
@@ -372,15 +417,54 @@ function analyzeGit(argv: string[], trusted: boolean): {
   };
 }
 
-function unwrapEnvironment(input: string[]): string[] {
-  let argv = input.slice();
-  while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0] ?? "")) argv.shift();
-  if (basename(argv[0] ?? "") !== "env") return argv;
-  argv.shift();
-  while (argv.length > 0 && ((argv[0] ?? "").startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0] ?? ""))) {
-    argv.shift();
+interface UnwrappedEnvironment {
+  argv: string[];
+  blocked?: string;
+}
+
+function unwrapEnvironment(input: string[]): UnwrappedEnvironment {
+  let index = 0;
+  while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(input[index] ?? "")) index += 1;
+  if (basename(input[index] ?? "") !== "env") return { argv: input.slice(index) };
+  index += 1;
+  while (index < input.length) {
+    const arg = input[index] ?? "";
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg === "--") {
+      index += 1;
+      break;
+    }
+    if (arg === "-S" || arg === "--split-string" || arg.startsWith("--split-string=") || /^-[^-]*S/.test(arg)) {
+      return { argv: [], blocked: "env -S/--split-string is blocked" };
+    }
+    if (["-i", "--ignore-environment", "-0", "--null"].includes(arg)) {
+      index += 1;
+      continue;
+    }
+    if (["-u", "--unset", "-C", "--chdir", "-P", "--path"].includes(arg)) {
+      const value = input[index + 1] ?? "";
+      if (!value || value.startsWith("-")) {
+        return { argv: [], blocked: `${arg} requires an option value` };
+      }
+      index += 2;
+      continue;
+    }
+    if (/^--(?:unset|chdir|path)=/.test(arg)) {
+      if (arg.endsWith("=")) return { argv: [], blocked: `${arg.slice(0, -1)} requires an option value` };
+      index += 1;
+      continue;
+    }
+    if (/^-u.+/.test(arg) || /^-[CP].+/.test(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) return { argv: [], blocked: `env option ${arg} is blocked` };
+    break;
   }
-  return argv;
+  return { argv: input.slice(index) };
 }
 
 function isPackageMutation(argv: string[]): boolean {
@@ -426,11 +510,36 @@ function basename(path: string): string {
   return path.split("/").at(-1) ?? path;
 }
 
-function sensitivePathInCommand(command: string): boolean {
-  return (
-    /(?:^|[\s/])\.env(?!\.(?:example|sample|template))(?:\.[^\s/]*)?(?:$|[\s])/i.test(command) ||
-    /(?:^|[\s/])(?:id_rsa|id_ed25519|\.npmrc|\.pypirc|credentials\.json|[^\s/]+\.(?:pem|key))(?:$|[\s])/i.test(command)
-  );
+function shellScriptPath(args: string[]): string | undefined {
+  let consumeNext = false;
+  for (const arg of args) {
+    if (consumeNext) {
+      consumeNext = false;
+      continue;
+    }
+    if (["-o", "+o", "-O", "+O", "--rcfile", "--init-file"].includes(arg)) {
+      consumeNext = true;
+      continue;
+    }
+    if (arg === "--") continue;
+    if (!arg.startsWith("-") && !arg.startsWith("+")) return arg;
+  }
+  return undefined;
+}
+
+function isSensitiveToken(token: string): boolean {
+  const candidates = new Set<string>([token]);
+  for (const part of token.split("=")) candidates.add(part);
+  for (const candidate of candidates) {
+    const value = candidate.replace(/^[([{]+/, "").replace(/[),;]+$/, "");
+    if (!value || value.startsWith("-")) continue;
+    try {
+      assertNotSensitivePath(value);
+    } catch {
+      return true;
+    }
+  }
+  return false;
 }
 
 function absoluteShellPaths(command: string): string[] {

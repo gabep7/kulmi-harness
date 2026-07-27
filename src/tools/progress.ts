@@ -118,7 +118,6 @@ const completeTaskTool = defineTool({
           candidate.command === input.verification_command &&
           candidate.exitCode === 0 &&
           !candidate.timedOut &&
-          !candidate.truncated &&
           candidate.revision === context.state.revision
         );
         if (!verification) {
@@ -169,7 +168,6 @@ const reportWorkerTool = defineTool({
         candidate.command === input.verification_command &&
         candidate.exitCode === 0 &&
         !candidate.timedOut &&
-        !candidate.truncated &&
         candidate.revision === context.state.revision
       );
       if (!verification) {

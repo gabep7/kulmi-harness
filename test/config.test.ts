@@ -99,6 +99,7 @@ describe("configuration", () => {
       thinking: true,
       contextWindow: 200_000,
       maxOutputTokens: 64_000,
+      streamUsage: true,
     });
   });
 
@@ -126,11 +127,8 @@ describe("configuration", () => {
     const changed = applyFileConfig(config(payg()), {
       defaultModel: "api",
       defaultAutonomy: "high",
-      api_keys: { legacy: "ignored" },
-      apiKeys: { newerLegacy: "ignored" },
       models: {
         api: {
-          provider: "openai",
           model: "custom-model",
           baseUrl: "https://api.example.com/v1",
           apiKeyEnv: "EXAMPLE_API_KEY",
@@ -146,14 +144,26 @@ describe("configuration", () => {
     expect(changed).toMatchObject({ defaultModel: "api", defaultAutonomy: "high" });
     expect(changed.models.api).toEqual({
       model: "custom-model",
-      provider: "openai",
       baseUrl: "https://api.example.com/v1",
       apiKeyEnv: "EXAMPLE_API_KEY",
       thinking: false,
       reasoningEffort: "high",
       contextWindow: 262_144,
       maxOutputTokens: 65_536,
+      streamUsage: true,
     });
+  });
+
+  it("rejects dead api_keys and provider keys", () => {
+    expect(() => applyFileConfig(config(payg()), {
+      api_keys: { legacy: "ignored" },
+    })).toThrow("api_keys");
+    expect(() => applyFileConfig(config(payg()), {
+      apiKeys: { newerLegacy: "ignored" },
+    })).toThrow("apiKeys");
+    expect(() => applyFileConfig(config(payg()), {
+      models: { api: { model: "x", baseUrl: "https://e.test", apiKeyEnv: "K", provider: "openai" } },
+    })).toThrow("provider");
   });
 
   describe("project config privilege split", () => {

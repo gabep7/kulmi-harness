@@ -32,7 +32,11 @@ export function discoverSkills(workspaceRoot: string): SkillDefinition[] {
       } catch {
         skill = undefined;
       }
-      if (skill) skills.set(skill.name, skill);
+      if (skill) {
+        const previous = skills.get(skill.name);
+        if (previous) process.stderr.write(`warning: skill ${skill.name} from ${skill.path} overrides ${previous.path}\n`);
+        skills.set(skill.name, skill);
+      }
     }
   }
   return [...skills.values()].sort((a, b) => a.name.localeCompare(b.name));

@@ -17,6 +17,7 @@ export interface PendingApproval {
 export interface TuiSnapshot {
   // Finalized history is append-only so Ink <Static> can render each row once
   // into the terminal's native scrollback without reshuffling a capped window.
+  transcriptVersion: number;
   transcript: FeedItem[];
   // In-flight rows (running tools and workers) shown in the live bottom region
   // until they finalize and move into the transcript.
@@ -25,6 +26,7 @@ export interface TuiSnapshot {
   streaming: string;
   plan: PlanStep[];
   usage: TokenUsage;
+  contextTokens: number;
   status: AgentStatus;
   pendingApproval: PendingApproval | undefined;
   expandedThinking: boolean;
@@ -44,6 +46,10 @@ const emptyUsage: TokenUsage = {
   cacheHitTokens: 0,
   cacheMissTokens: 0,
 };
+const MAX_TRANSCRIPT_ITEMS = 1_000;
+const TRANSCRIPT_RETAINED_ITEMS = 100;
+const MAX_LIVE_ITEMS = 64;
+const MAX_LIVE_TEXT = 131_072;
 
 export class TuiStore {
   #snapshot: TuiSnapshot;
@@ -55,6 +61,7 @@ export class TuiStore {
   constructor(messages: readonly ProviderMessage[] = []) {
     this.#snapshot = {
       transcript: historyFeed(messages),
+      transcriptVersion: 0,
       live: [],
       reasoning: "",
       streaming: "",
@@ -63,6 +70,7 @@ export class TuiStore {
       status: "idle",
       pendingApproval: undefined,
       expandedThinking: false,
+      contextTokens: 0,
       completion: undefined,
     };
   }
@@ -99,10 +107,12 @@ export class TuiStore {
     this.#snapshot.pendingApproval?.resolve(false);
     this.#snapshot = {
       transcript: historyFeed(messages),
+      transcriptVersion: this.#snapshot.transcriptVersion + 1,
       live: [],
       reasoning: "",
       streaming: "",
       plan: state?.plan ?? [],
+      contextTokens: 0,
       usage: emptyUsage,
       status: state?.status ?? "idle",
       pendingApproval: undefined,
@@ -178,14 +188,14 @@ export class TuiStore {
           this.#patchWorker(event.agentId, { activity: "thinking" });
           break;
         }
-        this.#update({ reasoning: this.#snapshot.reasoning + event.text });
+        this.#update({ reasoning: appendLiveText(this.#snapshot.reasoning, event.text) });
         break;
       case "assistant.text.delta":
         if (!this.#isRoot(event.agentId)) {
           this.#patchWorker(event.agentId, { activity: "writing" });
           break;
         }
-        this.#update({ streaming: this.#snapshot.streaming + event.text });
+        this.#update({ streaming: appendLiveText(this.#snapshot.streaming, event.text) });
         break;
       case "assistant.message": {
         if (!this.#isRoot(event.agentId)) {
@@ -253,7 +263,7 @@ export class TuiStore {
         this.#update({ plan: event.steps });
         break;
       case "usage":
-        this.#update({ usage: addUsage(this.#snapshot.usage, event.usage) });
+        this.#update({ usage: addUsage(this.#snapshot.usage, event.usage), contextTokens: event.usage.promptTokens });
         break;
       case "notice":
         this.#commit({ id: `notice-${envelope.sequence}`, kind: "notice", text: event.message });
@@ -269,7 +279,7 @@ export class TuiStore {
   #commit(item: FeedItem, patch: Partial<TuiSnapshot> = {}, immediate = false): void {
     this.#update({
       ...patch,
-      transcript: [...this.#snapshot.transcript, item],
+      ...this.#appendTranscript(item),
     }, immediate);
   }
 
@@ -288,7 +298,7 @@ export class TuiStore {
   }
 
   #startLive(item: FeedItem): void {
-    this.#update({ live: [...this.#snapshot.live, item] });
+    this.#update({ live: [...this.#snapshot.live, item].slice(-MAX_LIVE_ITEMS) });
   }
 
   #finalizeLive(id: string, transform: (item: FeedItem) => FeedItem): void {
@@ -300,8 +310,21 @@ export class TuiStore {
     }
     this.#update({
       live,
-      transcript: [...this.#snapshot.transcript, transform(finalized)],
+      ...this.#appendTranscript(transform(finalized)),
     });
+  }
+
+  #appendTranscript(item: FeedItem): Pick<TuiSnapshot, "transcript" | "transcriptVersion"> {
+    if (this.#snapshot.transcript.length < MAX_TRANSCRIPT_ITEMS) {
+      return {
+        transcript: [...this.#snapshot.transcript, item],
+        transcriptVersion: this.#snapshot.transcriptVersion,
+      };
+    }
+    return {
+      transcript: [...this.#snapshot.transcript.slice(-TRANSCRIPT_RETAINED_ITEMS), item],
+      transcriptVersion: this.#snapshot.transcriptVersion + 1,
+    };
   }
 
   #update(patch: Partial<TuiSnapshot>, immediate = false): void {
@@ -326,6 +349,12 @@ export class TuiStore {
   #isRoot(agentId: string): boolean {
     return this.#rootAgentId === undefined || this.#rootAgentId === agentId;
   }
+}
+
+function appendLiveText(current: string, next: string): string {
+  if (next.length >= MAX_LIVE_TEXT) return next.slice(-MAX_LIVE_TEXT);
+  const retained = Math.max(0, MAX_LIVE_TEXT - next.length);
+  return current.slice(-retained) + next;
 }
 
 function statePatch(state: RunState): Pick<TuiSnapshot, "plan" | "status" | "completion"> {

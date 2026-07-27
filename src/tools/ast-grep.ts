@@ -1,6 +1,9 @@
 import { type ChildProcessByStdio, spawn } from "node:child_process";
 import type { Readable } from "node:stream";
 import { z } from "zod";
+import { combineDiffs } from "../core/diff.js";
+import { decodeUtf8Slice } from "../core/utf8.js";
+import { WorkspaceSnapshot, type WorkspaceChange } from "../runtime/workspace-tracker.js";
 import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
 import { resolveToolBinary } from "../runtime/binaries.js";
@@ -102,5 +105,117 @@ export const astGrepTool = defineTool({
     }
     if (lines.length === 0) return { content: "no matches" };
     return { content: `${lines.join("\n")}${truncated ? "\n[truncated]" : ""}` };
+  },
+});
+
+export const astGrepReplaceTool = defineTool({
+  name: "ast_grep_replace",
+  description:
+    "Structural code rewrite using AST patterns. Replaces every matching syntax node and reports files verified as changed. Use for codemods where text replacement is unsafe.",
+  schema: z.object({
+    pattern: z.string().min(1),
+    replacement: z.string(),
+    path: z.string().default("."),
+    lang: z.string().optional(),
+  }),
+  readOnly: false,
+  isParallelSafe: () => false,
+  async execute(context, input) {
+    if (context.autonomy === "read") throw new Error("ast_grep_replace requires low autonomy or higher");
+    const cwd = await resolveWorkspacePath({
+      workspaceRoot: context.workspaceRoot,
+      cwd: context.cwd,
+      input: input.path,
+      mustExist: true,
+    });
+    assertNotSensitivePath(cwd);
+    const binary = await resolveToolBinary("sg");
+    if (!binary) {
+      throw new Error("sg (ast-grep) binary not found. Install dependencies with npm install or add sg to PATH.");
+    }
+    const snapshot = await WorkspaceSnapshot.capture(context.workspaceRoot);
+    const args = ["run", "--pattern", input.pattern, "--rewrite", input.replacement, "--update-all"];
+    if (input.lang) args.push("--lang", input.lang);
+    args.push(cwd);
+
+    const env = safeChildEnvironment();
+    let child: ChildProcessByStdio<null, Readable, Readable>;
+    try {
+      child = spawn(binary, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      disposeChildEnvironment(env);
+      throw error;
+    }
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let truncated = false;
+    child.stdout.on("data", (chunk: Buffer) => {
+      const remaining = Math.max(0, context.maxOutputBytes - stdoutBytes);
+      if (remaining > 0) {
+        const retained = chunk.subarray(0, remaining);
+        stdoutChunks.push(retained);
+        stdoutBytes += retained.length;
+      }
+      if (chunk.length > remaining) truncated = true;
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      const remaining = Math.max(0, context.maxOutputBytes - stderrBytes);
+      if (remaining > 0) {
+        const retained = chunk.subarray(0, remaining);
+        stderrChunks.push(retained);
+        stderrBytes += retained.length;
+      }
+      if (chunk.length > remaining) truncated = true;
+    });
+    const abort = () => child.kill("SIGTERM");
+    context.signal.addEventListener("abort", abort, { once: true });
+    let outcome: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+    let processError: unknown;
+    const changes: WorkspaceChange[] = [];
+    try {
+      outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code, signal) => resolve({ code, signal }));
+      });
+    } catch (error) {
+      processError = error;
+    } finally {
+      context.signal.removeEventListener("abort", abort);
+      disposeChildEnvironment(env);
+      changes.push(...await snapshot.reconcileChanges(context.checkpoint));
+      if (changes.length > 0) {
+        for (const change of changes) context.state.modifiedFiles.add(change.path);
+        context.state.revision += 1;
+        delete context.state.completion;
+      }
+    }
+    if (processError) throw processError;
+    if (context.signal.aborted) throw context.signal.reason ?? new Error("ast_grep_replace aborted");
+
+    const stdoutBuffer = Buffer.concat(stdoutChunks);
+    const stderrBuffer = Buffer.concat(stderrChunks);
+    const stdout = decodeUtf8Slice(stdoutBuffer).trim();
+    const stderr = decodeUtf8Slice(stderrBuffer).trim();
+    if ((outcome?.code ?? 1) > 1) {
+      throw new Error(
+        stderr.includes("ENOENT") || stderr.includes("not found") || outcome?.code === 127
+          ? "sg (ast-grep) binary not found. Install dependencies with npm install or add sg to PATH."
+          : stderr || `sg exited ${outcome?.code}`,
+      );
+    }
+    const changedFiles = changes.map((change) => change.path);
+    const diff = combineDiffs(changes.flatMap((change) => change.diff ? [change.diff] : []));
+    return {
+      content: JSON.stringify({
+        changed_files: changedFiles,
+        ...(stdout ? { stdout } : {}),
+        ...(stderr ? { stderr } : {}),
+        truncated,
+      }),
+      mutated: changedFiles.length > 0,
+      ...(diff ? { diff } : {}),
+    };
   },
 });

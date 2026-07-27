@@ -161,6 +161,7 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       store={store}
       model={controller.modelProfile}
       sessionId={controller.sessionId}
+      contextWindow={controller.contextWindow}
       cwd={controller.workspaceRoot}
       autonomy={controller.autonomy}
       mode={controller.mode}
@@ -219,6 +220,7 @@ function runtimeInfo(controller: SessionController): TuiRuntimeInfo {
     model: controller.modelProfile,
     sessionId: controller.sessionId,
     cwd: controller.workspaceRoot,
+    contextWindow: controller.contextWindow,
     autonomy: controller.autonomy,
     mode: controller.mode,
   };

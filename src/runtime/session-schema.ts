@@ -138,6 +138,8 @@ const workerSchema = z.object({
     path: z.string().min(1),
     branch: z.string().min(1),
     baseCommit: z.string(),
+    parentHead: z.string().optional(),
+    parentUnborn: z.boolean().optional(),
   }).strict().optional(),
   steering: z.array(z.object({ message: z.string(), sentAt: z.string() }).strict()).optional(),
 }).strict();
@@ -161,12 +163,31 @@ export interface Decoded<T> {
   migrated: boolean;
 }
 
-export function decodeMetadata(raw: unknown): Decoded<SessionMetadata> {
-  if (hasCurrentVersion(raw)) {
-    const { schemaVersion: _schemaVersion, ...metadata } = currentMetadataSchema.parse(raw);
-    return { value: metadata as SessionMetadata, migrated: false };
+export class NewerSessionVersionError extends Error {
+  readonly version: number;
+  readonly supportedVersion = SESSION_SCHEMA_VERSION;
+
+  constructor(readonly fileKind: string, version: number) {
+    super(`${fileKind} uses schema version ${version}, but this Kulmi build supports up to version ${SESSION_SCHEMA_VERSION}`);
+    this.name = "NewerSessionVersionError";
+    this.version = version;
   }
-  return { value: metadataSchema.parse(raw) as SessionMetadata, migrated: true };
+}
+
+type SessionFileKind = "session metadata" | "session messages" | "run state" | "worker state";
+type SessionMigration = (raw: unknown) => unknown;
+
+const migrations: Record<SessionFileKind, SessionMigration[]> = {
+  "session metadata": [migrateVersionZeroMetadata],
+  "session messages": [migrateVersionZeroMessages],
+  "run state": [migrateVersionZeroState],
+  "worker state": [migrateVersionZeroWorkers],
+};
+
+export function decodeMetadata(raw: unknown): Decoded<SessionMetadata> {
+  const decoded = migrateToCurrent(raw, "session metadata");
+  const { schemaVersion: _schemaVersion, ...metadata } = currentMetadataSchema.parse(decoded.raw);
+  return { value: metadata as SessionMetadata, migrated: decoded.migrated };
 }
 
 export function encodeMetadata(metadata: SessionMetadata): unknown {
@@ -174,10 +195,8 @@ export function encodeMetadata(metadata: SessionMetadata): unknown {
 }
 
 export function decodeMessages(raw: unknown): Decoded<ProviderMessage[]> {
-  if (hasCurrentVersion(raw)) {
-    return { value: currentMessagesSchema.parse(raw).messages as ProviderMessage[], migrated: false };
-  }
-  return { value: z.array(providerMessageSchema).parse(raw) as ProviderMessage[], migrated: true };
+  const decoded = migrateToCurrent(raw, "session messages");
+  return { value: currentMessagesSchema.parse(decoded.raw).messages as ProviderMessage[], migrated: decoded.migrated };
 }
 
 export function encodeMessages(messages: ProviderMessage[]): unknown {
@@ -185,14 +204,13 @@ export function encodeMessages(messages: ProviderMessage[]): unknown {
 }
 
 export function decodeState(raw: unknown): Decoded<RunState> {
-  const decoded = hasCurrentVersion(raw)
-    ? { value: currentStateSchema.parse(raw).state, migrated: false }
-    : { value: storedStateSchema.parse(raw), migrated: true };
+  const decoded = migrateToCurrent(raw, "run state");
+  const state = currentStateSchema.parse(decoded.raw).state;
   return {
     migrated: decoded.migrated,
     value: {
-      ...decoded.value,
-      modifiedFiles: new Set(decoded.value.modifiedFiles),
+      ...state,
+      modifiedFiles: new Set(state.modifiedFiles),
     } as RunState,
   };
 }
@@ -208,16 +226,66 @@ export function encodeState(state: RunState): unknown {
 }
 
 export function decodeWorkers(raw: unknown): Decoded<WorkerJob[]> {
-  if (hasCurrentVersion(raw)) {
-    return { value: currentWorkersSchema.parse(raw).workers as WorkerJob[], migrated: false };
-  }
-  return { value: z.array(workerSchema).parse(raw) as WorkerJob[], migrated: true };
+  const decoded = migrateToCurrent(raw, "worker state");
+  return { value: currentWorkersSchema.parse(decoded.raw).workers as WorkerJob[], migrated: decoded.migrated };
 }
 
 export function encodeWorkers(workers: WorkerJob[]): unknown {
   return { schemaVersion: SESSION_SCHEMA_VERSION, workers };
 }
 
-function hasCurrentVersion(raw: unknown): boolean {
-  return Boolean(raw && typeof raw === "object" && "schemaVersion" in raw);
+function migrateToCurrent(raw: unknown, kind: SessionFileKind): { raw: unknown; migrated: boolean } {
+  const version = readSchemaVersion(raw);
+  if (version === undefined) {
+    const migration = migrations[kind][0];
+    if (!migration) throw new Error(`no migration exists for unversioned ${kind}`);
+    return { raw: migration(raw), migrated: true };
+  }
+  if (version > SESSION_SCHEMA_VERSION) throw new NewerSessionVersionError(kind, version);
+  let value = raw;
+  for (let from = version; from < SESSION_SCHEMA_VERSION; from += 1) {
+    const migration = migrations[kind][from];
+    if (!migration) throw new Error(`no migration exists for ${kind} schema version ${from}`);
+    value = migration(value);
+  }
+  return { raw: value, migrated: version !== SESSION_SCHEMA_VERSION };
 }
+
+function readSchemaVersion(raw: unknown): number | undefined {
+  if (!isRecord(raw) || !("schemaVersion" in raw)) return undefined;
+  const version = raw.schemaVersion;
+  if (!Number.isInteger(version) || (version as number) < 0) {
+    throw new Error("schemaVersion must be a non-negative integer");
+  }
+  return version as number;
+}
+
+function migrateVersionZeroMetadata(raw: unknown): unknown {
+  if (!isRecord(raw)) return raw;
+  const { schemaVersion: _schemaVersion, ...metadata } = raw;
+  return { schemaVersion: SESSION_SCHEMA_VERSION, ...metadata };
+}
+
+function migrateVersionZeroMessages(raw: unknown): unknown {
+  if (Array.isArray(raw)) return { schemaVersion: SESSION_SCHEMA_VERSION, messages: raw };
+  if (!isRecord(raw)) return raw;
+  return { schemaVersion: SESSION_SCHEMA_VERSION, messages: raw.messages };
+}
+
+function migrateVersionZeroState(raw: unknown): unknown {
+  if (!isRecord(raw)) return raw;
+  if ("state" in raw) return { schemaVersion: SESSION_SCHEMA_VERSION, state: raw.state };
+  const { schemaVersion: _schemaVersion, ...state } = raw;
+  return { schemaVersion: SESSION_SCHEMA_VERSION, state };
+}
+
+function migrateVersionZeroWorkers(raw: unknown): unknown {
+  if (Array.isArray(raw)) return { schemaVersion: SESSION_SCHEMA_VERSION, workers: raw };
+  if (!isRecord(raw)) return raw;
+  return { schemaVersion: SESSION_SCHEMA_VERSION, workers: raw.workers };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+

@@ -122,10 +122,13 @@ describe("process tools", () => {
     expect(stopped.stopped).toBe(true);
     expect(stopped.was_running).toBe(true);
     expect(stopped.exit_code !== null || stopped.exit_signal !== null).toBe(true);
-    expect(JSON.parse((await tool.list_processes!.execute(context, {})).content)).toEqual([]);
+    const remaining = JSON.parse((await tool.list_processes!.execute(context, {})).content) as Array<{ name: string; status: string }>;
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toMatchObject({ name: "ticker", status: "exited" });
 
-    const again = JSON.parse((await tool.stop_process!.execute(context, { name: "ticker" })).content) as { stopped: boolean };
-    expect(again.stopped).toBe(false);
+    const again = JSON.parse((await tool.stop_process!.execute(context, { name: "ticker" })).content) as { stopped: boolean; was_running: boolean };
+    expect(again.stopped).toBe(true);
+    expect(again.was_running).toBe(false);
   });
 
   it("echoes stdin input back through the log buffer and honors signals", async () => {
@@ -227,9 +230,9 @@ describe("process tools", () => {
       ready_timeout_seconds: 15,
     });
     expect(manager.list()).toHaveLength(2);
-    manager.disposeAll();
+    await manager.disposeAll();
     expect(manager.list()).toEqual([]);
-    manager.disposeAll();
+    await manager.disposeAll();
     expect(manager.list()).toEqual([]);
   });
 });

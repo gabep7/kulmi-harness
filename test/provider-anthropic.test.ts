@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { afterEach, describe, expect, it } from "vitest";
 import { AnthropicProvider, type AnthropicAssistantMessage } from "../src/provider/anthropic.js";
 import type { ResolvedModel } from "../src/config/config.js";
-import type { ProviderMessage, ProviderTool } from "../src/provider/types.js";
+import { ProviderError, type ProviderMessage, type ProviderTool } from "../src/provider/types.js";
 
 describe("AnthropicProvider", () => {
   const servers: Server[] = [];
@@ -274,7 +274,11 @@ describe("AnthropicProvider", () => {
       response.end('data: {"type":"message_start","message":{"usage":{"input_tokens":4,"output_tokens":1}}}\n\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"recovered"}}\n\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\ndata: {"type":"message_stop"}\n\n');
     });
 
-    const result = await new AnthropicProvider(model(url), { idleTimeoutMs: 25 }).complete(simpleRequest());
+    const result = await new AnthropicProvider(model(url), {
+      idleTimeoutMs: 25,
+      retryBaseDelayMs: 0,
+      random: () => 0,
+    }).complete(simpleRequest());
 
     expect(result.message.content).toBe("recovered");
     expect(requests).toBe(2);
@@ -287,7 +291,13 @@ describe("AnthropicProvider", () => {
       response.writeHead(401, { "content-type": "application/json" });
       response.end('{"type":"error","error":{"type":"authentication_error","message":"invalid key"}}');
     });
-    await expect(new AnthropicProvider(model(url)).complete(simpleRequest())).rejects.toThrow("HTTP 401");
+    await expect(new AnthropicProvider(model(url)).complete(simpleRequest())).rejects.toMatchObject({
+      name: "ProviderError",
+      kind: "auth",
+      status: 401,
+      providerErrorType: "authentication_error",
+      retryable: false,
+    } satisfies Partial<ProviderError>);
     expect(requests).toBe(1);
   });
 
@@ -342,6 +352,70 @@ describe("AnthropicProvider", () => {
     ];
     await expect(provider.complete({ messages: orphanResult, tools: [], signal: new AbortController().signal }))
       .rejects.toThrow("no preceding assistant tool call");
+  });
+
+  it("keeps a lagging cache breakpoint across a wide tool fan-out", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const url = await serve(servers, (request, response) => {
+      collectJson(request).then((body) => {
+        bodies.push(body);
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end('data: {"type":"message_start","message":{"usage":{"input_tokens":4,"output_tokens":1}}}\n\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}\n\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}\n\ndata: {"type":"message_stop"}\n\n');
+      }).catch((error: unknown) => response.destroy(error instanceof Error ? error : new Error(String(error))));
+    });
+    const provider = new AnthropicProvider(model(url));
+    const prefix: ProviderMessage[] = [
+      { role: "system", content: "stable" },
+      { role: "user", content: "inspect ten files" },
+    ];
+    await provider.complete({
+      messages: prefix,
+      tools: [readFileTool()],
+      signal: new AbortController().signal,
+      cacheScope: "wide",
+    });
+    const toolCalls = Array.from({ length: 10 }, (_, index) => ({
+      id: `toolu_${index}`,
+      type: "function" as const,
+      function: { name: "read_file", arguments: JSON.stringify({ path: `${index}.txt` }) },
+    }));
+    const toolResults: ProviderMessage[] = toolCalls.map((call) => ({
+      role: "tool",
+      tool_call_id: call.id,
+      content: `result ${call.id}`,
+    }));
+
+    await provider.complete({
+      messages: [
+        ...prefix,
+        { role: "assistant", content: null, reasoning_content: "inspect all", tool_calls: toolCalls },
+        ...toolResults,
+        { role: "user", content: "continue" },
+      ],
+      tools: [readFileTool()],
+      signal: new AbortController().signal,
+      cacheScope: "wide",
+    });
+
+    const second = bodies[1];
+    const wireMessages = second?.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    expect(wireMessages[0]?.content).toContainEqual(expect.objectContaining({
+      type: "text",
+      cache_control: { type: "ephemeral" },
+    }));
+    expect(wireMessages.at(-1)?.content).toContainEqual(expect.objectContaining({
+      type: "text",
+      cache_control: { type: "ephemeral" },
+    }));
+    const messageBreakpoints = wireMessages.flatMap((message) => message.content)
+      .filter((block) => block.cache_control !== undefined);
+    expect(messageBreakpoints).toHaveLength(2);
+    expect(second?.system).toEqual([
+      { type: "text", text: "stable", cache_control: { type: "ephemeral" } },
+    ]);
+    expect(second?.tools).toEqual([
+      expect.objectContaining({ cache_control: { type: "ephemeral" } }),
+    ]);
   });
 });
 

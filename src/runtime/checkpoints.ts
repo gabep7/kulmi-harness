@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, lstat, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { RunState } from "../core/types.js";
@@ -34,6 +34,11 @@ const checkpointSchema = z.object({
 type FileSnapshot = z.infer<typeof snapshotSchema>;
 type CheckpointManifest = z.infer<typeof checkpointSchema>;
 
+// Retain the newest finalized, non-undone checkpoints per agent; older finalized
+// checkpoints are pruned to bound disk growth. Unfinalized (active) and undone
+// (audit trail) checkpoints are always kept.
+const MAX_CHECKPOINTS_PER_AGENT = 20;
+
 export interface PreparedUndo {
   checkpointId: string;
   messageCount: number;
@@ -50,8 +55,9 @@ export interface PreparedUndo {
 export class CheckpointStore {
   readonly #sessionPath: string;
   readonly #workspaceRoot: string;
-  #turnPath?: string;
-  #manifest?: CheckpointManifest;
+  #turnPath: string | undefined;
+  #manifest: CheckpointManifest | undefined;
+  #lastTurnFinalized = false;
 
   constructor(sessionPath: string, workspaceRoot: string) {
     this.#sessionPath = sessionPath;
@@ -59,6 +65,7 @@ export class CheckpointStore {
   }
 
   async beginTurn(messageCount: number, agentId: string, state?: RunState): Promise<void> {
+    this.#lastTurnFinalized = false;
     const base = join(
       this.#sessionPath,
       "checkpoints",
@@ -78,10 +85,15 @@ export class CheckpointStore {
     };
     await mkdir(join(this.#turnPath, "files"), { recursive: true, mode: 0o700 });
     await this.#persist();
+    try {
+      await this.#pruneOldCheckpoints(agentId);
+    } catch {
+      // pruning failures must never crash a turn
+    }
   }
 
   async capture(absolutePath: string): Promise<void> {
-    const { manifest, turnPath } = this.#active();
+    const { manifest, turnPath } = this.#activeForCapture();
     const path = this.#relativeWorkspacePath(absolutePath);
     if (manifest.entries.some((entry) => entry.path === path)) return;
     manifest.entries.push({
@@ -95,7 +107,7 @@ export class CheckpointStore {
     absolutePath: string,
     snapshot: { existed: boolean; content?: Buffer; mode?: number },
   ): Promise<void> {
-    const { manifest, turnPath } = this.#active();
+    const { manifest, turnPath } = this.#activeForCapture();
     const path = this.#relativeWorkspacePath(absolutePath);
     if (manifest.entries.some((entry) => entry.path === path)) return;
     const before: FileSnapshot = { existed: snapshot.existed };
@@ -112,13 +124,39 @@ export class CheckpointStore {
   }
 
   async finalizeTurn(): Promise<void> {
-    if (!this.#manifest || !this.#turnPath || this.#manifest.finalizedAt) return;
-    for (const entry of this.#manifest.entries) {
-      const target = this.#absoluteWorkspacePath(entry.path);
-      entry.after = await captureFileSnapshot(target, this.#turnPath, join("after-files", entry.path));
+    if (!this.#manifest || !this.#turnPath) return;
+    const manifest = this.#manifest;
+    const turnPath = this.#turnPath;
+    if (manifest.finalizedAt) {
+      this.#manifest = undefined;
+      this.#turnPath = undefined;
+      this.#lastTurnFinalized = true;
+      return;
     }
-    this.#manifest.finalizedAt = new Date().toISOString();
-    await this.#persist();
+    for (const entry of manifest.entries) {
+      const target = this.#absoluteWorkspacePath(entry.path);
+      entry.after = await captureFileSnapshot(target, turnPath, join("after-files", entry.path));
+    }
+    manifest.finalizedAt = new Date().toISOString();
+    try {
+      await writeManifest(turnPath, manifest);
+    } catch (error) {
+      delete manifest.finalizedAt;
+      throw error;
+    }
+    this.#manifest = undefined;
+    this.#turnPath = undefined;
+    this.#lastTurnFinalized = true;
+  }
+
+  async discardTurn(): Promise<void> {
+    if (!this.#turnPath || !this.#manifest) return;
+    if (this.#manifest.finalizedAt) throw new Error("cannot discard a finalized checkpoint turn");
+    const path = this.#turnPath;
+    this.#manifest = undefined;
+    this.#turnPath = undefined;
+    this.#lastTurnFinalized = false;
+    await rm(path, { recursive: true, force: true });
   }
 
   async prepareUndo(agentId: string, currentMessageCount: number): Promise<PreparedUndo> {
@@ -245,6 +283,19 @@ export class CheckpointStore {
     return { manifest: this.#manifest, turnPath: this.#turnPath };
   }
 
+  #activeForCapture(): { manifest: CheckpointManifest; turnPath: string } {
+    if (!this.#manifest || !this.#turnPath) {
+      if (this.#lastTurnFinalized) {
+        throw new Error("checkpoint turn was finalized; begin a new turn before capturing files");
+      }
+      throw new Error("checkpoint turn has not started");
+    }
+    if (this.#manifest.finalizedAt) {
+      throw new Error("cannot capture files in a finalized checkpoint turn");
+    }
+    return { manifest: this.#manifest, turnPath: this.#turnPath };
+  }
+
   async #latestUndoable(
     agentId: string,
     currentMessageCount: number,
@@ -329,6 +380,43 @@ export class CheckpointStore {
   #persist(): Promise<void> {
     const { manifest, turnPath } = this.#active();
     return writeManifest(turnPath, manifest);
+  }
+
+  async #pruneOldCheckpoints(agentId: string): Promise<void> {
+    const root = join(this.#sessionPath, "checkpoints");
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch (error) {
+      if (isErrorCode(error, "ENOENT")) return;
+      throw error;
+    }
+    const candidates: Array<{ turnPath: string; checkpointId: string; modified: number }> = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.includes(`-${agentId}`)) continue;
+      const turnPath = join(root, entry.name);
+      let modified: number;
+      let raw: unknown;
+      try {
+        modified = (await stat(join(turnPath, "checkpoint.json"))).mtimeMs;
+        raw = JSON.parse(await readFile(join(turnPath, "checkpoint.json"), "utf8"));
+      } catch {
+        continue;
+      }
+      const parsed = checkpointSchema.safeParse(raw);
+      if (!parsed.success) continue;
+      const manifest = parsed.data;
+      if (manifest.agentId !== agentId) continue;
+      // Keep active (unfinalized) and undone (audit trail) checkpoints unconditionally.
+      if (!manifest.finalizedAt || manifest.undoneAt) continue;
+      // Only checkpoints with restorable state are candidates for undo; prune the rest.
+      if (manifest.state === undefined) continue;
+      candidates.push({ turnPath, checkpointId: entry.name, modified });
+    }
+    candidates.sort((left, right) => right.modified - left.modified || right.checkpointId.localeCompare(left.checkpointId));
+    for (const candidate of candidates.slice(MAX_CHECKPOINTS_PER_AGENT)) {
+      await rm(candidate.turnPath, { recursive: true, force: true });
+    }
   }
 }
 

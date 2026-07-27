@@ -23,7 +23,7 @@ beforeAll(async () => {
   await mkdir(join(release, "node_modules"), { recursive: true });
   await writeFile(join(release, "dist", "cli.js"), "#!/usr/bin/env node\n", "utf8");
   await writeFile(join(release, "node_modules", ".keep"), "fixture\n", "utf8");
-  releaseArchive = join(fixtures, "kulmi-node.tar.gz");
+  releaseArchive = join(fixtures, "kulmi-linux-x64.tar.gz");
   await exec("tar", ["-czf", releaseArchive, "-C", release, "."]);
   validChecksum = createHash("sha256").update(await readFile(releaseArchive)).digest("hex");
 
@@ -34,7 +34,7 @@ beforeAll(async () => {
   sourceArchive = join(fixtures, "kulmi-source.tar.gz");
   await exec("tar", ["-czf", sourceArchive, "-C", sourceParent, "kulmi-source"]);
 
-  await executable("uname", "#!/bin/sh\nprintf '%s\\n' Linux\n");
+  await executable("uname", "#!/bin/sh\ncase \"$1\" in -s) printf '%s\\n' Linux ;; -m) printf '%s\\n' x86_64 ;; *) printf '%s\\n' Linux ;; esac\n");
   await executable("bwrap", "#!/bin/sh\nexit 0\n");
   await executable("gh", "#!/bin/sh\nexit 1\n");
   await executable("npm", [
@@ -56,8 +56,7 @@ beforeAll(async () => {
     "  case \"$1\" in",
     "    --output|-o) destination=$2; shift 2 ;;",
     "    --write-out) write_out=1; shift 2 ;;",
-    "    --proto) shift 2 ;;",
-    "    --fail|--location|--silent|--show-error) shift ;;",
+    "    --proto|--proto-redir) shift 2 ;;",
     "    *) url=$1; shift ;;",
     "  esac",
     "done",
@@ -105,17 +104,17 @@ describe.sequential("remote installer release integrity", () => {
       releaseStatus: "missing",
       checksumStatus: "present",
       checksum: validChecksum,
+      allowUnverifiedSource: true,
     });
     try {
       expect(result.ok, result.stderr).toBe(true);
-      expect(result.stdout).toContain("No prebuilt release found; falling back to source");
+      expect(result.stdout).toContain("using explicitly allowed source fallback");
       expect(await readFile(join(result.install, "dist", "cli.js"), "utf8")).toBe("#!/usr/bin/env node\n");
       expect(await readFile(result.log, "utf8")).toContain("/archive/");
     } finally {
       await rm(result.root, { recursive: true, force: true });
     }
   });
-
   it("forces https on curl downloads", async () => {
     const result = await runInstaller({ checksumStatus: "present", checksum: validChecksum });
     try {
@@ -184,6 +183,7 @@ async function runInstaller(options: {
   checksum: string;
   updatePath?: boolean;
   binUnderHome?: boolean;
+  allowUnverifiedSource?: boolean;
 }): Promise<{ root: string; install: string; log: string; ok: boolean; stdout: string; stderr: string }> {
   const root = await mkdtemp(join(tmpdir(), "kulmi-installer-case-"));
   const home = join(root, "home");
@@ -205,12 +205,13 @@ async function runInstaller(options: {
         KULMI_INSTALL_DIR: install,
         KULMI_BIN_DIR: binDir,
         KULMI_NO_PATH_UPDATE: options.updatePath ? "0" : "1",
-        KULMI_RELEASE_URL: "https://fixtures.test/kulmi-node.tar.gz",
-        KULMI_RELEASE_CHECKSUM_URL: "https://fixtures.test/kulmi-node.tar.gz.sha256",
+        KULMI_RELEASE_URL: "https://fixtures.test/kulmi-linux-x64.tar.gz",
+        KULMI_RELEASE_CHECKSUM_URL: "https://fixtures.test/kulmi-linux-x64.tar.gz.sha256",
         FAKE_CURL_LOG: log,
         FAKE_RELEASE_ARCHIVE: releaseArchive,
         FAKE_SOURCE_ARCHIVE: sourceArchive,
         FAKE_RELEASE_STATUS: options.releaseStatus ?? "present",
+        ...(options.allowUnverifiedSource ? { KULMI_ALLOW_UNVERIFIED_SOURCE: "1" } : {}),
         FAKE_CHECKSUM_STATUS: options.checksumStatus,
         FAKE_CHECKSUM: options.checksum,
       },

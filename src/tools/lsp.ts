@@ -31,7 +31,20 @@ export const lspSourceExtensions: Record<string, string> = {
   ".mjs": "javascript",
   ".cjs": "javascript",
   ".jsx": "javascriptreact",
+  ".py": "python",
 };
+
+const LANGUAGE_SERVERS: Record<string, string> = {
+  typescript: "typescript-language-server",
+  typescriptreact: "typescript-language-server",
+  javascript: "typescript-language-server",
+  javascriptreact: "typescript-language-server",
+  python: "pyright-langserver",
+};
+
+function languageIdForFile(filePath: string): string | undefined {
+  return lspSourceExtensions[extname(filePath)];
+}
 
 const SYMBOL_KIND_NAME: Record<number, string> = {
   1: "File", 2: "Module", 3: "Namespace", 4: "Package", 5: "Class",
@@ -86,9 +99,11 @@ class LspClient {
   #starting: Promise<void> | undefined;
   #env: NodeJS.ProcessEnv | undefined;
   readonly #workspaceRoot: string;
+  readonly #serverBinary: string;
 
-  constructor(workspaceRoot: string) {
+  constructor(workspaceRoot: string, serverBinary: string) {
     this.#workspaceRoot = workspaceRoot;
+    this.#serverBinary = serverBinary;
   }
 
   async ensureRunning(): Promise<void> {
@@ -102,9 +117,9 @@ class LspClient {
   }
 
   async #start(): Promise<void> {
-    const binary = await resolveToolBinary("typescript-language-server");
+    const binary = await resolveToolBinary(this.#serverBinary);
     if (!binary) {
-      throw new Error("LSP server unavailable. Install dependencies with npm install or add typescript-language-server to PATH.");
+      throw new Error(`LSP server unavailable. Install ${this.#serverBinary} or add it to PATH.`);
     }
     this.#env = safeChildEnvironment();
     try {
@@ -115,12 +130,12 @@ class LspClient {
       });
     } catch {
       this.#disposeProcess();
-      throw new Error("LSP server unavailable. Install dependencies with npm install or add typescript-language-server to PATH.");
+      throw new Error(`LSP server unavailable. Install ${this.#serverBinary} or add it to PATH.`);
     }
 
     this.#process.on("error", (err) => {
       const msg = err.message.includes("ENOENT")
-        ? "LSP server unavailable. Install dependencies with npm install or add typescript-language-server to PATH."
+        ? `LSP server unavailable. Install ${this.#serverBinary} or add it to PATH.`
         : "LSP server disconnected";
       this.#disposeProcess();
       this.#initialized = false;
@@ -327,11 +342,14 @@ class LspClient {
 
 const clients = new Map<string, LspClient>();
 
-function getClient(workspaceRoot: string): LspClient {
-  let client = clients.get(workspaceRoot);
+function getClient(workspaceRoot: string, languageId: string): LspClient {
+  const serverBinary = LANGUAGE_SERVERS[languageId];
+  if (!serverBinary) throw new Error(`No LSP server configured for language "${languageId}"`);
+  const key = `${workspaceRoot}:${languageId}`;
+  let client = clients.get(key);
   if (!client) {
-    client = new LspClient(workspaceRoot);
-    clients.set(workspaceRoot, client);
+    client = new LspClient(workspaceRoot, serverBinary);
+    clients.set(key, client);
   }
   return client;
 }
@@ -413,7 +431,7 @@ function formatSymbols(result: unknown): string {
 export const lspTool = defineTool({
   name: "lsp",
   description:
-    "Query language servers for code intelligence: jump to definition, find all references, hover type info, or search workspace symbols. Requires a running LSP server (kulmi auto-detects TypeScript).",
+    "Query language servers for code intelligence: jump to definition, find all references, hover type info, or search workspace symbols. Requires a running LSP server (kulmi auto-detects TypeScript and Python, requires pyright-langserver in PATH for Python).",
   schema: z.object({
     action: z.enum(["definition", "references", "hover", "symbols"]),
     file: z.string().min(1),
@@ -424,8 +442,15 @@ export const lspTool = defineTool({
   readOnly: true,
   isParallelSafe: () => true,
   async execute(context, input) {
-    const client = getClient(context.workspaceRoot);
     const { action } = input;
+    const languageId = action === "symbols" ? "typescript" : languageIdForFile(input.file);
+    let client: LspClient;
+    try {
+      client = getClient(context.workspaceRoot, languageId ?? "typescript");
+    } catch (err) {
+      if (action === "symbols") return { content: "LSP server unavailable for workspace symbol search." };
+      throw err;
+    }
 
     try {
       await client.ensureRunning();
@@ -462,7 +487,9 @@ export async function probeDiagnostics(context: ToolContext, absolutePath: strin
   const started = Date.now();
   let expiry: NodeJS.Timeout | undefined;
   try {
-    const client = getClient(context.workspaceRoot);
+    const languageId = languageIdForFile(absolutePath);
+    if (!languageId) return undefined;
+    const client = getClient(context.workspaceRoot, languageId);
     const probe = (async () => {
       await client.ensureRunning();
       const remaining = timeoutMs - (Date.now() - started);

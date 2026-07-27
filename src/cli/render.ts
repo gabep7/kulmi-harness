@@ -1,7 +1,25 @@
 import pc from "picocolors";
 import type { EventBus, EventEnvelope } from "../core/events.js";
 import { describeToolCall, summarizeToolResult, toolLabel } from "../core/tool-summary.js";
-import type { OutputFormat } from "../core/types.js";
+import type { AgentStatus, OutputFormat } from "../core/types.js";
+
+export function headlessExitCode(status: AgentStatus): number {
+  if (status === "completed") return 0;
+  if (status === "cancelled") return 130;
+  return 1;
+}
+
+export function isBrokenPipeError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EPIPE";
+}
+
+export function parseSessionLimit(value: string): number {
+  const limit = Number(value);
+  if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(limit) || limit > 200) {
+    throw new Error(`invalid limit ${value}; expected an integer from 1 to 200`);
+  }
+  return limit;
+}
 
 export function attachRenderer(bus: EventBus, format: OutputFormat, _model?: string): () => void {
   let streamedText = false;

@@ -347,7 +347,7 @@ describe("Agent", () => {
     expect(provider.requests).toHaveLength(2);
     expect(provider.requests[0]?.tools).toEqual([]);
     expect(provider.requests[0]?.cacheScope).toBeUndefined();
-    expect(provider.requests[1]?.cacheScope).toBe("agent_compact:chat:1");
+    expect(provider.requests[1]?.cacheScope).toBe("agent_compact:chat:0");
     expect((await readdir(join(session.path, "archives"))).length).toBe(1);
     expect(agent.messages.some((message) =>
       message.role === "user" && typeof message.content === "string" && message.content.includes("<compaction-summary>"))).toBe(true);

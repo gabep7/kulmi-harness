@@ -1,11 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpenAIProvider } from "../src/provider/openai.js";
 import type { ResolvedModel } from "../src/config/config.js";
+import { ProviderError, type ProviderRetryNotice } from "../src/provider/types.js";
 
 describe("OpenAIProvider", () => {
   const servers: Array<ReturnType<typeof createServer>> = [];
   afterEach(async () => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   });
 
@@ -47,13 +50,13 @@ describe("OpenAIProvider", () => {
     expect(requestBody).toMatchObject({
       model: "test-model",
       thinking: { type: "enabled" },
-      reasoning_effort: "high",
       stream: true,
       max_completion_tokens: 131_072,
       tools: [{ function: { name: "read_file", strict: true } }],
     });
+    expect(requestBody).not.toHaveProperty("reasoning_effort");
     expect(requestBody).not.toHaveProperty("user_id");
-    expect(requestBody).not.toHaveProperty("stream_options");
+    expect(requestBody).toMatchObject({ stream_options: { include_usage: true } });
     expect(requestBody).not.toHaveProperty("temperature");
     expect(requestBody).not.toHaveProperty("top_p");
     expect(result.message).toEqual({
@@ -76,6 +79,73 @@ describe("OpenAIProvider", () => {
       webSearchCalls: 1,
       webSearchPages: 3,
     });
+  });
+
+  it("allows a profile to opt out of streamed usage", async () => {
+    let requestBody: Record<string, unknown> = {};
+    const url = await serve(servers, (request, response) => {
+      collectJson(request).then((body) => {
+        requestBody = body;
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end('data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+      }).catch((error: unknown) => response.destroy(error instanceof Error ? error : new Error(String(error))));
+    });
+
+    await new OpenAIProvider({ ...model(url), streamUsage: false }).complete(simpleRequest());
+
+    expect(requestBody).not.toHaveProperty("stream_options");
+  });
+
+  it("accepts missing tool indexes, alternate types, and content arrays", async () => {
+    const url = await serve(servers, (_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(`data: ${JSON.stringify({
+        choices: [{ delta: { content: [{ type: "output_text", text: "hello " }, { content: "world" }] } }],
+      })}\n\n`);
+      response.write(`data: ${JSON.stringify({
+        choices: [{ delta: { tool_calls: [{
+          id: "call_compat",
+          type: "tool_call",
+          function: { name: "read_", arguments: '{"pa' },
+        }] } }],
+      })}\n\n`);
+      response.write(`data: ${JSON.stringify({
+        choices: [{
+          delta: { tool_calls: [{ function: { name: "file", arguments: 'th":"README.md"}' } }] },
+          finish_reason: "tool_calls",
+        }],
+      })}\n\n`);
+      response.end("data: [DONE]\n\n");
+    });
+
+    const result = await new OpenAIProvider(model(url)).complete(simpleRequest());
+
+    expect(result.message.content).toBe("hello world");
+    expect(result.message.tool_calls).toEqual([{
+      id: "call_compat",
+      type: "function",
+      function: { name: "read_file", arguments: '{"path":"README.md"}' },
+    }]);
+  });
+
+  it("cancels the response body after an early done marker", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    }));
+
+    await new OpenAIProvider(model("https://provider.invalid/v1")).complete(simpleRequest());
+
+    expect(cancelled).toBe(true);
   });
 
   it("returns native web citations and usage", async () => {
@@ -150,7 +220,7 @@ describe("OpenAIProvider", () => {
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.end(requests === 1 ? "" : 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
-    const result = await new OpenAIProvider(model(url)).complete(simpleRequest());
+    const result = await new OpenAIProvider(model(url), { retryBaseDelayMs: 0, random: () => 0 }).complete(simpleRequest());
     expect(result.message.content).toBe("ok");
     expect(requests).toBe(2);
   });
@@ -168,7 +238,11 @@ describe("OpenAIProvider", () => {
       response.end('data: {"choices":[{"delta":{"content":"recovered"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
 
-    const result = await new OpenAIProvider(model(url), { idleTimeoutMs: 25 }).complete(simpleRequest());
+    const result = await new OpenAIProvider(model(url), {
+      idleTimeoutMs: 25,
+      retryBaseDelayMs: 0,
+      random: () => 0,
+    }).complete(simpleRequest());
 
     expect(result.message.content).toBe("recovered");
     expect(requests).toBe(2);
@@ -183,7 +257,7 @@ describe("OpenAIProvider", () => {
         ? 'data: {"choices":[{"delta":{"content":"discarded"}}]}\n\n'
         : 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
     });
-    const result = await new OpenAIProvider(model(url)).complete(simpleRequest());
+    const result = await new OpenAIProvider(model(url), { retryBaseDelayMs: 0, random: () => 0 }).complete(simpleRequest());
     expect(result.message.content).toBe("ok");
     expect(requests).toBe(2);
   });
@@ -215,10 +289,238 @@ describe("OpenAIProvider", () => {
     expect(requests).toBe(1);
   });
 
+  it.each([
+    { status: 401, type: "authentication_error", message: "bad key", kind: "auth", retryable: false },
+    { status: 429, type: "rate_limit_error", message: "slow down", kind: "rate_limit", retryable: true },
+    { status: 429, type: "billing_error", message: "quota exhausted", kind: "quota", retryable: false },
+    { status: 400, type: "context_length_exceeded", message: "maximum context length exceeded", kind: "context_length", retryable: false },
+    { status: 400, type: "invalid_request_error", message: "bad request", kind: "invalid_request", retryable: false },
+    { status: 529, type: "overloaded_error", message: "overloaded", kind: "overloaded", retryable: true },
+    { status: 503, type: "api_error", message: "unavailable", kind: "server", retryable: true },
+    { status: 408, type: "request_timeout", message: "timed out", kind: "transport", retryable: true },
+    { status: 409, type: "conflict_error", message: "conflict", kind: "invalid_request", retryable: false },
+  ] as const)("classifies HTTP $status as $kind", async ({ status, type, message, kind, retryable }) => {
+    let requests = 0;
+    const url = await serve(servers, (_request, response) => {
+      requests += 1;
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { type, message } }));
+    });
+    let caught: unknown;
+
+    try {
+      await new OpenAIProvider(model(url), { maxAttempts: 1 }).complete(simpleRequest());
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ProviderError);
+    expect(caught).toMatchObject({
+      name: "ProviderError",
+      kind,
+      status,
+      providerErrorType: type,
+      retryable,
+    });
+    expect(requests).toBe(1);
+  });
+
+  it("rejects an excessive retry-after without sleeping or retrying", async () => {
+    let requests = 0;
+    const url = await serve(servers, (_request, response) => {
+      requests += 1;
+      response.writeHead(429, {
+        "content-type": "application/json",
+        "retry-after": "3600",
+      });
+      response.end('{"error":{"type":"rate_limit_error","message":"slow down"}}');
+    });
+
+    await expect(new OpenAIProvider(model(url), {
+      maxRetryAfterMs: 50,
+    }).complete(simpleRequest())).rejects.toMatchObject({
+      kind: "rate_limit",
+      status: 429,
+      retryable: false,
+      retryAfterMs: 50,
+      message: expect.stringContaining("retry-after exceeds 50ms maximum"),
+    });
+    expect(requests).toBe(1);
+  });
+
+  it("uses exponential jitter and reports each retry attempt", async () => {
+    vi.useFakeTimers();
+    let requests = 0;
+    const notices: ProviderRetryNotice[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      requests += 1;
+      if (requests < 3) {
+        return new Response('{"error":{"type":"api_error","message":"unavailable"}}', {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    });
+
+    const pending = new OpenAIProvider(model("https://provider.invalid/v1"), {
+      retryBaseDelayMs: 100,
+      random: () => 1,
+      totalTimeoutMs: 1_000,
+    }).complete({
+      ...simpleRequest(),
+      onRetry: (notice) => { notices.push(notice); },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(130);
+    await vi.advanceTimersByTimeAsync(260);
+
+    await expect(pending).resolves.toMatchObject({ message: { content: "ok" } });
+    expect(requests).toBe(3);
+    expect(notices.map(({ attempt, delayMs }) => ({ attempt, delayMs }))).toEqual([
+      { attempt: 2, delayMs: 130 },
+      { attempt: 3, delayMs: 260 },
+    ]);
+  });
+
   it("times out while waiting for response headers", async () => {
     const url = await serve(servers, () => undefined);
-    await expect(new OpenAIProvider(model(url), { idleTimeoutMs: 100 }).complete(simpleRequest()))
+    await expect(new OpenAIProvider(model(url), { idleTimeoutMs: 100, maxAttempts: 1 }).complete(simpleRequest()))
       .rejects.toThrow(/stalled|aborted/i);
+  });
+
+  it("retries a stalled attempt with a fresh controller and reports the retry", async () => {
+    vi.useFakeTimers();
+    let requests = 0;
+    const notices: ProviderRetryNotice[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      requests += 1;
+      if (requests === 2) {
+        return new Response(
+          'data: {"choices":[{"delta":{"content":"recovered"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      const signal = init?.signal;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(": waiting\n\n"));
+          signal?.addEventListener("abort", () => {
+            controller.error(signal.reason ?? new Error("aborted"));
+          }, { once: true });
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+
+    const pending = new OpenAIProvider(model("https://provider.invalid/v1"), {
+      idleTimeoutMs: 25,
+      requestTimeoutMs: 200,
+      totalTimeoutMs: 500,
+      retryBaseDelayMs: 0,
+      random: () => 0,
+    }).complete({
+      ...simpleRequest(),
+      onRetry: (notice) => { notices.push(notice); },
+    });
+    await vi.advanceTimersByTimeAsync(26);
+    const result = await pending;
+
+    expect(result.message.content).toBe("recovered");
+    expect(requests).toBe(2);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      attempt: 2,
+      maxAttempts: 3,
+      error: { kind: "transport", retryable: true },
+    });
+  });
+
+  it("does not treat keepalive data as idle progress", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const signal = init?.signal;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const keepalive = setInterval(() => {
+            controller.enqueue(new TextEncoder().encode("data: {}\n\n"));
+          }, 5);
+          signal?.addEventListener("abort", () => {
+            clearInterval(keepalive);
+            controller.error(signal.reason ?? new Error("aborted"));
+          }, { once: true });
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+
+    const pending = new OpenAIProvider(model("https://provider.invalid/v1"), {
+      idleTimeoutMs: 30,
+      requestTimeoutMs: 200,
+      totalTimeoutMs: 300,
+      maxAttempts: 1,
+    }).complete(simpleRequest());
+    const rejection = expect(pending).rejects.toMatchObject({
+      name: "ProviderError",
+      kind: "transport",
+      retryable: true,
+      message: "stream stalled",
+    });
+    await vi.advanceTimersByTimeAsync(31);
+    await rejection;
+  });
+
+  it("enforces per-attempt and total deadlines independently", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const signal = init?.signal;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const progress = setInterval(() => {
+            controller.enqueue(new TextEncoder().encode(
+              'data: {"choices":[{"delta":{"content":"."}}]}\n\n',
+            ));
+          }, 5);
+          signal?.addEventListener("abort", () => {
+            clearInterval(progress);
+            controller.error(signal.reason ?? new Error("aborted"));
+          }, { once: true });
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    });
+
+    const attempt = new OpenAIProvider(model("https://provider.invalid/v1"), {
+      idleTimeoutMs: 100,
+      requestTimeoutMs: 30,
+      totalTimeoutMs: 200,
+      maxAttempts: 1,
+    }).complete(simpleRequest());
+    const attemptRejection = expect(attempt).rejects.toMatchObject({
+      kind: "transport",
+      message: "request attempt timed out",
+    });
+    await vi.advanceTimersByTimeAsync(31);
+    await attemptRejection;
+
+    const total = new OpenAIProvider(model("https://provider.invalid/v1"), {
+      idleTimeoutMs: 100,
+      requestTimeoutMs: 15,
+      totalTimeoutMs: 35,
+      retryBaseDelayMs: 100,
+      maxAttempts: 3,
+      random: () => 0,
+    }).complete(simpleRequest());
+    const totalRejection = expect(total).rejects.toMatchObject({
+      kind: "transport",
+      retryable: false,
+      message: "total request deadline exceeded",
+    });
+    await vi.advanceTimersByTimeAsync(36);
+    await totalRejection;
   });
 
   it("replays complete reasoning content with historical tool calls", async () => {
@@ -401,6 +703,7 @@ function model(baseUrl: string, modelId: string = "test-model"): ResolvedModel {
     apiKeyEnv: "TEST_API_KEY",
     apiKey: "test-key",
     thinking: true,
+    reasoningStyle: "reasoning_content",
     contextWindow: 1_000_000,
     maxOutputTokens: 131_072,
   };

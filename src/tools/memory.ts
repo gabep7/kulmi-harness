@@ -5,6 +5,7 @@ import {
   MEMORY_NAME_PATTERN,
   discoverMemory,
   formatMemoryLine,
+  invalidateMemoryDiscovery,
   projectMemoryDirectory,
   readMemory,
 } from "../config/memory.js";
@@ -83,6 +84,7 @@ const saveMemoryTool = defineTool({
     }
     await context.checkpoint.capture(path);
     await writeAtomic(path, next);
+    invalidateMemoryDiscovery(context.workspaceRoot);
     const diff = createTextDiff(rel, previous, next);
     return {
       content: JSON.stringify({

@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { decodeUtf8Slice, utf8Prefix, utf8Suffix } from "../core/utf8.js";
 
-const artifactDecoder = new TextDecoder("utf-8");
 
 export interface MaterializedOutput {
   content: string;
@@ -33,9 +33,8 @@ export class ArtifactStore {
     const artifactId = `artifact_${digest}`;
     await mkdir(this.#root, { recursive: true });
     await writeFile(join(this.#root, `${artifactId}.txt`), content, "utf8");
-    const encoded = Buffer.from(content, "utf8");
-    const head = encoded.subarray(0, 10_000).toString("utf8");
-    const tail = encoded.subarray(Math.max(0, encoded.length - 4_000)).toString("utf8");
+    const head = utf8Prefix(content, 10_000);
+    const tail = utf8Suffix(content, 4_000);
     return {
       artifactId,
       content:
@@ -68,6 +67,6 @@ export class ArtifactStore {
   async read(id: string, offset: number, limit: number): Promise<string> {
     if (!/^artifact_[a-f0-9]{16}$/.test(id)) throw new Error(`invalid artifact ID ${id}`);
     const content = await readFile(join(this.#root, `${id}.txt`));
-    return artifactDecoder.decode(content.subarray(offset, offset + limit));
+    return decodeUtf8Slice(content, offset, offset + limit);
   }
 }

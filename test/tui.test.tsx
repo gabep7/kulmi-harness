@@ -18,6 +18,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -83,6 +84,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -105,6 +107,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -126,6 +129,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={() => new Promise<void>((resolve) => { finishRun = resolve; })}
         onCommand={async () => undefined}
         onCancel={cancel}
@@ -160,6 +164,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={() => new Promise<void>((resolve) => { finishRun = resolve; })}
         onCommand={async () => undefined}
         onSteer={steer}
@@ -196,6 +201,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onAlwaysAllow={always}
@@ -220,6 +226,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onAlwaysAllow={always}
@@ -244,6 +251,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         customCommands={[{ name: "/deploy", description: "Deploy the app" }, { name: "/help", description: "shadowed" }]}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
@@ -269,6 +277,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -294,6 +303,7 @@ describe("Kulmi TUI", () => {
       cwd: "/workspace/kulmi",
       autonomy: "medium" as const,
       mode: "task" as const,
+      contextWindow: 128000,
     }));
     const view = render(
       <TuiApp
@@ -302,6 +312,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async (command) => command === "/sessions" ? {
           sessions: [
@@ -339,6 +350,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={submit}
         onCommand={command}
         onCancel={() => undefined}
@@ -422,6 +434,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -452,6 +465,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -533,6 +547,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -557,6 +572,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
@@ -593,7 +609,7 @@ describe("Kulmi TUI", () => {
     expect(frame).not.toContain("{\"steps\"");
   });
 
-  it("keeps the transcript append-only past the former static cap", async () => {
+  it("keeps the transcript append-only up to the cap then trims to retained", async () => {
     const bus = new EventBus();
     const store = new TuiStore();
     store.attach(bus);
@@ -602,8 +618,8 @@ describe("Kulmi TUI", () => {
     }
     await pause();
     const transcript = store.getSnapshot().transcript;
-    expect(transcript).toHaveLength(1_005);
-    expect(transcript[0]).toMatchObject({ kind: "notice", text: "notice-0" });
+    expect(transcript).toHaveLength(1_005 - 1_000 + 100);
+    expect(transcript[0]).toMatchObject({ kind: "notice", text: "notice-900" });
     expect(transcript.at(-1)).toMatchObject({ kind: "notice", text: "notice-1004" });
   });
 
@@ -618,6 +634,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={() => new Promise<void>((resolve) => { finishRun = resolve; })}
         onCommand={async () => undefined}
         onCancel={cancel}
@@ -647,6 +664,7 @@ describe("Kulmi TUI", () => {
         sessionId="session_1234567890abcdef"
         cwd="/workspace/kulmi"
         autonomy="medium"
+        contextWindow={128000}
         onSubmit={async () => undefined}
         onCommand={async () => undefined}
         onCancel={() => undefined}
