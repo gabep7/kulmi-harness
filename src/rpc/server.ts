@@ -175,12 +175,19 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
           const abort = new AbortController();
           managed.running = abort;
           await respond(request.id, { accepted: true });
-          managed.controller.run(params.prompt, abort.signal).then(
-            (result) => notify("run.completed", { sessionId: params.sessionId, status: result.status, text: result.text }),
-            (error: unknown) => notify("run.failed", {
-              sessionId: params.sessionId,
-              message: error instanceof Error ? error.message : String(error),
-            }),
+          const runPromise = managed.controller.run(params.prompt, abort.signal);
+          runPromise.then(
+            (result) => {
+              if (!sessions.has(params.sessionId)) return;
+              notify("run.completed", { sessionId: params.sessionId, status: result.status, text: result.text });
+            },
+            (error: unknown) => {
+              if (!sessions.has(params.sessionId)) return;
+              notify("run.failed", {
+                sessionId: params.sessionId,
+                message: error instanceof Error ? error.message : String(error),
+              });
+            },
           ).finally(() => { managed.running = undefined; }).catch(() => undefined);
           return;
         }
@@ -213,6 +220,15 @@ export async function runRpcServer(defaultCwd: string): Promise<void> {
               modifiedFiles: [...undone.state.modifiedFiles],
             },
           });
+          return;
+        }
+        case "session.compact": {
+          const params = sessionIdSchema.parse(request.params);
+          const managed = sessions.get(params.sessionId);
+          if (!managed) throw new RpcError(-32001, `session ${params.sessionId} is not open`);
+          if (managed.running) throw new RpcError(-32002, "cannot compact while the session is running");
+          await managed.controller.compact();
+          await respond(request.id, { compacted: true });
           return;
         }
         case "workers.list": {

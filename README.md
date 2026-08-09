@@ -251,6 +251,8 @@ The default provider adapter talks to any OpenAI-compatible `/v1/chat/completion
 
 Setting `protocol = "anthropic"` on a model profile switches that profile to a native Messages API adapter with `cache_control` breakpoints, thinking blocks with round-tripped signatures, merged tool results, and the same streaming and retry envelope.
 
+Setting `protocol = "openai-responses"` uses the OpenAI Responses streaming API at `/v1/responses`, including Responses-native function calls and reasoning effort settings.
+
 ## Autonomy and search
 
 Autonomy levels gate what the agent may run. `Shift+Tab` cycles the active level in the TUI.

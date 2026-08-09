@@ -117,6 +117,13 @@ export class Agent {
     this.#stickyContext = content;
   }
 
+  // Manually compact the transcript on demand (e.g. /compact), outside the
+  // automatic 78% context trigger. Only safe while the agent is idle.
+  async compact(signal: AbortSignal): Promise<void> {
+    if (this.#running) throw new Error("cannot compact while the agent is running");
+    await this.#compact(signal);
+  }
+
   async applyUndo(options: {
     messageCount: number;
     state: RunState;
@@ -400,6 +407,7 @@ export class Agent {
     return {
       workspaceRoot: options.workspaceRoot,
       cwd: options.cwd,
+      sessionId: options.session.id,
       autonomy: options.autonomy,
       signal,
       events: options.events,
@@ -429,6 +437,10 @@ export class Agent {
     let boundary = this.#messages.length - 12;
     while (boundary > 1 && this.#messages[boundary]?.role === "tool") boundary -= 1;
     if (boundary <= 1) throw new Error("context limit reached before a safe compaction boundary was available");
+    // Compaction splices the in-memory transcript in place, which invalidates
+    // this turn's checkpoint message boundary. Record that so undo refuses this
+    // turn cleanly instead of truncating at a now-wrong index.
+    this.#options.checkpoint.markCompacted();
 
     const { messages: compacted, prunedToolResults } = await pruneCompactionMessages(this.#messages.slice(1, boundary), this.#options.artifacts);
     const compactedBytes = Buffer.byteLength(JSON.stringify(compacted), "utf8");

@@ -234,8 +234,24 @@ function isPrivateAddress(address: string): boolean {
     value === "::1" || value === "::" || value.startsWith("fe8") || value.startsWith("fe9") ||
     value.startsWith("fea") || value.startsWith("feb") || value.startsWith("fc") || value.startsWith("fd") ||
     value.startsWith("fec") || value.startsWith("fed") || value.startsWith("fee") || value.startsWith("fef") ||
-    value.startsWith("ff") || value.startsWith("2001:db8:") || value.startsWith("64:ff9b:")
+    value.startsWith("ff") || value.startsWith("2001:db8:") || value.startsWith("64:ff9b:") ||
+    // 6to4 (2002::/16) embeds an IPv4 address in bits 16-47. A 6to4 address
+    // like 2002:7f00:1:: encodes 127.0.0.1 and would bypass the IPv4 check.
+    value.startsWith("2002:") ||
+    // Teredo (2001:0000::/32) can also tunnel to private IPv4 destinations.
+    value.startsWith("2001:0:") ||
+    // Node.js URL parser compresses 2001:0:: to 2001:: so check the
+    // compressed form too.
+    value.startsWith("2001::")
   ) return true;
+  // For 6to4, extract the embedded IPv4 and check it too.
+  const v6to4 = value.match(/^2002:([0-9a-f]{1,4}):([0-9a-f]{1,4})/i);
+  if (v6to4) {
+    const high = Number.parseInt(v6to4[1]!, 16);
+    const low = Number.parseInt(v6to4[2]!, 16);
+    const embedded = `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+    if (isPrivateAddress(embedded)) return true;
+  }
   const mapped = mappedIpv4(value);
   const ipv4 = mapped ?? (isIP(value) === 4 ? value : undefined);
   if (!ipv4) return false;

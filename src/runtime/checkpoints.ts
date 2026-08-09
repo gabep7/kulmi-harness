@@ -19,6 +19,10 @@ const checkpointSchema = z.object({
   agentId: z.string().min(1),
   messageCount: z.number().int().nonnegative(),
   createdAt: z.string().min(1),
+  // Set when context compaction rewrote the in-memory transcript during the
+  // turn. The recorded messageCount is then no longer a valid transcript
+  // boundary, so the turn must not be undone (see prepareUndo).
+  compacted: z.boolean().optional(),
   finalizedAt: z.string().min(1).optional(),
   undoneAt: z.string().min(1).optional(),
   undoStartedAt: z.string().min(1).optional(),
@@ -89,6 +93,45 @@ export class CheckpointStore {
       await this.#pruneOldCheckpoints(agentId);
     } catch {
       // pruning failures must never crash a turn
+    }
+  }
+
+  markCompacted(): void {
+    // When an agent compacts mid-turn, invalidate that turn's undo boundary.
+    // A no-op here (no active unfinalized turn) means the compaction happened
+    // outside a turn (manual /compact); the controller then disables undo for
+    // the whole session via disableUndo().
+    if (!this.#manifest || this.#manifest.finalizedAt) return;
+    this.#manifest.compacted = true;
+  }
+
+  // Mark every finalized, non-undone checkpoint as compacted so undo refuses
+  // them. Used after an out-of-turn rewrite (manual compaction) invalidated the
+  // message boundaries those checkpoints record.
+  async disableUndo(): Promise<void> {
+    const root = join(this.#sessionPath, "checkpoints");
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch (error) {
+      if (isErrorCode(error, "ENOENT")) return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const turnPath = join(root, entry.name);
+      let raw: unknown;
+      try {
+        raw = JSON.parse(await readFile(join(turnPath, "checkpoint.json"), "utf8"));
+      } catch {
+        continue;
+      }
+      const parsed = checkpointSchema.safeParse(raw);
+      if (!parsed.success) continue;
+      const manifest = parsed.data;
+      if (!manifest.finalizedAt || manifest.undoneAt || manifest.compacted) continue;
+      manifest.compacted = true;
+      await writeManifest(turnPath, manifest);
     }
   }
 
@@ -163,6 +206,11 @@ export class CheckpointStore {
     const candidate = await this.#latestUndoable(agentId, currentMessageCount);
     if (!candidate) throw new Error("there is no completed turn available to undo");
     const { manifest, turnPath, checkpointId } = candidate;
+    if (manifest.compacted) {
+      throw new Error(
+        `checkpoint ${checkpointId} cannot be undone because context compaction rewrote the transcript during that turn; the message boundary is no longer restorable`,
+      );
+    }
     if (manifest.state === undefined) throw new Error(`checkpoint ${checkpointId} has no restorable run state`);
     const state = decodeState(manifest.state).value;
     if (state.agentId !== agentId) throw new Error(`checkpoint ${checkpointId} run-state agent does not match ${agentId}`);
@@ -254,7 +302,10 @@ export class CheckpointStore {
         applied = false;
       },
       cancel: async () => {
-        if (applied) throw new Error("cannot cancel an undo while restored files are still applied");
+        // Always clear the journal. A failed undo that left files in a mixed
+        // state must not permanently block every later undo (the next
+        // prepareUndo re-evaluates the actual file state against the snapshots
+        // instead of hitting a stale "unfinished undo" guard).
         delete manifest.undoStartedAt;
         delete manifest.undoMessageHistory;
         await writeManifest(turnPath, manifest);

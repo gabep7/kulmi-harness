@@ -27,10 +27,15 @@ const textDecoder = new TextDecoder("utf-8", { fatal: true });
 export class WorkspaceSnapshot {
   readonly #root: string;
   readonly #files: Map<string, FileState>;
+  // The committed revision at capture time. Used to reconstruct the "before"
+  // state of files that were clean when captured, so an out-of-band commit
+  // during the turn cannot change what undo treats as the prior content.
+  readonly #baseRev: string | undefined;
 
-  private constructor(root: string, files: Map<string, FileState>) {
+  private constructor(root: string, files: Map<string, FileState>, baseRev: string | undefined) {
     this.#root = root;
     this.#files = files;
+    this.#baseRev = baseRev;
   }
 
   static async capture(root: string): Promise<WorkspaceSnapshot> {
@@ -39,7 +44,13 @@ export class WorkspaceSnapshot {
     const insideWorkTree = (await git(root, ["rev-parse", "--is-inside-work-tree"])).trim();
     if (insideWorkTree !== "true") throw new Error("workspace tracking requires a git work tree");
     const files = await dirtyFileStates(root);
-    return new WorkspaceSnapshot(root, files);
+    let baseRev: string | undefined;
+    try {
+      baseRev = (await git(root, ["rev-parse", "HEAD"])).trim() || undefined;
+    } catch {
+      baseRev = undefined;
+    }
+    return new WorkspaceSnapshot(root, files, baseRev);
   }
 
   async reconcile(checkpoint: CheckpointStore): Promise<string[]> {
@@ -54,8 +65,8 @@ export class WorkspaceSnapshot {
     for (const path of paths) {
       const recordedBefore = this.#files.get(path);
       const recordedAfter = after.get(path);
-      const base = recordedBefore ? undefined : await gitFile(this.#root, `HEAD:${path}`);
-      const baseMode = recordedBefore || !base ? undefined : await gitMode(this.#root, path);
+      const base = recordedBefore ? undefined : await gitFile(this.#root, this.#baseRev ? `${this.#baseRev}:${path}` : `HEAD:${path}`);
+      const baseMode = recordedBefore || !base ? undefined : await gitMode(this.#root, path, this.#baseRev);
       const beforeState = recordedBefore ?? bufferState(base, baseMode);
       const afterState = recordedAfter ?? await currentFileState(this.#root, path);
       if (recordedBefore && recordedBefore.content === undefined && recordedBefore.hash.startsWith("skipped-large-file:")) {
@@ -217,10 +228,10 @@ async function gitFile(root: string, spec: string): Promise<Buffer | undefined> 
   }
 }
 
-async function gitMode(root: string, path: string): Promise<number | undefined> {
+async function gitMode(root: string, path: string, baseRev?: string): Promise<number | undefined> {
   const env = safeChildEnvironment();
   try {
-    const { stdout } = await execFileAsync("git", ["-C", root, "ls-tree", "HEAD", "--", path], {
+    const { stdout } = await execFileAsync("git", ["-C", root, "ls-tree", baseRev ?? "HEAD", "--", path], {
       encoding: "utf8",
       maxBuffer: 1_000_000,
       env,

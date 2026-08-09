@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { pruneSessions, SessionStore } from "../src/runtime/session-store.js";
 import { EventBus } from "../src/core/events.js";
+import type { ProviderMessage } from "../src/provider/types.js";
 describe("SessionStore", () => {
   beforeEach(async () => {
     process.env.XDG_DATA_HOME = await mkdtemp(join(tmpdir(), "kulmi-session-data-"));
@@ -62,6 +63,69 @@ describe("SessionStore", () => {
       expect((await stat(store.path)).mode & 0o777).toBe(0o700);
       expect((await stat(join(store.path, "messages.json"))).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it("appends new messages to the log instead of rewriting the whole transcript, and replays on open", async () => {
+    const store = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
+    const msg = (m: Array<Record<string, string>>): ProviderMessage[] => m as ProviderMessage[];
+    await store.saveMessages(msg([{ role: "user", content: "first" }]));
+    await store.saveMessages(msg([{ role: "user", content: "first" }, { role: "assistant", content: "second" }]));
+    await store.saveMessages(msg([
+      { role: "user", content: "first" },
+      { role: "assistant", content: "second" },
+      { role: "user", content: "third" },
+    ]));
+    await store.close("completed");
+
+    // The base file keeps the initial empty snapshot; the appended messages go
+    // to the append log (so we never re-serialize and rewrite the whole array).
+    const base = JSON.parse(await readFile(join(store.path, "messages.json"), "utf8"));
+    expect(base.messages).toEqual([]);
+    const log = await readFile(join(store.path, "messages.jsonl"), "utf8");
+    expect(log.split("\n").filter(Boolean)).toHaveLength(3);
+
+    const loaded = await SessionStore.open(store.id);
+    expect(loaded.session.messages).toEqual([
+      { role: "user", content: "first" },
+      { role: "assistant", content: "second" },
+      { role: "user", content: "third" },
+    ]);
+  });
+
+  it("replays the append log and survives a corrupt trailing line", async () => {
+    const store = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
+    const msg = (m: Array<Record<string, string>>): ProviderMessage[] => m as ProviderMessage[];
+    await store.saveMessages(msg([{ role: "user", content: "a" }]));
+    await store.saveMessages(msg([{ role: "user", content: "a" }, { role: "user", content: "b" }]));
+    await store.close("completed");
+    // Simulate a crash mid-append leaving a truncated final line.
+    await writeFile(join(store.path, "messages.jsonl"), "{ truncated", { flag: "a" });
+
+    const loaded = await SessionStore.open(store.id);
+    expect(loaded.session.messages).toEqual([{ role: "user", content: "a" }, { role: "user", content: "b" }]);
+  });
+
+  it("rewrites the base and resets the append log when the message array is truncated", async () => {
+    const store = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
+    const full = [
+      { role: "user", content: "a" },
+      { role: "user", content: "b" },
+      { role: "user", content: "c" },
+      { role: "user", content: "d" },
+    ] as ProviderMessage[];
+    const msg = (m: ProviderMessage[]): ProviderMessage[] => m;
+    await store.saveMessages(full.slice(0, 2));
+    await store.saveMessages(msg(full));
+    // Undo-style truncation rewrites the base and clears the log.
+    await store.saveMessages(full.slice(0, 2));
+    await store.close("completed");
+
+    const base = JSON.parse(await readFile(join(store.path, "messages.json"), "utf8"));
+    expect(base.messages).toEqual([{ role: "user", content: "a" }, { role: "user", content: "b" }]);
+    expect(await readFile(join(store.path, "messages.jsonl"), "utf8")).toBe("");
+
+    const loaded = await SessionStore.open(store.id);
+    expect(loaded.session.messages).toEqual([{ role: "user", content: "a" }, { role: "user", content: "b" }]);
   });
 
   it("migrates valid unversioned sessions on open", async () => {
@@ -153,3 +217,33 @@ describe("SessionStore", () => {
     expect(survivors.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+  it("recovers from a corrupt append-log line without losing the next message", async () => {
+    const store = await SessionStore.create({ cwd: process.cwd(), model: "test-model" });
+    const message1: ProviderMessage = { role: "user", content: "first" };
+    await store.saveMessages([message1]);
+
+    // Simulate a crash that writes a partial (invalid JSON) line to the append log.
+    const logPath = join(store.path, "messages.jsonl");
+    const { readFile, writeFile, appendFile } = await import("node:fs/promises");
+    // Write a partial JSON fragment that would corrupt the next appended message
+    await appendFile(logPath, "{\"role\":\"user\":\"parti", { mode: 0o600 });
+
+    // Reopen: the corrupt line should be detected and skipped
+    const reopened = await SessionStore.open(store.id);
+    // The valid message should still be present
+    expect(reopened.session.messages.length).toBe(1);
+    expect(reopened.session.messages[0]?.content).toBe("first");
+
+    // Now save a new message — the dirty flag should force a full rewrite,
+    // not an append after the corrupt line.
+    const message2: ProviderMessage = { role: "assistant", content: "second" };
+    const allMessages = [...reopened.session.messages, message2];
+    await reopened.store.saveMessages(allMessages);
+
+    // Reopen again and verify message2 was persisted correctly
+    const final = await SessionStore.open(store.id);
+    const contents = final.session.messages.map((m) => m.content);
+    expect(contents).toContain("second");
+    expect(final.session.messages.length).toBe(2);
+  });

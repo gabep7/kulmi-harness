@@ -156,6 +156,19 @@ export function normalizeRetryError(error: unknown, attemptReason?: unknown): Pr
     });
   }
   const message = error instanceof Error ? error.message : String(error);
+  // A zod schema parse failure is deterministic: retrying the identical
+  // request cannot fix a malformed stream, and would burn a full provider
+  // request (and output tokens) per attempt while masking the underlying
+  // defect. Note "stream ended before [DONE]" is deliberately NOT here: a
+  // mid-stream disconnect before any model output is a real transport fault
+  // and the provider layer retries it.
+  if (/^invalid (?:stream|response) (?:chunk|event):/i.test(message)) {
+    return new ProviderError(message || "invalid provider response", {
+      kind: "invalid_request",
+      retryable: false,
+      cause: error,
+    });
+  }
   return new ProviderError(message || "provider transport failed", {
     kind: "transport",
     retryable: true,

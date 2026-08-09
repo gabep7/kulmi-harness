@@ -222,6 +222,30 @@ program
   });
 
 program
+  .command("compact")
+  .description("compact the transcript of a durable session on demand")
+  .argument("<session-id>")
+  .action(async (sessionId: string) => {
+    const requestedModel = await credentialModelFor(undefined, sessionId, process.cwd());
+    await resolveExistingCredential({
+      cwd: process.cwd(),
+      ...(requestedModel ? { requestedModel } : {}),
+    });
+    const controller = await SessionController.create({
+      cwd: process.cwd(),
+      mode: "chat",
+      resumeSessionId: sessionId,
+    });
+    try {
+      await controller.compact();
+      process.stdout.write("compacted\n");
+    } finally {
+      await controller.close();
+    }
+  });
+
+
+program
   .command("doctor")
   .description("check local harness prerequisites and configuration")
   .action(async () => {

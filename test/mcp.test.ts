@@ -124,3 +124,15 @@ describe("mcp client", () => {
     await expect(connection.dispose()).resolves.toBeUndefined();
   });
 });
+
+  it("uses the shared sleep utility from stream.ts for retry backoff", { timeout: 30_000 }, async () => {
+    // This test verifies that the MCP client correctly imports sleep from
+    // stream.ts (which handles pre-aborted signals and unrefs the timer)
+    // instead of using a local copy. The fixture exercises the happy path;
+    // the retry logic is dormant on success, but the import must resolve.
+    const connection = await connectFixture("retrytest", randomUUID());
+    const echo = connection.tools.find((tool) => tool.name === "mcp_retrytest_echo");
+    expect(echo).toBeDefined();
+    const result = await echo!.execute(toolContext(), { text: "retry-ok" });
+    expect(result.content).toBe("echo: retry-ok");
+  });

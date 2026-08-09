@@ -103,6 +103,32 @@ describe("configuration", () => {
     });
   });
 
+  it("accepts OpenAI Responses model profiles", () => {
+    const changed = applyFileConfig(config(payg()), {
+      models: {
+        luna: {
+          model: "gpt-5.6-luna",
+          base_url: "https://api.example.com/v1",
+          api_key_env: "LUNA_API_KEY",
+          protocol: "openai-responses",
+          thinking: true,
+          reasoning_effort: "max",
+          reasoning_efforts: ["low", "medium", "high", "xhigh", "max"],
+          context_window: 1_050_000,
+          max_output_tokens: 128_000,
+        },
+      },
+    });
+    expect(changed.models.luna).toMatchObject({
+      model: "gpt-5.6-luna",
+      protocol: "openai-responses",
+      reasoningEffort: "max",
+      reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+      contextWindow: 1_050_000,
+      maxOutputTokens: 128_000,
+    });
+  });
+
   it("requires complete model definitions when creating a profile", () => {
     const empty = emptyConfig();
     expect(() => applyFileConfig(empty, {

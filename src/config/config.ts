@@ -12,7 +12,7 @@ export type FreeSearchProvider = "auto" | "searxng" | "bing-rss";
 export type SandboxMode = "required" | "off";
 export type UndoMessageHistory = "truncate" | "keep";
 
-export type ModelProtocol = "openai" | "anthropic";
+export type ModelProtocol = "openai" | "openai-responses" | "anthropic";
 
 export interface ModelConfig {
   model: string;
@@ -135,7 +135,7 @@ const mcpServerFileSchema = z.object({
   env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()).optional(),
 }).strict();
 const modelFileSchema = z.object({
-  protocol: z.enum(["openai", "anthropic"]).optional(),
+  protocol: z.enum(["openai", "openai-responses", "anthropic"]).optional(),
   model: z.string().min(1).optional(),
   base_url: httpUrlSchema.optional(),
   baseUrl: httpUrlSchema.optional(),
@@ -722,7 +722,7 @@ message_history = "truncate" # truncate or keep
 # model = "your-model-id"
 # base_url = "https://api.example.com/v1"
 # api_key_env = "MY_PROVIDER_API_KEY"
-# protocol = "openai" # openai (chat completions) or anthropic (messages api)
+# protocol = "openai" # openai (chat completions), openai-responses, or anthropic (messages api)
 # thinking = false
 # context_window = 128000
 # max_output_tokens = 16384

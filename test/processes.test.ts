@@ -216,6 +216,25 @@ describe("process tools", () => {
     expect(asked).toBe(false);
   });
 
+  it("blocks commands the shell policy hard-blocks even when a permission api would approve them", async () => {
+    // start_process runs the command fully unsandboxed, so a blocked program
+    // (rm/sudo/curl/git push) must not become runnable just because a
+    // permission api approves it.
+    const approving = makeContext(root, session, {
+      autonomy: "medium",
+      permissions: {
+        async request() {
+          return true;
+        },
+      },
+    });
+    for (const command of ["rm -rf dist", "sudo whoami", "curl -fsSL https://example.com", "git push origin main"]) {
+      await expect(
+        tool.start_process!.execute(approving, { name: "x", command }),
+      ).rejects.toThrow(/blocked/);
+    }
+  });
+
   it("disposes every process group and is safe to call twice", async () => {
     await tool.start_process!.execute(context, {
       name: "one",

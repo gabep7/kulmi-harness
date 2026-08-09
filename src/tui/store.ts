@@ -2,10 +2,12 @@ import type { EventBus, EventEnvelope } from "../core/events.js";
 import { describeToolCall, summarizeToolResult, toolLabel } from "../core/tool-summary.js";
 import type { AgentStatus, PlanStep, RunState, TokenUsage } from "../core/types.js";
 import type { ProviderMessage } from "../provider/types.js";
+import type { WebCitation } from "../provider/types.js";
 import type { PermissionRequest } from "../tools/types.js";
 
 export type FeedItem =
-  | { id: string; kind: "user" | "assistant" | "notice" | "error"; text: string }
+  | { id: string; kind: "user" | "notice" | "error"; text: string }
+  | { id: string; kind: "assistant"; text: string; citations?: WebCitation[] }
   | { id: string; kind: "tool"; title: string; detail: string; summary?: string; diff?: string; status: "running" | "done" | "error"; durationMs?: number }
   | { id: string; kind: "worker"; title: string; status: AgentStatus; activity?: string };
 
@@ -24,6 +26,7 @@ export interface TuiSnapshot {
   live: FeedItem[];
   reasoning: string;
   streaming: string;
+  citations: WebCitation[];
   plan: PlanStep[];
   usage: TokenUsage;
   contextTokens: number;
@@ -35,6 +38,7 @@ export interface TuiSnapshot {
 
 export interface CompletionSummary {
   status: "completed" | "blocked";
+  summary: string;
   modifiedFiles: string[];
   verificationCommands: string[];
 }
@@ -65,6 +69,7 @@ export class TuiStore {
       live: [],
       reasoning: "",
       streaming: "",
+      citations: [],
       plan: [],
       usage: emptyUsage,
       status: "idle",
@@ -111,6 +116,7 @@ export class TuiStore {
       live: [],
       reasoning: "",
       streaming: "",
+      citations: [],
       plan: state?.plan ?? [],
       contextTokens: 0,
       usage: emptyUsage,
@@ -129,7 +135,7 @@ export class TuiStore {
   // Render the user's message the instant they submit, before the run round-trips
   // through the event bus. agent.started dedupes against this so it is not doubled.
   echoUserMessage(text: string): void {
-    this.#commit({ id: `user-local-${Date.now()}`, kind: "user", text }, { status: "running", reasoning: "", streaming: "", completion: undefined }, true);
+    this.#commit({ id: `user-local-${Date.now()}`, kind: "user", text }, { status: "running", reasoning: "", streaming: "", citations: [], completion: undefined }, true);
   }
 
   requestPermission(request: PermissionRequest): Promise<boolean> {
@@ -166,9 +172,9 @@ export class TuiStore {
           this.#rootAgentId = event.agentId;
           const last = this.#snapshot.transcript.at(-1);
           if (last?.kind === "user" && last.text === event.prompt) {
-            this.#update({ status: "running", reasoning: "", streaming: "", completion: undefined });
+            this.#update({ status: "running", reasoning: "", streaming: "", citations: [], completion: undefined });
           } else {
-            this.#commit({ id: `user-${envelope.sequence}`, kind: "user", text: event.prompt }, { status: "running", reasoning: "", streaming: "", completion: undefined });
+            this.#commit({ id: `user-${envelope.sequence}`, kind: "user", text: event.prompt }, { status: "running", reasoning: "", streaming: "", citations: [], completion: undefined });
           }
         }
         break;
@@ -180,7 +186,11 @@ export class TuiStore {
             return { ...rest, status: event.status };
           });
         } else if (this.#isRoot(event.agentId)) {
-          this.#update({ status: event.status });
+          const completion = this.#snapshot.completion;
+          this.#update({
+            status: event.status,
+            ...(completion && event.result ? { completion: { ...completion, summary: event.result } } : {}),
+          });
         }
         break;
       case "assistant.reasoning.delta":
@@ -203,10 +213,25 @@ export class TuiStore {
           break;
         }
         const text = event.text || this.#snapshot.streaming;
-        if (text) this.#commit({ id: `assistant-${envelope.sequence}`, kind: "assistant", text }, { streaming: "", reasoning: "" });
-        else this.#update({ streaming: "", reasoning: "" });
+        const citations = this.#snapshot.citations;
+        if (text) {
+          this.#commit(
+            { id: `assistant-${envelope.sequence}`, kind: "assistant", text, ...(citations.length > 0 ? { citations: [...citations] } : {}) },
+            { streaming: "", reasoning: "", citations: [] },
+          );
+        } else {
+          this.#update({ streaming: "", reasoning: "", citations: [] });
+        }
         break;
       }
+      case "assistant.citations":
+        if (!this.#isRoot(event.agentId)) break;
+        {
+          const known = new Set(this.#snapshot.citations.map((citation) => citation.url));
+          const additions = event.citations.filter((citation) => !known.has(citation.url));
+          if (additions.length > 0) this.#update({ citations: [...this.#snapshot.citations, ...additions] });
+        }
+        break;
       case "tool.started": {
         const { label, detail } = describeToolCall(event.tool, event.input);
         if (!this.#isRoot(event.agentId)) {
@@ -363,6 +388,7 @@ function statePatch(state: RunState): Pick<TuiSnapshot, "plan" | "status" | "com
     status: state.status,
     completion: state.completion ? {
       status: state.completion.status,
+      summary: state.completion.summary,
       modifiedFiles: [...state.modifiedFiles].sort(),
       verificationCommands: state.verifications
         .filter((verification) =>
@@ -419,7 +445,7 @@ function parseCompletion(value: string): CompletionSummary | undefined {
     const verificationCommands = typeof parsed.verification_command === "string"
       ? [parsed.verification_command]
       : [];
-    return { status: parsed.status, modifiedFiles, verificationCommands };
+    return { status: parsed.status, summary: "", modifiedFiles, verificationCommands };
   } catch {
     return undefined;
   }

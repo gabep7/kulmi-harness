@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Box, Static, Text, useApp, useInput, useStdout } from "ink";
-import type { AgentMode, AutonomyLevel, PlanStep } from "../core/types.js";
+import type { AgentMode, AutonomyLevel, PlanStep, TokenUsage } from "../core/types.js";
+import type { WebCitation } from "../provider/types.js";
 import type { PermissionRequest } from "../tools/types.js";
 import type { CompletionSummary, TuiStore, FeedItem } from "./store.js";
 import { glyph, theme } from "./theme.js";
@@ -71,6 +72,7 @@ const commands = [
   ["/thinking", "expand or collapse reasoning"],
   ["/fork", "fork this session"],
   ["/undo", "revert the previous turn"],
+  ["/compact", "compact the transcript on demand"],
   ["/auth", "change API key credentials"],
   ["/workers", "inspect child agents"],
   ["/steer", "redirect a running worker"],
@@ -79,6 +81,17 @@ const commands = [
   ["/integrate", "apply a worker change"],
   ["/quit", "leave kulmi"],
 ] as const;
+type CommandEntry = { name: string; description: string };
+
+function availableCommands(custom: ReadonlyArray<CommandEntry>): CommandEntry[] {
+  const entries = [...commands.map(([name, description]) => ({ name, description })), ...custom];
+  const seen = new Set<string>();
+  return entries.filter((entry) => {
+    if (seen.has(entry.name)) return false;
+    seen.add(entry.name);
+    return true;
+  });
+}
 
 export function TuiApp(props: TuiAppProps) {
   const snapshot = useSyncExternalStore(props.store.subscribe, props.store.getSnapshot);
@@ -99,6 +112,39 @@ export function TuiApp(props: TuiAppProps) {
   const [modelCursor, setModelCursor] = useState(0);
   const [efforts, setEfforts] = useState<string[] | undefined>();
   const [effortCursor, setEffortCursor] = useState(0);
+  const [commandCursor, setCommandCursor] = useState(0);
+  const historyRef = useRef<string[]>([]);
+  const historyIndexRef = useRef(-1);
+  const historyDraftRef = useRef("");
+  const commandOptions = availableCommands(props.customCommands ?? []);
+  const commandMatches = input.startsWith("/")
+    ? commandOptions.filter((entry) => entry.name.startsWith(input.split(/\s/)[0] ?? ""))
+    : [];
+
+  const rememberInput = (value: string) => {
+    const history = historyRef.current;
+    historyRef.current = history.at(-1) === value ? history : [...history, value].slice(-100);
+    historyIndexRef.current = -1;
+    historyDraftRef.current = "";
+  };
+
+  const navigateHistory = (direction: -1 | 1) => {
+    const history = historyRef.current;
+    if (history.length === 0) return;
+    if (historyIndexRef.current === -1) historyDraftRef.current = input;
+    const current = historyIndexRef.current === -1 ? (direction < 0 ? history.length : -1) : historyIndexRef.current;
+    const next = Math.max(-1, Math.min(history.length - 1, current + direction));
+    historyIndexRef.current = next;
+    setInput(next === -1 ? historyDraftRef.current : history[next] ?? "");
+  };
+  const handleComposerChange = (value: string) => {
+    setInput(value);
+    setCommandCursor(0);
+    if (historyIndexRef.current !== -1) {
+      historyIndexRef.current = -1;
+      historyDraftRef.current = "";
+    }
+  };
   const [runtime, setRuntime] = useState<TuiRuntimeInfo>({
     model: props.model,
     sessionId: props.sessionId,
@@ -243,6 +289,29 @@ export function TuiApp(props: TuiAppProps) {
       }
       return;
     }
+    if (!busyRef.current && !help && !sessions && !models && !efforts && input.startsWith("/")) {
+      if (key.upArrow && commandMatches.length > 0) {
+        setCommandCursor((index) => (index - 1 + commandMatches.length) % commandMatches.length);
+        return;
+      }
+      if (key.downArrow && commandMatches.length > 0) {
+        setCommandCursor((index) => (index + 1) % commandMatches.length);
+        return;
+      }
+      if (key.tab && commandMatches.length > 0) {
+        const selected = commandMatches[commandCursor] ?? commandMatches[0];
+        if (!selected) return;
+        const [, ...args] = input.split(/\s+/);
+        setInput(args.length > 0 ? `${selected.name} ${args.join(" ")}` : `${selected.name} `);
+        setCommandCursor(0);
+        return;
+      }
+    }
+    if (!busyRef.current && !help && !sessions && !models && !efforts && (key.upArrow || key.downArrow)) {
+      navigateHistory(key.upArrow ? -1 : 1);
+      return;
+    }
+
     if (key.escape) {
       if (help) {
         setHelp(false);
@@ -282,6 +351,8 @@ export function TuiApp(props: TuiAppProps) {
   const submit = async (raw: string) => {
     const value = raw.trim();
     if (!value) return;
+    rememberInput(value);
+    setCommandCursor(0);
     if (busyRef.current) {
       if (value.startsWith("/") || !props.onSteer) return;
       setInput("");
@@ -374,35 +445,44 @@ export function TuiApp(props: TuiAppProps) {
           const visibleTools = tools.slice(-toolLimit);
           return (
             <>
-              {tools.length > visibleTools.length && <Text color={theme.faint}>  +{tools.length - visibleTools.length} more tools…</Text>}
-              {visibleTools.map((item) => <FeedRow key={item.id} item={item} width={width} />)}
+              {visibleTools.length > 0 && (
+                <Box marginTop={1} flexDirection="column">
+                  <Text color={theme.tool} bold>{glyph.tool} tool activity  <Text color={theme.faint}>{tools.length}</Text></Text>
+                  {tools.length > visibleTools.length && <Text color={theme.faint}>  +{tools.length - visibleTools.length} more</Text>}
+                  {visibleTools.map((item) => <FeedRow key={item.id} item={item} width={width} />)}
+                </Box>
+              )}
               {workers.length > 0 && (
                 <Box marginTop={1} flexDirection="column">
-                  <Text color={theme.sand} bold>
-                    agents  <Text color={theme.faint}>{runningAgents}/{workers.length} running</Text>
+                  <Text color={theme.worker} bold>
+                    {glyph.worker} workers  <Text color={theme.faint}>{runningAgents}/{workers.length} running</Text>
                   </Text>
-                  {workers.length > visibleWorkers.length && <Text color={theme.faint}>  +{workers.length - visibleWorkers.length} more agents…</Text>}
+                  {workers.length > visibleWorkers.length && <Text color={theme.faint}>  +{workers.length - visibleWorkers.length} more</Text>}
                   {visibleWorkers.map((item) => <FeedRow key={item.id} item={item} width={width} />)}
                 </Box>
               )}
             </>
           );
         })()}
-
-        {snapshot.reasoning && <Thinking text={snapshot.reasoning} expanded={snapshot.expandedThinking} width={width} />}
-
         {snapshot.streaming && (
-          <Box marginTop={1}>
-            <Text color={theme.caramel}>{glyph.assistant} </Text>
-            <Text color={theme.faint}>responding… {wordCount(snapshot.streaming)} words</Text>
+          <Box marginTop={1} flexDirection="column">
+            <Text color={theme.assistant} bold>
+              {glyph.assistant} assistant  <Text color={theme.muted}>responding, {wordCount(snapshot.streaming)} words</Text>
+            </Text>
+            <Box paddingLeft={2}>
+              <MarkdownBlock text={snapshot.streaming} width={Math.max(20, width - 2)} />
+            </Box>
+            {snapshot.citations.length > 0 && <SourcesBlock citations={snapshot.citations} width={width} />}
           </Box>
         )}
+
+        {snapshot.reasoning && <Thinking text={snapshot.reasoning} expanded={snapshot.expandedThinking} width={width} />}
 
         {snapshot.plan.length > 0 && <PlanBlock plan={snapshot.plan} />}
         {snapshot.completion && <CompletionBlock completion={snapshot.completion} />}
 
         {help && <Help onClose={() => setHelp(false)} custom={props.customCommands ?? []} />}
-        {!help && !snapshot.pendingApproval && !sessions && !models && !efforts && input.startsWith("/") && <CommandPalette query={input} columns={size.columns} />}
+        {!help && !snapshot.pendingApproval && !sessions && !models && !efforts && input.startsWith("/") && <CommandPalette entries={commandMatches} cursor={commandCursor} columns={size.columns} />}
 
         {!snapshot.pendingApproval && !sessions && !models && !efforts && busy && <LoadingStatus />}
 
@@ -414,8 +494,8 @@ export function TuiApp(props: TuiAppProps) {
               ? <ModelPicker models={models} cursor={modelCursor} />
               : efforts
                 ? <EffortPicker efforts={efforts} cursor={effortCursor} model={runtime.model} />
-                : <Composer value={input} onChange={setInput} onSubmit={submit} busy={busy} />}
-        <Footer runtime={runtime} status={snapshot.status} busy={busy} agents={snapshot.live.filter((item) => item.kind === "worker").length} contextTokens={snapshot.contextTokens} contextWindow={runtime.contextWindow} />
+                : <Composer value={input} onChange={handleComposerChange} onSubmit={submit} busy={busy} />}
+        <Footer runtime={runtime} status={snapshot.status} busy={busy} agents={snapshot.live.filter((item) => item.kind === "worker").length} usage={snapshot.usage} contextTokens={snapshot.contextTokens} contextWindow={runtime.contextWindow} />
       </Box>
     </Box>
   );
@@ -424,63 +504,91 @@ export function TuiApp(props: TuiAppProps) {
 function Welcome({ width }: { width: number }) {
   return (
     <Box flexDirection="column" marginBottom={1} width={Math.min(width, 72)}>
-      <Text color={theme.caramel} bold>{glyph.brand} kulmi</Text>
-      <Text color={theme.muted}>Ask for a change, an investigation, or a full implementation. Kulmi plans, works, verifies, and keeps the evidence attached.</Text>
-      <Box marginTop={1}><Text color={theme.faint}>Try  </Text><Text color={theme.sand}>inspect this repo and fix the highest-impact issue</Text></Box>
+      <Text color={theme.assistant} bold>{glyph.brand} kulmi</Text>
+      <Text color={theme.muted}>A focused workspace for changes, investigation, and verification.</Text>
+      <Box marginTop={1}><Text color={theme.faint}>Try  </Text><Text color={theme.user}>inspect this repo and fix the highest-impact issue</Text></Box>
     </Box>
   );
 }
 
 function FeedRow({ item, width }: { item: FeedItem; width: number }) {
   if (item.kind === "user") return (
-    <Box marginTop={1}>
-      <Text color={theme.sand} bold>{glyph.user} </Text><Text color={theme.cream} bold>{item.text.trim()}</Text>
+    <Box marginTop={1} flexDirection="column" paddingLeft={1}>
+      <Text color={theme.user} bold>{glyph.user} you</Text>
+      <Box paddingLeft={2}><Text color={theme.cream}>{item.text.trim()}</Text></Box>
     </Box>
   );
   if (item.kind === "assistant") return (
-    <Box marginTop={1} alignItems="flex-start">
-      <Text color={theme.caramel}>{glyph.assistant} </Text><MarkdownBlock text={item.text} width={width} />
+    <Box marginTop={1} flexDirection="column" paddingLeft={1}>
+      <Text color={theme.assistant} bold>{glyph.assistant} assistant</Text>
+      <Box paddingLeft={2}><MarkdownBlock text={item.text} width={width} /></Box>
+      {item.citations && item.citations.length > 0 && <SourcesBlock citations={item.citations} width={width} />}
     </Box>
   );
   if (item.kind === "tool") return (
-    <Box paddingLeft={2} flexDirection="column">
+    <Box
+      marginTop={1}
+      width={Math.max(20, width)}
+      borderStyle="single"
+      borderColor={item.status === "error" ? theme.rose : item.status === "done" ? theme.sage : theme.tool}
+      paddingX={1}
+      flexDirection="column"
+    >
       <Box>
-        <Text color={item.status === "error" ? theme.rose : item.status === "done" ? theme.sage : theme.caramel}>
-          {item.status === "error" ? glyph.error : item.status === "done" ? glyph.success : glyph.active}
-          <Text color={theme.muted}> {item.title}</Text>
+        <Text color={item.status === "error" ? theme.rose : item.status === "done" ? theme.sage : theme.tool} bold>
+          {item.status === "error" ? glyph.error : item.status === "done" ? glyph.success : glyph.active}{" "}
         </Text>
-        {item.detail && <Text color={theme.faint}>  {clampLine(item.detail, Math.max(12, width - item.title.length - (item.summary?.length ?? 0) - 12))}</Text>}
-        {item.summary && <Text color={item.status === "error" ? theme.rose : theme.sage}>  {clampLine(item.summary, Math.max(12, width - item.title.length - 10))}</Text>}
+        <Text color={theme.tool} bold>tool</Text>
+        <Text color={theme.cream}>  {item.title}</Text>
         {item.durationMs !== undefined && <Text color={theme.faint}>  {formatDuration(item.durationMs)}</Text>}
       </Box>
-      {item.diff && <Text color={theme.faint}>{item.diff}</Text>}
+      {item.detail && <Text color={theme.muted}>  {clampLine(item.detail, Math.max(16, width - 6))}</Text>}
+      {item.summary && <Text color={item.status === "error" ? theme.rose : theme.sage}>  result  {clampLine(item.summary, Math.max(16, width - 14))}</Text>}
+      {item.diff && <Text color={theme.faint}>  diff  {item.diff}</Text>}
     </Box>
   );
   if (item.kind === "worker") return (
-    <Box paddingLeft={2} flexDirection="column">
+    <Box
+      marginTop={1}
+      width={Math.max(20, width)}
+      borderStyle="single"
+      borderColor={item.status === "running" ? theme.worker : theme.cocoa}
+      paddingX={1}
+      flexDirection="column"
+    >
       <Box>
-        <Text color={statusColor(item.status)}>
-          {item.status === "running" ? glyph.active : item.status === "completed" ? glyph.success : glyph.error}
-          {" "}
-        </Text>
-        <Text color={theme.muted}>agent</Text>
-        <Text color={theme.faint}>  {clampLine(item.title, Math.max(16, width - 14))}</Text>
+        <Text color={statusColor(item.status)}>{item.status === "running" ? glyph.active : item.status === "completed" ? glyph.success : glyph.error}{" "}</Text>
+        <Text color={theme.worker} bold>worker</Text>
+        <Text color={theme.cream}>  {clampLine(item.title, Math.max(16, width - 14))}</Text>
       </Box>
-      {item.activity && (
-        <Text color={item.status === "running" ? theme.caramel : theme.faint}>
-          {"    "}{clampLine(item.activity, Math.max(16, width - 8))}
-        </Text>
-      )}
+      {item.activity && <Text color={item.status === "running" ? theme.muted : theme.faint}>  {clampLine(item.activity, Math.max(16, width - 6))}</Text>}
     </Box>
   );
-  return <Box paddingLeft={2}><Text color={item.kind === "error" ? theme.rose : theme.faint}>{item.kind === "error" ? "×" : "·"} {item.text.trim()}</Text></Box>;
+  const color = item.kind === "error" ? theme.rose : theme.muted;
+  return <Box marginTop={1} paddingLeft={1}><Text color={color}><Text bold>{item.kind}</Text>  {item.text.trim()}</Text></Box>;
+}
+
+function SourcesBlock({ citations, width }: { citations: ReadonlyArray<WebCitation>; width: number }) {
+  return (
+    <Box paddingLeft={2} flexDirection="column">
+      <Text color={theme.sand} bold>sources</Text>
+      {citations.map((citation) => {
+        const title = citation.title.trim() || citation.siteName?.trim() || citation.url;
+        return (
+          <Text key={citation.url} color={theme.muted}>
+            · {clampLine(title, Math.max(16, width - 18))}  <Text color={theme.faint}>{clampLine(citation.url, Math.max(16, width - 18))}</Text>
+          </Text>
+        );
+      })}
+    </Box>
+  );
 }
 
 function Thinking({ text, expanded, width }: { text: string; expanded: boolean; width: number }) {
   const words = text.trim().split(/\s+/).length;
   return (
     <Box paddingLeft={2} flexDirection="column">
-      <Text color={theme.faint}>◌ thinking  {words} words  <Text color={theme.cocoa}>ctrl+o</Text></Text>
+      <Text color={theme.sand} bold>◌ reasoning  <Text color={theme.faint}>{words} words  ctrl+o</Text></Text>
       {expanded && <Text color={theme.muted} italic>{tailLines(text, 12).slice(-Math.max(80, width * 12))}</Text>}
     </Box>
   );
@@ -508,6 +616,7 @@ function CompletionBlock({ completion }: { completion: CompletionSummary }) {
     <Box marginTop={1} borderStyle="round" borderColor={completion.status === "completed" ? theme.sage : theme.rust} paddingX={1} flexDirection="column">
       <Text color={completion.status === "completed" ? theme.sage : theme.rose} bold>{completion.status}</Text>
       <Text color={theme.muted}>{completion.modifiedFiles.length} changed file{completion.modifiedFiles.length === 1 ? "" : "s"}</Text>
+      {completion.summary && <Text color={theme.ink}>{completion.summary}</Text>}
       {completion.modifiedFiles.slice(0, 5).map((path) => <Text key={path} color={theme.faint}>· {path}</Text>)}
       {completion.verificationCommands.map((command) => <Text key={command} color={theme.sand}>✓ {command}</Text>)}
     </Box>
@@ -515,39 +624,82 @@ function CompletionBlock({ completion }: { completion: CompletionSummary }) {
 }
 
 function Composer({ value, onChange, onSubmit, busy }: { value: string; onChange: (value: string) => void; onSubmit: (value: string) => void; busy: boolean }) {
-  const valueRef = useRef(value);
-  valueRef.current = value;
+  const [cursor, setCursor] = useState(value.length);
+  const cursorRef = useRef(value.length);
+  const previousValue = useRef(value);
+  const internalChange = useRef(false);
+  const placeholder = busy ? "Kulmi is working. Enter to steer, Esc to stop." : "What should we build?";
+
+  const moveCursor = (next: number, limit = value.length) => {
+    const bounded = Math.max(0, Math.min(limit, next));
+    cursorRef.current = bounded;
+    setCursor(bounded);
+  };
+
+  useEffect(() => {
+    if (previousValue.current !== value) {
+      if (!internalChange.current) moveCursor(value.length);
+      internalChange.current = false;
+      previousValue.current = value;
+    }
+  }, [value]);
+
   useInput((input, key) => {
-    const current = valueRef.current;
-    if (key.ctrl || key.meta || key.tab || key.escape || key.upArrow || key.downArrow) return;
+    if (key.upArrow || key.downArrow || key.tab || key.escape) return;
     if (key.return) {
-      if (!current) return;
-      valueRef.current = "";
-      onSubmit(current);
+      if (value) onSubmit(value);
       return;
     }
-    if (key.backspace || key.delete) {
-      if (current.length > 0) {
-        const next = current.slice(0, -1);
-        valueRef.current = next;
-        onChange(next);
+    if (key.leftArrow) {
+      moveCursor(cursorRef.current - 1);
+      return;
+    }
+    if (key.rightArrow) {
+      moveCursor(cursorRef.current + 1);
+      return;
+    }
+    if (key.ctrl || key.meta) {
+      if (input === "a") moveCursor(0);
+      else if (input === "e") moveCursor(value.length);
+      else if (input === "w" && cursorRef.current > 0) {
+        const end = cursorRef.current;
+        let start = end;
+        while (start > 0 && /\s/.test(value[start - 1] ?? "")) start -= 1;
+        while (start > 0 && !/\s/.test(value[start - 1] ?? "")) start -= 1;
+        internalChange.current = true;
+        moveCursor(start);
+        onChange(value.slice(0, start) + value.slice(end));
       }
       return;
     }
-    if (!input) return;
-    // Parent owns the empty-"?" help hotkey; never insert it into the composer.
-    if (input === "?" && current.length === 0) return;
-    const next = current + input;
-    valueRef.current = next;
-    onChange(next);
+    if (key.backspace) {
+      const start = cursorRef.current;
+      if (start === 0) return;
+      internalChange.current = true;
+      moveCursor(start - 1);
+      onChange(value.slice(0, start - 1) + value.slice(start));
+      return;
+    }
+    if (key.delete) {
+      const start = cursorRef.current;
+      if (start >= value.length) return;
+      internalChange.current = true;
+      onChange(value.slice(0, start) + value.slice(start + 1));
+      return;
+    }
+    if (!input || (input === "?" && value.length === 0)) return;
+    const start = cursorRef.current;
+    internalChange.current = true;
+    moveCursor(start + input.length, value.length + input.length);
+    onChange(value.slice(0, start) + input + value.slice(start));
   });
-  const placeholder = busy ? "Kulmi is working. Enter to steer, Esc to stop." : "What should we build?";
+
   return (
     <Box marginTop={busy ? 0 : 1} borderStyle="round" borderColor={busy ? theme.faint : theme.cocoa} paddingX={1}>
-      <Text color={busy ? theme.faint : theme.caramel}>{glyph.user} </Text>
-      {value.length > 0
-        ? <Text>{value}</Text>
-        : <Text color={theme.faint}>{placeholder}</Text>}
+      <Text color={busy ? theme.faint : theme.user}>{glyph.user} </Text>
+      {value.length === 0
+        ? <Text color={theme.faint}>{placeholder}</Text>
+        : <Text><Text>{value.slice(0, cursor)}</Text><Text inverse>{value[cursor] ?? " "}</Text><Text>{value.slice(cursor + 1)}</Text></Text>}
     </Box>
   );
 }
@@ -653,18 +805,19 @@ function Help({ onClose, custom }: { onClose: () => void; custom: ReadonlyArray<
   );
 }
 
-function CommandPalette({ query, columns }: { query: string; columns: number }) {
-  const matches = commands.filter(([command]) => command.startsWith(query.split(/\s/)[0] ?? ""));
-  if (matches.length === 0) return null;
+function CommandPalette({ entries, cursor, columns }: { entries: ReadonlyArray<CommandEntry>; cursor: number; columns: number }) {
+  if (entries.length === 0) return null;
   const twoColumns = columns >= 72;
   return (
     <Box marginTop={1} flexDirection="row" flexWrap="wrap">
-      {matches.map(([command, detail]) => (
-        <Box key={command} width={twoColumns ? "50%" : "100%"}>
-          <Text><Text color={theme.sand}>{command.padEnd(12)}</Text><Text color={theme.faint}>{detail}</Text></Text>
+      {entries.map((entry, index) => (
+        <Box key={entry.name} width={twoColumns ? "50%" : "100%"}>
+          <Text color={index === cursor ? theme.cream : theme.muted} bold={index === cursor}>
+            {index === cursor ? "› " : "  "}<Text color={theme.sand}>{entry.name.padEnd(12)}</Text><Text color={theme.faint}>{entry.description}</Text>
+          </Text>
         </Box>
       ))}
-      <Box width="100%"><Text color={theme.cocoa}>type to filter</Text></Box>
+      <Box width="100%"><Text color={theme.cocoa}>↑↓ select  ·  tab complete  ·  enter run</Text></Box>
     </Box>
   );
 }
@@ -706,13 +859,15 @@ function MarkdownBlock({ text, width }: { text: string; width: number }) {
   );
 }
 
-function Footer({ runtime, status, busy, agents, contextTokens, contextWindow }: { runtime: TuiRuntimeInfo; status: string; busy: boolean; agents: number; contextTokens: number; contextWindow: number }) {
+function Footer({ runtime, status, busy, agents, usage, contextTokens, contextWindow }: { runtime: TuiRuntimeInfo; status: string; busy: boolean; agents: number; usage: TokenUsage; contextTokens: number; contextWindow: number }) {
   const fillRatio = contextWindow > 0 ? Math.min(1, contextTokens / contextWindow) : 0;
   const fillPercent = Math.round(fillRatio * 100);
   const barWidth = 20;
   const filled = Math.round(fillRatio * barWidth);
   const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
   const barColor = fillRatio >= 0.9 ? "red" : fillRatio >= 0.78 ? "yellow" : theme.faint;
+  const cacheInput = usage.cacheHitTokens + usage.cacheMissTokens;
+  const cachePercent = cacheInput > 0 ? Math.round(usage.cacheHitTokens / cacheInput * 100) : 0;
   return (
     <Box flexDirection="column">
       <Box>
@@ -722,6 +877,11 @@ function Footer({ runtime, status, busy, agents, contextTokens, contextWindow }:
           {"  ·  "}{busy ? "esc stop" : "? help"}
         </Text>
       </Box>
+      {usage.totalTokens > 0 && (
+        <Box>
+          <Text color={theme.faint}>{usage.totalTokens.toLocaleString()} tokens  ·  {cachePercent}% cache</Text>
+        </Box>
+      )}
       {contextTokens > 0 && (
         <Box>
           <Text color={barColor}>{bar}</Text>

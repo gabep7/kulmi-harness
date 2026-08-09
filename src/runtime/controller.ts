@@ -40,11 +40,12 @@ import { astGrepTool, astGrepReplaceTool } from "../tools/ast-grep.js";
 import { gitTools } from "../tools/git.js";
 import { browserQaTool } from "../tools/browser.js";
 import { attachImageTool } from "../tools/media.js";
-import { disposeLspClients, lspTool } from "../tools/lsp.js";
+import { disposeSessionClients, lspTool } from "../tools/lsp.js";
 import { processTools, ProcessManager } from "../tools/processes.js";
 import { resolveExistingCredential } from "../auth/credentials.js";
 import { connectMcpServers, type McpConnection } from "../mcp/client.js";
 import { AnthropicProvider } from "../provider/anthropic.js";
+import { OpenAIResponsesProvider } from "../provider/openai-responses.js";
 import { loadAllowlist, matchesAllowlist } from "../security/allowlist.js";
 
 export interface ControllerOptions {
@@ -89,6 +90,7 @@ export class SessionController {
   #runAbort: AbortController | undefined;
   #closed = false;
   #closePromise: Promise<void> | undefined;
+  #compacting: Promise<void> | undefined;
   readonly #processes: ProcessManager;
   readonly #mcp: McpConnection;
   readonly #worktrees: WorktreeManager;
@@ -174,7 +176,11 @@ export class SessionController {
       );
     }
     const search = { ...config.search, mode: options.webSearch ?? config.search.mode };
-    const provider = resolved.protocol === "anthropic" ? new AnthropicProvider(resolved) : new OpenAIProvider(resolved);
+    const provider = resolved.protocol === "anthropic"
+      ? new AnthropicProvider(resolved)
+      : resolved.protocol === "openai-responses"
+        ? new OpenAIResponsesProvider(resolved)
+        : new OpenAIProvider(resolved);
     const providerRef = { current: provider as ModelProvider };
     const events = options.events ?? new EventBus();
     const permissions: PermissionApi = {
@@ -477,7 +483,7 @@ export class SessionController {
     } catch (error) {
       await processes.disposeAll().catch(() => undefined);
       await connectedMcp?.dispose().catch(() => undefined);
-      disposeLspClients();
+      disposeSessionClients(session.id);
       throw error;
     }
   }
@@ -528,12 +534,15 @@ export class SessionController {
   async #close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    // Abort any in-progress compaction so close() does not dispose resources
+    // (LSP clients, MCP, session store) while compaction is still using them.
     this.#runAbort?.abort(new Error("session closed"));
+    await this.#compacting?.catch(() => undefined);
     await this.#running?.catch(() => undefined);
     await this.#scheduler.cancelAll().catch(() => undefined);
     await this.#reclaimTerminalWorktrees();
     await this.#processes.disposeAll();
-    disposeLspClients();
+    disposeSessionClients(this.sessionId);
     await this.#mcp.dispose().catch(() => undefined);
     await this.events.emit({
       type: "session.finished",
@@ -562,7 +571,11 @@ export class SessionController {
     await resolveExistingCredential({ cwd: this.workspaceRoot, requestedModel: profileName });
     const resolved = resolveModel(config, profileName);
     if (resolved.name === this.modelProfile) return `already using ${resolved.name} (${resolved.model})`;
-    const provider = resolved.protocol === "anthropic" ? new AnthropicProvider(resolved) : new OpenAIProvider(resolved);
+    const provider = resolved.protocol === "anthropic"
+      ? new AnthropicProvider(resolved)
+      : resolved.protocol === "openai-responses"
+        ? new OpenAIResponsesProvider(resolved)
+        : new OpenAIProvider(resolved);
     this.#providerRef.current = provider;
     this.#agent.setProvider(provider);
     this.model = provider.model;
@@ -654,6 +667,27 @@ export class SessionController {
     }
   }
 
+  async compact(): Promise<void> {
+    if (this.#closed) throw new Error("session is closed");
+    if (this.#running) throw new Error("cannot compact while the session is running");
+    if (this.#compacting) throw new Error("compaction is already in progress");
+    const abort = new AbortController();
+    const holder: { promise: Promise<void> | undefined } = { promise: undefined };
+    holder.promise = (async () => {
+      try {
+        await this.#agent.compact(abort.signal);
+        // Manual compaction rewrites the transcript outside a turn, which
+        // invalidates the message boundaries recorded by every checkpoint.
+        // Disable undo so it cannot splice at a now-wrong index.
+        await this.#checkpoint.disableUndo();
+      } finally {
+        if (this.#compacting === holder.promise) this.#compacting = undefined;
+      }
+    })();
+    this.#compacting = holder.promise;
+    await holder.promise;
+  }
+
   async undo(): Promise<UndoResult> {
     if (this.#closed) throw new Error("session is closed");
     if (this.#running) throw new Error("cannot undo while the session is running");
@@ -693,7 +727,7 @@ export class SessionController {
       } catch (rollbackError) {
         rollbackErrors.push(`files: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
       }
-      if (began && rollbackErrors.length === 0) {
+      if (began) {
         try {
           await prepared.cancel();
         } catch (rollbackError) {

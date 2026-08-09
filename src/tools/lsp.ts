@@ -340,12 +340,19 @@ class LspClient {
   }
 }
 
+// Clients are scoped per session so two sessions on the same workspace do not
+// share open-file/document state and one session's close cannot kill the other
+// session's language server.
 const clients = new Map<string, LspClient>();
 
-function getClient(workspaceRoot: string, languageId: string): LspClient {
+function sessionKey(sessionId: string | undefined, workspaceRoot: string): string {
+  return sessionId ? `${sessionId}:${workspaceRoot}` : workspaceRoot;
+}
+
+function getClient(sessionId: string | undefined, workspaceRoot: string, languageId: string): LspClient {
   const serverBinary = LANGUAGE_SERVERS[languageId];
   if (!serverBinary) throw new Error(`No LSP server configured for language "${languageId}"`);
-  const key = `${workspaceRoot}:${languageId}`;
+  const key = `${sessionKey(sessionId, workspaceRoot)}:${languageId}`;
   let client = clients.get(key);
   if (!client) {
     client = new LspClient(workspaceRoot, serverBinary);
@@ -354,10 +361,17 @@ function getClient(workspaceRoot: string, languageId: string): LspClient {
   return client;
 }
 
-export function disposeLspClients(): void {
-  for (const client of clients.values()) client.dispose();
-  clients.clear();
+export function disposeSessionClients(sessionId: string | undefined): void {
+  if (!sessionId) return;
+  const prefix = `${sessionId}:`;
+  for (const [key, client] of clients) {
+    if (key.startsWith(prefix)) {
+      client.dispose();
+      clients.delete(key);
+    }
+  }
 }
+
 
 function formatDefinition(result: unknown): string {
   if (!result) return "No definition found";
@@ -446,7 +460,7 @@ export const lspTool = defineTool({
     const languageId = action === "symbols" ? "typescript" : languageIdForFile(input.file);
     let client: LspClient;
     try {
-      client = getClient(context.workspaceRoot, languageId ?? "typescript");
+      client = getClient(context.sessionId, context.workspaceRoot, languageId ?? "typescript");
     } catch (err) {
       if (action === "symbols") return { content: "LSP server unavailable for workspace symbol search." };
       throw err;
@@ -489,7 +503,7 @@ export async function probeDiagnostics(context: ToolContext, absolutePath: strin
   try {
     const languageId = languageIdForFile(absolutePath);
     if (!languageId) return undefined;
-    const client = getClient(context.workspaceRoot, languageId);
+    const client = getClient(context.sessionId, context.workspaceRoot, languageId);
     const probe = (async () => {
       await client.ensureRunning();
       const remaining = timeoutMs - (Date.now() - started);

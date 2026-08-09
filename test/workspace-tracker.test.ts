@@ -61,6 +61,32 @@ describe("WorkspaceSnapshot", () => {
     expect(await snapshot.reconcile(checkpoint)).toEqual([]);
   });
 
+  it("pins the base revision so an out-of-band commit mid-turn cannot corrupt the undo snapshot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "kulmi-tracker-headrace-"));
+    const session = await mkdtemp(join(tmpdir(), "kulmi-tracker-headrace-session-"));
+    await exec("git", ["init", root]);
+    await exec("git", ["-C", root, "config", "user.email", "test@example.test"]);
+    await exec("git", ["-C", root, "config", "user.name", "Test"]);
+    await writeFile(join(root, "a.ts"), "v1\n");
+    await exec("git", ["-C", root, "add", "."]);
+    await exec("git", ["-C", root, "commit", "-m", "initial"]);
+    const checkpoint = new CheckpointStore(session, root);
+    await checkpoint.beginTurn(1, "agent");
+    const snapshot = await WorkspaceSnapshot.capture(root);
+
+    // An out-of-band commit advances HEAD while the turn is in flight.
+    await writeFile(join(root, "a.ts"), "v2\n");
+    await exec("git", ["-C", root, "add", "."]);
+    await exec("git", ["-C", root, "commit", "-m", "out-of-band"]);
+    // The agent's own change on top of the working tree.
+    await writeFile(join(root, "a.ts"), "agent\n");
+
+    expect(await snapshot.reconcile(checkpoint)).toEqual(["a.ts"]);
+    // The pre-turn "before" must be v1 (capture-time HEAD), not v2.
+    expect(await readFile(join(session, "checkpoints", "0001-agent", "files", "a.ts"), "utf8"))
+      .toBe("v1\n");
+  });
+
   it("tracks permission-only changes", async () => {
     const root = await mkdtemp(join(tmpdir(), "kulmi-tracker-mode-"));
     const session = await mkdtemp(join(tmpdir(), "kulmi-tracker-mode-session-"));

@@ -13,6 +13,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { SandboxConfig } from "../config/config.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
+import { redactKnownSecrets } from "../core/redact.js";
 
 export interface ProcessResult {
   exitCode: number;
@@ -325,12 +326,45 @@ function readableRoots(
   for (const entry of (env.PATH ?? "").split(delimiter)) {
     if (!entry || !isAbsolute(entry) || !existsSync(entry)) continue;
     const directory = toolRoot(entry);
-    if (directory === userHome || isInside(directory, userHome)) continue;
-    candidates.push(directory);
+    const insideHome = directory === userHome || isInside(directory, userHome);
+    // Do not expose a whole home-local bin directory. The binaries it resolves
+    // to are exposed below through their realpaths.
+    if (!insideHome) candidates.push(directory);
+    // A home-local node manager (nvm, fnm, hermes, volta, mise) keeps node, npm
+    // and their JS entrypoints under the user's home, which the bare PATH dir
+    // never exposed. Resolve those binaries to their realpaths and add the node
+    // install's bin and global node_modules roots so verification commands such
+    // as `npm test` can run inside the sandbox without exposing the home dir.
+    candidates.push(...packageManagerRoots(directory));
     const globalModules = join(dirname(directory), "lib", "node_modules");
-    if (executable(join(directory, "node")) && existsSync(globalModules)) candidates.push(globalModules);
+    if (existsSync(globalModules)) candidates.push(globalModules);
   }
   return minimizeRoots(candidates.filter((path) => existsSync(path)).map(canonicalPath));
+}
+
+const packageManagerBinaries = ["node", "npm", "npx", "pnpm", "yarn", "corepack", "bun", "deno"] as const;
+
+// Resolve a package-manager binary (often a symlink into a versioned node
+// install) and return the read-only roots needed to execute it: the directory
+// of the resolved executable and the global node_modules root that holds the
+// package-manager's own JS, such as npm-cli.js.
+function packageManagerRoots(binDir: string): string[] {
+  const roots: string[] = [];
+  for (const tool of packageManagerBinaries) {
+    let resolved: string;
+    try {
+      resolved = realpathSync(join(binDir, tool));
+    } catch {
+      continue;
+    }
+    roots.push(dirname(resolved));
+    const modulesMarker = "/lib/node_modules/";
+    const markerIndex = resolved.indexOf(modulesMarker);
+    if (markerIndex !== -1) {
+      roots.push(resolved.slice(0, markerIndex + modulesMarker.length));
+    }
+  }
+  return roots;
 }
 
 function toolRoot(path: string): string {
@@ -398,10 +432,5 @@ function executable(path: string): boolean {
 }
 
 function redact(value: string): string {
-  let redacted = value;
-  for (const [name, secret] of Object.entries(process.env)) {
-    if (!secret || secret.length < 8 || !/(?:KEY|SECRET|TOKEN|PASSWORD)/i.test(name)) continue;
-    redacted = redacted.replaceAll(secret, `[redacted:${name}]`);
-  }
-  return redacted;
+  return redactKnownSecrets(value);
 }

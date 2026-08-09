@@ -36,6 +36,45 @@ describe("CheckpointStore", () => {
     ]);
   });
 
+  it("refuses to undo a turn whose transcript was rewritten by compaction", async () => {
+    const session = await mkdtemp(join(tmpdir(), "kulmi-checkpoints-"));
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-checkpoint-workspace-"));
+    const store = new CheckpointStore(session, workspace);
+    const state = runState();
+
+    await store.beginTurn(12, state.agentId, state);
+    await store.markCompacted();
+    await store.finalizeTurn();
+
+    await expect(store.prepareUndo(state.agentId, 20)).rejects.toThrow(/compaction rewrote the transcript/);
+  });
+
+  it("clears the undo journal on cancel even after files were applied, so it does not poison later undos", async () => {
+    const session = await mkdtemp(join(tmpdir(), "kulmi-checkpoints-"));
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-checkpoint-workspace-"));
+    const file = join(workspace, "f.txt");
+    await writeFile(file, "before\n");
+    const store = new CheckpointStore(session, workspace);
+    const state = runState();
+
+    await store.beginTurn(1, state.agentId, state);
+    await store.capture(file);
+    await writeFile(file, "after\n");
+    await store.finalizeTurn();
+
+    const undo = await store.prepareUndo(state.agentId, 4);
+    await undo.begin("truncate");
+    await undo.apply();
+    expect(await readFile(file, "utf8")).toBe("before\n");
+
+    // A later rollback fails; cancel() must still clear the journal so the
+    // session is not permanently blocked by a stale "unfinished undo" guard.
+    await undo.cancel();
+    // A fresh prepareUndo now re-evaluates against the actual file state rather
+    // than throwing the mixed-state poison.
+    await expect(store.prepareUndo(state.agentId, 4)).rejects.toThrow(/cannot undo|changed after the turn|no completed turn/);
+  });
+
   it("restores changed and created files, including permissions, then commits one undo", async () => {
     const session = await mkdtemp(join(tmpdir(), "kulmi-checkpoints-"));
     const workspace = await mkdtemp(join(tmpdir(), "kulmi-checkpoint-workspace-"));

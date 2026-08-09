@@ -239,10 +239,14 @@ export class AnthropicProvider implements ModelProvider {
       });
     }
 
+    // Anthropic requires budget_tokens to be strictly less than max_tokens.
+    // A small output cap (<= 1024) would otherwise force the 1024 floor above
+    // the cap and produce a request the API rejects with a 400.
     const budgetTokens = Math.max(
       MIN_THINKING_BUDGET_TOKENS,
       Math.min(this.#thinkingBudgetTokens, maxTokens - 1),
     );
+    const thinkingEnabled = thinking && budgetTokens < maxTokens;
     const body = JSON.stringify({
       model: this.model,
       max_tokens: maxTokens,
@@ -250,7 +254,7 @@ export class AnthropicProvider implements ModelProvider {
       messages,
       ...(tools.length ? { tools } : {}),
       stream: true,
-      ...(thinking ? { thinking: { type: "enabled", budget_tokens: budgetTokens } } : {}),
+      ...(thinkingEnabled ? { thinking: { type: "enabled", budget_tokens: budgetTokens } } : {}),
     });
 
     return withProviderRetries({

@@ -308,7 +308,7 @@ const writeFileTool = defineTool({
   schema: z.object({
     path: z.string().min(1),
     content: z.string(),
-    expected_sha256: z.string().regex(/^[a-f0-9]{16}$/).optional(),
+    expected_sha256: z.string().regex(/^[a-f0-9]{16}(?:[a-f0-9]{48})?$/).optional(),
   }),
   readOnly: false,
   async execute(context, input) {
@@ -325,7 +325,7 @@ const writeFileTool = defineTool({
       if (!input.expected_sha256) {
         throw new Error(`replacing ${input.path} requires expected_sha256 from read_file`);
       }
-      if (input.expected_sha256 !== fingerprint) {
+      if (!hashMatches(input.expected_sha256, previous.content)) {
         throw new Error(`stale write for ${input.path}: expected ${input.expected_sha256}, found ${fingerprint}`);
       }
     }
@@ -366,7 +366,7 @@ const editFileTool = defineTool({
     path: z.string().min(1),
     old_text: z.string().min(1),
     new_text: z.string(),
-    expected_sha256: z.string().regex(/^[a-f0-9]{16}$/),
+    expected_sha256: z.string().regex(/^[a-f0-9]{16}(?:[a-f0-9]{48})?$/),
     replace_all: z.boolean().default(false),
     allow_stale_sha256: z.boolean().default(false),
   }),
@@ -382,7 +382,7 @@ const editFileTool = defineTool({
     const current = await readTextFileBounded(path, input.path, true);
     const fingerprint = sha256(current);
     let staleRecoveryWarning: string | undefined;
-    if (input.expected_sha256 !== fingerprint) {
+    if (!hashMatches(input.expected_sha256, current)) {
       if (input.allow_stale_sha256 && current.includes(input.old_text)) {
         staleRecoveryWarning = `Warning: expected sha256 ${input.expected_sha256} is stale (found ${fingerprint}), but old_text was located in the current file content. Proceeding with edit.`;
       } else {
@@ -450,7 +450,7 @@ const editFilesTool = defineTool({
   schema: z.object({
     files: z.array(z.object({
       path: z.string().min(1),
-      expected_sha256: z.string().regex(/^[a-f0-9]{16}$/),
+      expected_sha256: z.string().regex(/^[a-f0-9]{16}(?:[a-f0-9]{48})?$/),
       edits: z.array(z.object({
         old_text: z.string().min(1),
         new_text: z.string(),
@@ -484,7 +484,7 @@ const editFilesTool = defineTool({
       paths.add(rel);
       const current = await readTextFileBounded(path, file.path, true);
       const fingerprint = sha256(current);
-      if (file.expected_sha256 !== fingerprint) {
+      if (!hashMatches(file.expected_sha256, current)) {
         throw new Error(`stale edit for ${file.path}: expected ${file.expected_sha256}, found ${fingerprint}`);
       }
       const applied = applyReplacements(current, file.path, file.edits);
@@ -571,7 +571,7 @@ const replaceByLineRangeTool = defineTool({
     start_line: z.number().int().min(1),
     end_line: z.number().int().min(1),
     new_text: z.string(),
-    expected_sha256: z.string().regex(/^[a-f0-9]{16}$/),
+    expected_sha256: z.string().regex(/^[a-f0-9]{16}(?:[a-f0-9]{48})?$/),
   }),
   readOnly: false,
   async execute(context, input) {
@@ -584,7 +584,7 @@ const replaceByLineRangeTool = defineTool({
     assertNotSensitivePath(path);
     const current = await readTextFileBounded(path, input.path, true);
     const fingerprint = sha256(current);
-    if (input.expected_sha256 !== fingerprint) {
+    if (!hashMatches(input.expected_sha256, current)) {
       throw new Error(`stale edit for ${input.path}: expected ${input.expected_sha256}, found ${fingerprint}`);
     }
     const currentLines = splitLogicalLines(current);
@@ -638,7 +638,7 @@ const deleteFileTool = defineTool({
     "Delete one regular workspace file after read_file confirmation. expected_sha256 is required to reject stale deletion. Shell deletion remains blocked.",
   schema: z.object({
     path: z.string().min(1),
-    expected_sha256: z.string().regex(/^[a-f0-9]{16}$/),
+    expected_sha256: z.string().regex(/^[a-f0-9]{16}(?:[a-f0-9]{48})?$/),
   }),
   readOnly: false,
   async execute(context, input) {
@@ -651,7 +651,7 @@ const deleteFileTool = defineTool({
     assertNotSensitivePath(path);
     const content = await readFileBytesBounded(path, input.path, true);
     const fingerprint = sha256(content);
-    if (input.expected_sha256 !== fingerprint) {
+    if (!hashMatches(input.expected_sha256, content)) {
       throw new Error(`stale deletion for ${input.path}: expected ${input.expected_sha256}, found ${fingerprint}`);
     }
     await context.checkpoint.capture(path);
@@ -946,5 +946,12 @@ async function syncDirectory(path: string): Promise<void> {
 }
 
 function sha256(content: string | Uint8Array): string {
-  return createHash("sha256").update(content).digest("hex").slice(0, 16);
+  return createHash("sha256").update(content).digest("hex");
+}
+
+// Accept either the full 64-char digest or a legacy 16-char prefix so resumed
+// sessions with older read_file hashes keep working.
+function hashMatches(expected: string, content: string | Uint8Array): boolean {
+  const digest = sha256(content);
+  return expected === digest || expected === digest.slice(0, 16);
 }

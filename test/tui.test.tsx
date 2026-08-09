@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import stripAnsi from "strip-ansi";
 import { cleanup, render } from "ink-testing-library";
 import { EventBus } from "../src/core/events.js";
 import { TuiApp } from "../src/tui/app.js";
@@ -54,10 +55,13 @@ describe("Kulmi TUI", () => {
       durationMs: 2,
     });
     await pause();
-    const frame = view.frames.join("\n");
+    const frame = stripAnsi(view.frames.join("\n"));
     expect(frame).toContain("test-model");
     expect(frame).toContain("Improve the cache layer");
     expect(frame).toContain("Read file");
+    expect(frame).toContain("you");
+    expect(frame).toContain("assistant");
+    expect(frame).toContain("tool activity");
     expect(frame).toContain("Audit cache behavior");
     expect(frame).toContain("chat");
     expect(frame).not.toContain("processed");
@@ -72,6 +76,8 @@ describe("Kulmi TUI", () => {
     expect(frame).toContain("│ Evidence attached");
     expect(frame).not.toContain("**Cache path**");
     expect(frame).toContain("What should we build?");
+    expect(frame).toContain("1,100 tokens");
+    expect(frame).toContain("80% cache");
   });
 
   it("turns a permission request into a keyboard approval prompt", async () => {
@@ -181,7 +187,7 @@ describe("Kulmi TUI", () => {
     view.stdin.write("\r");
     await pause();
     expect(steer).toHaveBeenCalledExactlyOnceWith("focus on the cache layer");
-    const frame = view.frames.join("\n");
+    const frame = stripAnsi(view.frames.join("\n"));
     expect(frame).toContain("steered: focus on the cache layer");
     const composerLine = (view.lastFrame() ?? "").split("\n").find((line) => line.includes("Kulmi is working"));
     expect(composerLine).toBeDefined();
@@ -286,7 +292,7 @@ describe("Kulmi TUI", () => {
     );
     view.stdin.write("/");
     await pause();
-    const frame = view.lastFrame() ?? "";
+    const frame = stripAnsi(view.lastFrame() ?? "");
     expect(frame).toContain("/help");
     expect(frame).toContain("/sessions");
     expect(frame).toContain("/undo");
@@ -443,7 +449,7 @@ describe("Kulmi TUI", () => {
     );
     await pause();
     const frame = view.lastFrame() ?? "";
-    expect(frame).toContain("agents");
+    expect(frame).toContain("workers");
     expect(frame).toContain("1/1 running");
     expect(frame).toContain("agent");
     expect(frame).toContain("Read file");
@@ -472,7 +478,7 @@ describe("Kulmi TUI", () => {
         onExit={() => undefined}
       />,
     );
-    const frame = view.frames.join("\n");
+    const frame = stripAnsi(view.frames.join("\n"));
     expect(frame).toContain("line 1");
     expect(frame).toContain("line 40");
     expect(frame).not.toContain("…");
@@ -554,7 +560,7 @@ describe("Kulmi TUI", () => {
         onExit={() => undefined}
       />,
     );
-    const frame = view.frames.join("\n");
+    const frame = stripAnsi(view.frames.join("\n"));
     expect(frame).toContain("Keep this request visible");
     expect(frame).toContain("ENOENT missing final file");
     expect(frame).toContain("--- a/src/10.ts");
@@ -601,7 +607,7 @@ describe("Kulmi TUI", () => {
       durationMs: 1,
     });
     await pause();
-    const frame = view.frames.join("\n");
+    const frame = stripAnsi(view.frames.join("\n"));
     expect(frame).toContain("Search code");
     expect(frame).toContain("3 matches in 2 files");
     expect(frame).toContain("Update plan");
@@ -683,6 +689,95 @@ describe("Kulmi TUI", () => {
     expect(store.getSnapshot().expandedThinking).toBe(true);
     expect(view.lastFrame() ?? "").toContain("What should we build?");
     expect(view.lastFrame() ?? "").not.toMatch(/› o/);
+  });
+
+  it("shows streamed answer text and keeps citations with the final response", async () => {
+    const bus = new EventBus();
+    const store = new TuiStore();
+    store.attach(bus);
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        contextWindow={128000}
+        onSubmit={async () => undefined}
+        onCommand={async () => undefined}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    await bus.emit({ type: "agent.started", agentId: "root", prompt: "find the docs" });
+    await bus.emit({ type: "assistant.text.delta", agentId: "root", text: "partial answer" });
+    await bus.emit({
+      type: "assistant.citations",
+      agentId: "root",
+      citations: [{ title: "Example docs", url: "https://example.com/docs" }],
+    });
+    await pause();
+    expect(view.lastFrame()).toContain("partial answer");
+    expect(view.lastFrame()).toContain("responding");
+    expect(view.lastFrame()).toContain("Example docs");
+
+    await bus.emit({ type: "assistant.message", agentId: "root", text: "partial answer" });
+    await pause();
+    const assistant = store.getSnapshot().transcript.at(-1);
+    expect(assistant).toMatchObject({
+      kind: "assistant",
+      text: "partial answer",
+      citations: [{ title: "Example docs", url: "https://example.com/docs" }],
+    });
+    expect(view.lastFrame()).toContain("sources");
+  });
+
+  it("supports cursor editing, prompt history, and custom slash completion", async () => {
+    const submitted: string[] = [];
+    const commandsRun: string[] = [];
+    const view = render(
+      <TuiApp
+        store={new TuiStore()}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        contextWindow={128000}
+        customCommands={[{ name: "/deploy", description: "Deploy the app" }]}
+        onSubmit={async (prompt) => { submitted.push(prompt); }}
+        onCommand={async (command) => { commandsRun.push(command); }}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+      />,
+    );
+    view.stdin.write("ab");
+    await pause();
+    view.stdin.write("\u001b[D");
+    view.stdin.write("X");
+    await pause();
+    view.stdin.write("\r");
+    await pause(100);
+    expect(submitted).toEqual(["aXb"]);
+
+    view.stdin.write("/de");
+    await pause();
+    expect(view.lastFrame()).toContain("/deploy");
+    view.stdin.write("\t");
+    await pause();
+    view.stdin.write("\r");
+    await pause(100);
+    view.stdin.write("second");
+    await pause();
+    view.stdin.write("\r");
+    await pause(100);
+    view.stdin.write("\u001b[A");
+    await pause();
+    expect(view.lastFrame()).toContain("second");
+    view.stdin.write("\u001b[A");
+    await pause();
+    expect(view.lastFrame()).toContain("/deploy");
+    expect(submitted).toEqual(["aXb", "second"]);
+    expect(commandsRun).toEqual(["/deploy"]);
   });
 });
 

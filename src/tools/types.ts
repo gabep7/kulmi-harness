@@ -46,6 +46,7 @@ export interface PermissionApi {
 export interface ToolContext {
   workspaceRoot: string;
   cwd: string;
+  sessionId?: string;
   autonomy: AutonomyLevel;
   signal: AbortSignal;
   events: EventBus;

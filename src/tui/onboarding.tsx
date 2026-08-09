@@ -149,6 +149,13 @@ export function CredentialSetup({
       setStep("api_key");
       return;
     }
+    if (clean === "responses" || clean === "openai-responses" || clean === "r") {
+      setProtocol("openai-responses");
+      setProtocolInput("openai-responses");
+      setError("");
+      setStep("api_key");
+      return;
+    }
     if (clean === "anthropic" || clean === "a") {
       setProtocol("anthropic");
       setProtocolInput("anthropic");
@@ -156,7 +163,7 @@ export function CredentialSetup({
       setStep("api_key");
       return;
     }
-    setError("Type openai or anthropic");
+    setError("Type openai, openai-responses, or anthropic");
   };
 
   return (
@@ -166,7 +173,7 @@ export function CredentialSetup({
         <Text color={theme.cream} bold>{needsProfile ? "Set up a model provider" : "Connect"}</Text>
         {needsProfile ? (
           <Text color={theme.muted}>
-            Kulmi talks to any OpenAI-compatible /v1/chat/completions endpoint, or Anthropic Messages when protocol is anthropic.
+            Kulmi talks to OpenAI-compatible chat completions, OpenAI Responses, or Anthropic Messages endpoints.
           </Text>
         ) : existingProfile ? (
           <Text color={theme.muted}>

@@ -96,3 +96,15 @@ function config(): SearchConfig {
     searxngUrl: "https://search.internal",
   };
 }
+
+  it("blocks 6to4 addresses that embed private IPv4 destinations", async () => {
+    // 2002:7f00:0001:: encodes IPv4 127.0.0.1
+    await expect(assertPublicUrl(new URL("http://[2002:7f00:1::]/")))
+      .rejects.toThrow("private");
+  });
+
+  it("blocks Teredo prefix addresses", async () => {
+    // 2001:0000::/32 is the Teredo prefix
+    await expect(assertPublicUrl(new URL("http://[2001:0::]/")))
+      .rejects.toThrow("private");
+  });

@@ -7,7 +7,7 @@ import { WorkspaceSnapshot, type WorkspaceChange } from "../runtime/workspace-tr
 import { assertNotSensitivePath, resolveWorkspacePath } from "../security/paths.js";
 import { disposeChildEnvironment, safeChildEnvironment } from "../security/environment.js";
 import { resolveToolBinary } from "../runtime/binaries.js";
-import { defineTool } from "./types.js";
+import { defineTool, type ToolContext } from "./types.js";
 
 export const astGrepTool = defineTool({
   name: "ast_grep",
@@ -133,6 +133,16 @@ export const astGrepReplaceTool = defineTool({
     if (!binary) {
       throw new Error("sg (ast-grep) binary not found. Install dependencies with npm install or add sg to PATH.");
     }
+    // Pre-flight: enumerate the files that would be rewritten and refuse any
+    // sensitive one (`.env`, `.pem`, `.key`, `secrets.*`, ...). The rewrite
+    // tool otherwise applies --update-all across the whole directory with no
+    // per-file guard, unlike write_file/edit_file.
+    const sensitiveTargets = await collectSensitiveTargets(context, binary, input.pattern, input.lang, cwd);
+    if (sensitiveTargets.length > 0) {
+      throw new Error(
+        `ast_grep_replace would modify sensitive file${sensitiveTargets.length === 1 ? "" : "s"}: ${sensitiveTargets.join(", ")}`,
+      );
+    }
     const snapshot = await WorkspaceSnapshot.capture(context.workspaceRoot);
     const args = ["run", "--pattern", input.pattern, "--rewrite", input.replacement, "--update-all"];
     if (input.lang) args.push("--lang", input.lang);
@@ -219,3 +229,75 @@ export const astGrepReplaceTool = defineTool({
     };
   },
 });
+
+
+// Run sg in read-only match mode over the rewrite target and return the paths
+// of any matching file that assertNotSensitivePath considers sensitive. This
+// lets ast_grep_replace refuse to touch secrets it would otherwise rewrite.
+async function collectSensitiveTargets(
+  context: ToolContext,
+  binary: string,
+  pattern: string,
+  lang: string | undefined,
+  cwd: string,
+): Promise<string[]> {
+  const args = ["run", "--pattern", pattern, "--json=stream"];
+  if (lang) args.push("--lang", lang);
+  args.push(cwd);
+  const env = safeChildEnvironment();
+  let child: ChildProcessByStdio<null, Readable, Readable>;
+  try {
+    child = spawn(binary, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+  } catch (error) {
+    disposeChildEnvironment(env);
+    throw error;
+  }
+  const errors: Buffer[] = [];
+  const sensitive = new Set<string>();
+  let carry = "";
+  let limitReached = false;
+  const onMatch = (rawLine: string) => {
+    if (limitReached || !rawLine.trim()) return;
+    try {
+      const match = JSON.parse(rawLine) as { file?: string };
+      if (match.file && match.file !== cwd) {
+        try {
+          assertNotSensitivePath(match.file);
+        } catch {
+          sensitive.add(match.file);
+        }
+      }
+    } catch {
+      limitReached = true;
+    }
+  };
+  child.stdout.on("data", (chunk: Buffer) => {
+    carry += chunk.toString("utf8");
+    while (true) {
+      const newline = carry.indexOf("\n");
+      if (newline === -1) break;
+      const rawLine = carry.slice(0, newline);
+      carry = carry.slice(newline + 1);
+      onMatch(rawLine);
+    }
+  });
+  child.stderr.on("data", (chunk: Buffer) => errors.push(chunk));
+  const abort = () => child.kill("SIGTERM");
+  context.signal.addEventListener("abort", abort, { once: true });
+  const { code } = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  }).finally(() => {
+    context.signal.removeEventListener("abort", abort);
+    disposeChildEnvironment(env);
+  });
+  if (context.signal.aborted) throw context.signal.reason ?? new Error("ast_grep_replace aborted");
+  if (!limitReached && carry.trim()) onMatch(carry);
+  if ((code ?? 1) > 1) {
+    const stderr = Buffer.concat(errors).toString("utf8").trim();
+    if (stderr.includes("ENOENT") || stderr.includes("not found") || code === 127) {
+      throw new Error("sg (ast-grep) binary not found. Install dependencies with npm install or add sg to PATH.");
+    }
+  }
+  return [...sensitive];
+}

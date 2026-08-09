@@ -23,6 +23,9 @@ import {
 const MAX_EVENT_LOG_BYTES = 4 * 1024 * 1024;
 const EVENT_BATCH_BYTES = 64 * 1024;
 const EVENT_FLUSH_DELAY_MS = 25;
+// Bound the append-only message log; when it exceeds this it is compacted back
+// into messages.json and reset.
+const MAX_MESSAGE_LOG_BYTES = 8 * 1024 * 1024;
 
 export interface SessionMetadata {
   id: string;
@@ -54,6 +57,7 @@ export class SessionStore {
   readonly path: string;
   readonly #metadataPath: string;
   readonly #messagesPath: string;
+  readonly #messagesLogPath: string;
   readonly #eventsPath: string;
   readonly #statePath: string;
   readonly #workersPath: string;
@@ -66,6 +70,14 @@ export class SessionStore {
   #eventFlushPromise: Promise<void> | undefined;
   #closePromise: Promise<void> | undefined;
   #closed = false;
+  // Number of messages durable on disk (messages.json base + append log). -1
+  // means "not loaded yet"; the next save always performs a full rewrite.
+  #messagesPersistedCount = -1;
+  #messagesLogBytes = 0;
+  // True when #loadMessageLog found a corrupt/partial line in the
+  // append log. Forces a full rewrite on the next save so a stale partial
+  // line cannot corrupt the next appended message.
+  #messagesLogDirty = false;
 
   private constructor(path: string, metadata: SessionMetadata) {
     this.id = metadata.id;
@@ -73,6 +85,7 @@ export class SessionStore {
     this.#metadata = metadata;
     this.#metadataPath = join(path, "session.json");
     this.#messagesPath = join(path, "messages.json");
+    this.#messagesLogPath = join(path, "messages.jsonl");
     this.#eventsPath = join(path, "events.jsonl");
     this.#statePath = join(path, "state.json");
     this.#workersPath = join(path, "workers.json");
@@ -133,11 +146,13 @@ export class SessionStore {
     if (decodedMessages.migrated) await store.saveMessages(decodedMessages.value);
     if (decodedState?.migrated) await store.saveRunState(decodedState.value);
     if (decodedWorkers?.migrated) await store.saveWorkerJobs(decodedWorkers.value);
+    const messages = await store.#loadMessageLog(decodedMessages.value);
+    store.#messagesPersistedCount = messages.length;
     return {
       store,
       session: {
         metadata: decodedMetadata.value,
-        messages: decodedMessages.value,
+        messages,
         ...(decodedState ? { state: decodedState.value } : {}),
         ...(decodedWorkers ? { workers: decodedWorkers.value } : {}),
       },
@@ -179,7 +194,63 @@ export class SessionStore {
   }
 
   async saveMessages(messages: ProviderMessage[]): Promise<void> {
-    await this.#enqueue(() => writeJsonAtomic(this.#messagesPath, redactKnownSecrets(encodeMessages(messages))));
+    await this.#enqueue(async () => {
+      const persisted = this.#messagesPersistedCount;
+      // First save, or the array was rewritten (undo truncation, compaction):
+      // write the full snapshot and reset the append log.
+      if (persisted === -1 || messages.length < persisted) {
+        await this.#rewriteMessages(messages);
+        return;
+      }
+      if (messages.length === persisted) return;
+      if (this.#messagesLogDirty) {
+        await this.#rewriteMessages(messages);
+        return;
+      }
+      // Pure append (the hot path: one message per step). Appending a line is
+      // O(1) and avoids re-serializing and rewriting the whole transcript.
+      const tail = messages.slice(persisted);
+      const batch = tail.map((message) => `${JSON.stringify(redactKnownSecrets(message))}\n`).join("");
+      await appendFile(this.#messagesLogPath, batch, { mode: 0o600 });
+      this.#messagesPersistedCount = messages.length;
+      this.#messagesLogBytes += Buffer.byteLength(batch, "utf8");
+      if (this.#messagesLogBytes >= MAX_MESSAGE_LOG_BYTES) {
+        await this.#rewriteMessages(messages);
+      }
+    });
+  }
+
+  async #rewriteMessages(messages: ProviderMessage[]): Promise<void> {
+    await writeJsonAtomic(this.#messagesPath, redactKnownSecrets(encodeMessages(messages)));
+    await writeFile(this.#messagesLogPath, "", { mode: 0o600 });
+    this.#messagesPersistedCount = messages.length;
+    this.#messagesLogBytes = 0;
+    this.#messagesLogDirty = false;
+  }
+
+  async #loadMessageLog(base: ProviderMessage[]): Promise<ProviderMessage[]> {
+    let raw: string;
+    try {
+      raw = await readFile(this.#messagesLogPath, "utf8");
+    } catch (error) {
+      if (isFsError(error, "ENOENT")) return base;
+      throw error;
+    }
+    this.#messagesLogBytes = Buffer.byteLength(raw, "utf8");
+    const messages = [...base];
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        messages.push(JSON.parse(trimmed) as ProviderMessage);
+      } catch {
+        // A partial/corrupt log line (e.g. from a crash mid-append) is skipped;
+        // the base and valid lines still replay. Mark the log dirty so the
+        // next save does a full rewrite instead of appending after the bad line.
+        this.#messagesLogDirty = true;
+      }
+    }
+    return messages;
   }
 
   async saveRunState(state: RunState): Promise<void> {
@@ -461,6 +532,10 @@ async function appendBoundedEvents(path: string, batch: string): Promise<void> {
   } finally {
     await unlink(temporary).catch(() => undefined);
   }
+}
+
+function isFsError(error: unknown, code: string): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === code);
 }
 
 async function readRequiredJson(path: string, label: string): Promise<unknown> {

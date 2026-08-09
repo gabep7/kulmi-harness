@@ -3,6 +3,7 @@ import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotoc
 import { z } from "zod";
 import type { AnyTool } from "../tools/types.js";
 import { VERSION } from "../core/version.js";
+import { sleep } from "../provider/stream.js";
 
 export interface McpServerConfig {
   name: string;
@@ -21,6 +22,8 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
 const MAX_STDERR_TAIL = 16_384;
 const MAX_TOOL_NAME_LENGTH = 64;
+const MCP_CONNECTION_RETRIES = 2;
+const MCP_RETRY_DELAY_MS = 250;
 
 const looseInputSchema = z.record(z.string(), z.unknown());
 
@@ -120,14 +123,30 @@ function bridgeTool(server: string, tool: ListedMcpTool, client: Client, timeout
     inputSchema: tool.inputSchema,
     readOnly: tool.annotations?.readOnlyHint ?? false,
     async execute(context, input) {
-      const result = await client.callTool(
-        { name: tool.name, arguments: input },
-        undefined,
-        { signal: context.signal, timeout: timeoutMs },
-      );
-      const content = renderContent(result.content as McpContentPart[] | undefined);
-      if (result.isError) return { content: content || "tool call failed", isError: true };
-      return { content };
+      // A tool call that the server reports as failed (result.isError) is a
+      // semantic result and is never retried. A thrown error is transport-level
+      // (server restarted, connection dropped); retry connection-closed failures
+      // briefly instead of hard-failing the whole run. Request timeouts are not
+      // retried because the server may already have executed the call.
+      let lastError: unknown;
+      for (let attempt = 0; attempt <= MCP_CONNECTION_RETRIES; attempt += 1) {
+        try {
+          const result = await client.callTool(
+            { name: tool.name, arguments: input },
+            undefined,
+            { signal: context.signal, timeout: timeoutMs },
+          );
+          const content = renderContent(result.content as McpContentPart[] | undefined);
+          if (result.isError) return { content: content || "tool call failed", isError: true };
+          return { content };
+        } catch (error) {
+          if (context.signal.aborted) throw error;
+          lastError = error;
+          if (!isMcpConnectionClosed(error) || attempt === MCP_CONNECTION_RETRIES) break;
+          await sleep(MCP_RETRY_DELAY_MS * 2 ** attempt, context.signal);
+        }
+      }
+      throw new Error(`MCP tool call failed: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
     },
   };
 }
@@ -150,3 +169,15 @@ function renderContent(parts: McpContentPart[] | undefined): string {
   }
   return rendered.join("\n");
 }
+
+
+// The MCP SDK reports a dropped/closed connection with this JSON-RPC code.
+function isMcpConnectionClosed(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === -32000,
+  );
+}
+

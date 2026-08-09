@@ -73,6 +73,10 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
           mode: undone.state.mode,
         };
       }
+      case "/compact": {
+        await controller.compact();
+        return "Compacted the transcript on demand";
+      }
       case "/auth":
         return "Exit Kulmi and run `kulmi auth` to change credentials safely.";
       case "/model": {

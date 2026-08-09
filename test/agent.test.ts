@@ -354,6 +354,55 @@ describe("Agent", () => {
     expect(agent.messages[0]).toEqual({ role: "system", content: "stable" });
   });
 
+  it("manually compacts the transcript on demand and records the compaction", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
+    const provider = new ScriptedProvider([textResponse("durable manual summary")]);
+    const events = new EventBus();
+    const session = await SessionStore.create({ cwd: workspace, model: provider.model });
+    session.attach(events);
+    const messages: ProviderMessage[] = [{ role: "system", content: "stable" }];
+    for (let index = 0; index < 8; index++) {
+      messages.push({ role: "user", content: `old question ${index}` });
+      messages.push({ role: "assistant", content: `old answer ${index}` });
+    }
+    const state: RunState = {
+      agentId: "agent_manual_compact",
+      mode: "chat",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([]),
+      events,
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "stable",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "read",
+      maxSteps: 3,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 1,
+      messages,
+    });
+
+    await agent.compact(new AbortController().signal);
+    expect(agent.messages.some((message) =>
+      message.role === "user" && typeof message.content === "string" && message.content.includes("<compaction-summary>"))).toBe(true);
+    expect(agent.messages[0]).toEqual({ role: "system", content: "stable" });
+    // The compacted transcript is durable.
+    const loaded = await SessionStore.open(session.id);
+    expect(loaded.session.messages.some((message) =>
+      message.role === "user" && typeof message.content === "string" && message.content.includes("<compaction-summary>"))).toBe(true);
+  });
+
   it("prunes only old bulky tool output from compaction summary input", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
     const provider = new ScriptedProvider([textResponse("durable summary"), textResponse("continued")]);
