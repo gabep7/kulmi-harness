@@ -3,10 +3,10 @@ import { spawn } from "node:child_process";
 
 await run("node", ["scripts/check-version.mjs"]);
 await Promise.all([
-  run("npm", ["run", "typecheck"]),
-  run("npm", ["test"]),
+  run("pnpm", ["run", "typecheck"]),
+  run("pnpm", ["test"]),
 ]);
-await run("npm", ["run", "build"]);
+await run("pnpm", ["run", "build"]);
 
 function run(command, args) {
   return new Promise((resolve, reject) => {

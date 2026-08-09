@@ -37,7 +37,7 @@ beforeAll(async () => {
   await executable("uname", "#!/bin/sh\ncase \"$1\" in -s) printf '%s\\n' Linux ;; -m) printf '%s\\n' x86_64 ;; *) printf '%s\\n' Linux ;; esac\n");
   await executable("bwrap", "#!/bin/sh\nexit 0\n");
   await executable("gh", "#!/bin/sh\nexit 1\n");
-  await executable("npm", [
+  await executable("pnpm", [
     "#!/bin/sh",
     "case \"$*\" in",
     "  *\"run build\"*) mkdir -p dist; printf '#!/usr/bin/env node\\n' > dist/cli.js ;;",

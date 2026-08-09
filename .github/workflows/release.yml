@@ -19,10 +19,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: pnpm/action-setup@a7df7ba7cb1f7d1bc98c8592b3dee8ee5f8f7f9b # v4
+        with:
+          version: 11
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
+          cache: pnpm
       - name: Install Linux sandbox
         if: runner.os == 'Linux'
         run: |
@@ -31,9 +34,9 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-      - run: npm ci
-      - run: npm run check
-      - run: npm test
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check
+      - run: pnpm test
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -43,20 +46,23 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: pnpm/action-setup@a7df7ba1f7d1bc98c8592b3dee8ee5f8f7f9b # v4
+        with:
+          version: 11
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 22
-          cache: npm
-      - run: npm ci
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Verify tag matches package version
         run: test "${GITHUB_REF_NAME#v}" = "$(node -p 'require("./package.json").version')"
       - name: Smoke-test package
-        run: npm run test:package
-      - run: npm pack
+        run: pnpm run test:package
+      - run: pnpm pack
       - name: Build fast installer bundle
         run: |
-          npm prune --omit=dev --ignore-scripts --no-audit --no-fund
-          tar -czf kulmi-node.tar.gz dist node_modules package.json README.md LICENSE
+          pnpm prune --prod
+          tar --hard-dereference -czhf kulmi-node.tar.gz dist node_modules package.json README.md LICENSE
           test "$(node dist/cli.js --version)" = "${GITHUB_REF_NAME#v}"
           sha256sum kulmi-node.tar.gz > kulmi-node.tar.gz.sha256
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

@@ -31,7 +31,8 @@ Kulmi is a general-purpose autonomous coding harness with a fast full-screen ter
 
 - macOS or Linux
 - Node.js 22+
-- npm
+- pnpm, installable with `corepack enable pnpm` (bundled with Node.js) or via the
+  standalone installer (`curl -fsSL https://get.pnpm.io/install.sh | sh`)
 - Git
 - Linux only: `bubblewrap`, providing a working `bwrap` command with permission to create unprivileged user and network namespaces
 - An API key for your model provider. The first-run terminal setup can store it in the system keychain.
@@ -50,7 +51,7 @@ From this checkout, installing into `~/.local/lib/kulmi` with a `kulmi` command 
 ./install.sh
 ```
 
-Executables live under `~/.local/lib/kulmi`. Sessions and user data live separately under `~/.local/share/kulmi`. The installer adds `~/.local/bin` to the appropriate shell profile when necessary, and never uses `sudo` or npm's global prefix.
+Executables live under `~/.local/lib/kulmi`. Sessions and user data live separately under `~/.local/share/kulmi`. The installer adds `~/.local/bin` to the appropriate shell profile when necessary, and never uses `sudo` or a global package prefix.
 
 ### Install modes
 
@@ -80,7 +81,7 @@ gh api --hostname github.com repos/gabep7/kulmi-harness/contents/install.sh \
 
 ### Release artifacts
 
-Kulmi is not published to npm yet, so `./install.sh` uses the local checkout when invoked from a source tree.
+Kulmi is not published to any registry yet, so `./install.sh` uses the local checkout when invoked from a source tree.
 
 Tagged releases include a prebuilt `kulmi-node.tar.gz` containing `dist` and production dependencies, plus `kulmi-node.tar.gz.sha256`. Remote installs verify the checksum before extraction and fail closed if it is missing, malformed, or mismatched. They use plain `curl` for public repositories and an authenticated `gh` session for private ones, and fall back to a source archive only when the prebuilt asset is unavailable.
 
@@ -182,7 +183,7 @@ Each status row states both the attempt and the outcome: a label, what the call 
 ```text
 Search code   handleEvent in src        12 matches in 5 files
 Edit files    src/a.ts  +2 more         2 files, +34 -2
-Run command   npm test                  exit 1
+Run command   pnpm test                  exit 1
 ```
 
 The same formatter drives the headless renderer, so neither surface prints raw tool input or raw tool output, and the two cannot drift apart.
@@ -376,8 +377,8 @@ Hooks are plain project commands with a safe environment, a timeout, and bounded
 ```toml
 # ~/.config/kulmi/config.toml
 [hooks]
-tool_pre = ["npm run lint:changed"]
-tool_post = [{ command = "npm run verify:changed", timeout_seconds = 30 }]
+tool_pre = ["pnpm run lint:changed"]
+tool_post = [{ command = "pnpm run verify:changed", timeout_seconds = 30 }]
 ```
 
 ## Sandboxing and shell policy
@@ -442,28 +443,28 @@ Providers that report cache reads through `usage.prompt_tokens_details.cached_to
 ## Development
 
 ```sh
-npm install
-npm run build
+pnpm install
+pnpm run build
 export MY_PROVIDER_API_KEY=...
-npm run dev
+pnpm run dev
 ```
 
-Run `./install.sh` when you want the current checkout available globally as `kulmi` without relying on npm's global prefix.
+Run `./install.sh` when you want the current checkout available globally as `kulmi` without relying on a global package prefix.
 
 The full gate is:
 
 ```sh
-npm run check
+pnpm run check
 ```
 
 That runs the version check, typecheck, the vitest suite, and a build.
 
 CI runs the full gate on both `ubuntu-latest` and `macos-latest`, across Node 22 and 24, so a change must pass on both platforms before it merges.
 
-Two suites stay outside `npm run check`:
+Two suites stay outside `pnpm run check`:
 
-- `npm run test:live` performs a low-output two-request smoke test covering thinking, tool-call reasoning replay, tool-result pairing, streaming, and cache telemetry. It needs a real key and incurs provider usage.
-- `npm run eval` runs the SWE-style eval suite under `evals/`. Each task copies a fixture repo to a temporary directory, runs `kulmi exec` against a prompt, and judges the result solely by the task's verify command. Use it to regression-test harness changes. `KULMI_EVAL_BIN` swaps the executable under test and `KULMI_EVAL_MODEL` selects the model profile. Pass `--json` for machine-readable results, `--task <name>` to run a single task, and `--keep` to retain the temporary working directory. A task may define `repo_url` and `base_commit` to run against a real upstream repository instead of a fixture, and `fail_to_pass` plus `pass_to_pass` test lists to record per-test outcomes alongside the verify command. The runner also extracts the model's patch, changed files, and best-effort usage lines for each result.
+- `pnpm run test:live` performs a low-output two-request smoke test covering thinking, tool-call reasoning replay, tool-result pairing, streaming, and cache telemetry. It needs a real key and incurs provider usage.
+- `pnpm run eval` runs the SWE-style eval suite under `evals/`. Each task copies a fixture repo to a temporary directory, runs `kulmi exec` against a prompt, and judges the result solely by the task's verify command. Use it to regression-test harness changes. `KULMI_EVAL_BIN` swaps the executable under test and `KULMI_EVAL_MODEL` selects the model profile. Pass `--json` for machine-readable results, `--task <name>` to run a single task, and `--keep` to retain the temporary working directory. A task may define `repo_url` and `base_commit` to run against a real upstream repository instead of a fixture, and `fail_to_pass` plus `pass_to_pass` test lists to record per-test outcomes alongside the verify command. The runner also extracts the model's patch, changed files, and best-effort usage lines for each result.
 
 The release gate and tag procedure is in [docs/releasing.md](docs/releasing.md).
 

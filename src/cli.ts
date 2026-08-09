@@ -279,9 +279,9 @@ program
       ["model", Boolean(selected), modelDetail],
       ["credential", Boolean(selectedKey), credentialDetail],
       ["sandbox", config.sandbox.mode === "off" || sandbox.available, config.sandbox.mode === "off" ? "disabled by configuration" : `${sandbox.backend} ${sandbox.detail}`],
-      ["ast-grep", Boolean(astGrepBinary), astGrepBinary ?? "sg missing; run npm install or add sg to PATH"],
-      ["lsp", Boolean(lspBinary), lspBinary ?? "typescript-language-server missing; run npm install or add it to PATH"],
-      ["ripgrep", Boolean(ripgrepBinary), ripgrepBinary ?? "rg missing; run npm install or add rg to PATH"],
+      ["ast-grep", Boolean(astGrepBinary), astGrepBinary ?? "sg missing; run pnpm install or add sg to PATH"],
+      ["lsp", Boolean(lspBinary), lspBinary ?? "typescript-language-server missing; run pnpm install or add it to PATH"],
+      ["ripgrep", Boolean(ripgrepBinary), ripgrepBinary ?? "rg missing; run pnpm install or add rg to PATH"],
       ["search", true, config.search.mode === "free" ? config.search.provider : "off"],
       ["browser", true, chromium ?? "Chrome/Chromium missing; browser_qa needs KULMI_CHROMIUM or a local browser"],
     ] as const;

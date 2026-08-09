@@ -8,7 +8,7 @@ const files = [
   ...(await filesUnder(resolve(root, "src"))),
   ...(await filesUnder(resolve(root, "scripts"))),
   resolve(root, "package.json"),
-  resolve(root, "package-lock.json"),
+  resolve(root, "pnpm-lock.yaml"),
   resolve(root, "tsconfig.json"),
   resolve(root, "tsconfig.build.json"),
 ].sort();

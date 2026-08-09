@@ -334,7 +334,7 @@ function readableRoots(
     // and their JS entrypoints under the user's home, which the bare PATH dir
     // never exposed. Resolve those binaries to their realpaths and add the node
     // install's bin and global node_modules roots so verification commands such
-    // as `npm test` can run inside the sandbox without exposing the home dir.
+    // as `pnpm test` can run inside the sandbox without exposing the home dir.
     candidates.push(...packageManagerRoots(directory));
     const globalModules = join(dirname(directory), "lib", "node_modules");
     if (existsSync(globalModules)) candidates.push(globalModules);

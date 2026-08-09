@@ -121,7 +121,7 @@ const completeTaskTool = defineTool({
           candidate.revision === context.state.revision
         );
         if (!verification) {
-          throw new Error(`verification_command was not a successful current-revision check: ${input.verification_command}. Run a recognized verification first: a test runner (npm test, pytest, vitest, make test), a test or verify script (node verify.mjs, ./run-tests.sh), or an assertion (test -f ...). The shell result shows verification: recorded when it counts.`);
+          throw new Error(`verification_command was not a successful current-revision check: ${input.verification_command}. Run a recognized verification first: a test runner (pnpm test, pytest, vitest, make test), a test or verify script (node verify.mjs, ./run-tests.sh), or an assertion (test -f ...). The shell result shows verification: recorded when it counts.`);
         }
         const uncovered = [...context.state.modifiedFiles].filter((path) => !verification.changedFiles.includes(path));
         if (uncovered.length > 0) {

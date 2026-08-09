@@ -34,7 +34,7 @@ export const astGrepTool = defineTool({
     args.push(cwd);
     const binary = await resolveToolBinary("sg");
     if (!binary) {
-      throw new Error("sg (ast-grep) binary not found. Install dependencies with npm install or add sg to PATH.");
+      throw new Error("sg (ast-grep) binary not found. Install dependencies with pnpm install or add sg to PATH.");
     }
     const env = safeChildEnvironment();
     let child: ChildProcessByStdio<null, Readable, Readable>;
@@ -99,7 +99,7 @@ export const astGrepTool = defineTool({
       const stderr = Buffer.concat(errors).toString("utf8").trim();
       throw new Error(
         stderr.includes("ENOENT") || stderr.includes("not found") || code === 127
-          ? `sg (ast-grep) binary not found. Install dependencies with npm install or add sg to PATH.`
+          ? `sg (ast-grep) binary not found. Install dependencies with pnpm install or add sg to PATH.`
           : stderr || `sg exited ${code}`,
       );
     }
@@ -131,7 +131,7 @@ export const astGrepReplaceTool = defineTool({
     assertNotSensitivePath(cwd);
     const binary = await resolveToolBinary("sg");
     if (!binary) {
-      throw new Error("sg (ast-grep) binary not found. Install dependencies with npm install or add sg to PATH.");
+      throw new Error("sg (ast-grep) binary not found. Install dependencies with pnpm install or add sg to PATH.");
     }
     // Pre-flight: enumerate the files that would be rewritten and refuse any
     // sensitive one (`.env`, `.pem`, `.key`, `secrets.*`, ...). The rewrite
@@ -211,7 +211,7 @@ export const astGrepReplaceTool = defineTool({
     if ((outcome?.code ?? 1) > 1) {
       throw new Error(
         stderr.includes("ENOENT") || stderr.includes("not found") || outcome?.code === 127
-          ? "sg (ast-grep) binary not found. Install dependencies with npm install or add sg to PATH."
+          ? "sg (ast-grep) binary not found. Install dependencies with pnpm install or add sg to PATH."
           : stderr || `sg exited ${outcome?.code}`,
       );
     }
@@ -296,7 +296,7 @@ async function collectSensitiveTargets(
   if ((code ?? 1) > 1) {
     const stderr = Buffer.concat(errors).toString("utf8").trim();
     if (stderr.includes("ENOENT") || stderr.includes("not found") || code === 127) {
-      throw new Error("sg (ast-grep) binary not found. Install dependencies with npm install or add sg to PATH.");
+      throw new Error("sg (ast-grep) binary not found. Install dependencies with pnpm install or add sg to PATH.");
     }
   }
   return [...sensitive];

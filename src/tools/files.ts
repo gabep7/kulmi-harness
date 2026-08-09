@@ -243,7 +243,7 @@ const grepTool = defineTool({
     assertNotSensitivePath(cwd);
     const binary = await resolveToolBinary("rg");
     if (!binary) {
-      throw new Error("rg (ripgrep) binary not found. Install dependencies with npm install or add rg to PATH.");
+      throw new Error("rg (ripgrep) binary not found. Install dependencies with pnpm install or add rg to PATH.");
     }
     const args = ["--line-number", "--color", "never", "--no-heading", "--max-count", String(input.limit)];
     if (input.glob) args.push("--glob", input.glob);

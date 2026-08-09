@@ -137,7 +137,7 @@ download_source() {
 }
 
 command -v node >/dev/null 2>&1 || fail "Node.js 22 or newer is required"
-command -v npm >/dev/null 2>&1 || fail "npm is required"
+command -v pnpm >/dev/null 2>&1 || fail "pnpm is required (install with: curl -fsSL https://get.pnpm.io/install.sh | sh)"
 command -v git >/dev/null 2>&1 || fail "git is required"
 
 case "$(uname -s)" in
@@ -158,7 +158,10 @@ case "$(uname -m)" in
   x86_64|amd64) asset_arch="x64" ;;
   *) fail "unsupported architecture $(uname -m)" ;;
 esac
-release_asset="kulmi-${asset_os}-${asset_arch}.tar.gz"
+# The release workflow publishes one bundle built on Linux. It carries the
+# platform-specific optional binaries (ast-grep, esbuild) for the build OS, so
+# macOS remote installs fall through to the source fallback below.
+release_asset="kulmi-node.tar.gz"
 
 major="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$major" -ge 22 ] || fail "Node.js 22 or newer is required, found $(node --version)"
@@ -220,9 +223,9 @@ if [ "$MODE" = "link" ]; then
   SOURCE_DIR="$(CDPATH= cd "$SOURCE_DIR" && pwd)"
   [ "$SOURCE_DIR" != "$INSTALL_DIR" ] || fail "source and install directories must differ"
 
-  if [ ! -x "$SOURCE_DIR/node_modules/.bin/tsc" ] || [ "$SOURCE_DIR/package-lock.json" -nt "$SOURCE_DIR/node_modules/.package-lock.json" ]; then
+  if [ ! -x "$SOURCE_DIR/node_modules/.bin/tsc" ] || [ "$SOURCE_DIR/pnpm-lock.yaml" -nt "$SOURCE_DIR/node_modules/.pnpm/lock.yaml" ]; then
     printf 'Installing dependencies once...\n'
-    (cd "$SOURCE_DIR" && npm ci --ignore-scripts --no-audit --no-fund)
+    (cd "$SOURCE_DIR" && pnpm install --frozen-lockfile --ignore-scripts)
   fi
 
   source_fingerprint="$(cd "$SOURCE_DIR" && node scripts/source-fingerprint.mjs)"
@@ -232,7 +235,7 @@ if [ "$MODE" = "link" ]; then
   [ "$source_fingerprint" = "$built_fingerprint" ] || needs_build=1
   if [ "$needs_build" -eq 1 ]; then
     printf 'Building changed sources...\n'
-    (cd "$SOURCE_DIR" && npm run build)
+    (cd "$SOURCE_DIR" && pnpm run build)
   fi
 
   chmod +x "$SOURCE_DIR/dist/cli.js"
@@ -285,7 +288,7 @@ else
   fi
   if [ "$prebuilt" -eq 0 ]; then
     printf 'Building a self-contained installation...\n'
-    (cd "$package" && npm ci --ignore-scripts --no-audit --no-fund && npm run build && npm prune --omit=dev --ignore-scripts --no-audit --no-fund)
+    (cd "$package" && pnpm install --frozen-lockfile --ignore-scripts && pnpm run build && pnpm prune --prod)
   fi
   chmod +x "$package/dist/cli.js"
   candidate="$package"

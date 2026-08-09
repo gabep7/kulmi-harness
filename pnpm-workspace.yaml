@@ -1,0 +1,6 @@
+onlyBuiltDependencies:
+  - "@ast-grep/cli"
+  - "esbuild"
+allowBuilds:
+  "@ast-grep/cli": true
+  esbuild: true

@@ -568,7 +568,7 @@ function isHardBlockedDenial(reason: string): boolean {
   // start_process runs the command fully unsandboxed, so it must not be able to
   // approve commands the shell tool would hard-block (blocked programs such as
   // rm/sudo/curl/npx, publication, infrastructure control, destructive git).
-  // Legitimate dev-server commands (node, npm run, a watcher) are not blocked
+  // Legitimate dev-server commands (node, pnpm run, a watcher) are not blocked
   // here and still go through the unsandboxed approval flow.
   return /(?:cannot safely parse|command substitution|nested shell|environment assignment|operator .* blocked|missing program|empty command|home-directory|parent-directory|sensitive file|outside workspace|is blocked without an approval flow|publication and deployment commands are blocked|is blocked because it can control|git .* is blocked)/i.test(reason);
 }

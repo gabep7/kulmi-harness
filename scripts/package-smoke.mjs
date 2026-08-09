@@ -14,14 +14,17 @@ try {
   const appDir = join(temp, "app");
   await mkdir(packDir);
   await mkdir(appDir);
-  await execFileAsync("npm", ["run", "build"], { cwd: root, maxBuffer: 10 * 1024 * 1024 });
-  const { stdout } = await execFileAsync("npm", ["pack", "--ignore-scripts", "--pack-destination", packDir], {
+  await execFileAsync("pnpm", ["run", "build"], { cwd: root, maxBuffer: 10 * 1024 * 1024 });
+  const { stdout } = await execFileAsync("pnpm", ["pack", "--pack-destination", packDir], {
     cwd: root,
     maxBuffer: 10 * 1024 * 1024,
   });
+  // pnpm prints the absolute tarball path (npm printed just the filename), so
+  // resolve it yourself instead of joining it onto packDir again.
   const tarball = stdout.trim().split("\n").at(-1);
-  if (!tarball) throw new Error("npm pack did not report a tarball");
-  await execFileAsync("npm", ["install", "--prefix", appDir, "--ignore-scripts", join(packDir, tarball)], {
+  if (!tarball) throw new Error("pnpm pack did not report a tarball");
+  const tarballPath = tarball.startsWith("/") ? tarball : join(packDir, tarball);
+  await execFileAsync("pnpm", ["add", "--dir", appDir, "--ignore-scripts", tarballPath], {
     cwd: root,
     maxBuffer: 10 * 1024 * 1024,
   });

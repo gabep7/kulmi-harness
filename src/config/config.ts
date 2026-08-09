@@ -707,13 +707,13 @@ message_history = "truncate" # truncate or keep
 # network = false # allow sandboxed project commands to use the network
 #
 # [hooks]
-# tool_pre = ["npm run lint:changed"]
-# tool_post = ["npm run verify:changed"]
-# tool_pre = [{ tool = "edit_file", command = "npm run lint:changed", timeout_seconds = 30 }]
+# tool_pre = ["pnpm run lint:changed"]
+# tool_post = ["pnpm run verify:changed"]
+# tool_pre = [{ tool = "edit_file", command = "pnpm run lint:changed", timeout_seconds = 30 }]
 #
 # MCP servers expose extra tools to the agent over stdio.
 # [mcp.servers.filesystem]
-# command = "npx"
+# command = "pnpm exec"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
 # Example profile. Replace with your provider endpoint and credentials env var.

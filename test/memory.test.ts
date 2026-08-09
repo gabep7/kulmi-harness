@@ -142,7 +142,7 @@ JWT cookies only.
 
     const result = await save.execute(context, {
       name: "release-process",
-      content: "Releases are tagged from master after npm run check.",
+      content: "Releases are tagged from master after pnpm run check.",
       tags: ["Release", "CI"],
       importance: "high",
     });
