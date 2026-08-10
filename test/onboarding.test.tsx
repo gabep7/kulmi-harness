@@ -11,7 +11,7 @@ describe("credential setup screen", () => {
     expect(frame).toContain("Set up a model provider");
     expect(frame).toContain("Select your provider");
     // Provider picker should show known providers
-    expect(frame).toContain("Ollama");
+    expect(frame).toContain("Ollama Cloud");
     expect(frame).toContain("Anthropic");
     expect(frame).toContain("OpenAI");
     expect(frame).toContain("Google");
@@ -52,9 +52,9 @@ describe("credential setup screen", () => {
   it("navigates the provider list with arrow keys", async () => {
     const view = render(<CredentialSetup needsProfile onComplete={() => undefined} />);
     const frame1 = view.lastFrame() ?? "";
-    // First item (Ollama) should be highlighted
+    // First item (Ollama Cloud) should be highlighted
     expect(frame1).toContain("▸");
-    expect(frame1).toContain("Ollama");
+    expect(frame1).toContain("Ollama Cloud");
 
     // Move down
     view.stdin.write("\u001B[B"); // down arrow

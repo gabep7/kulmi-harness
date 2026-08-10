@@ -2,15 +2,23 @@ import { describe, expect, it } from "vitest";
 import { providerPresets, findProviderPreset, defaultModelForProvider } from "../src/config/providers.js";
 
 describe("provider presets", () => {
-  it("includes Ollama as the first provider", () => {
+  it("includes Ollama Cloud as the first provider", () => {
     expect(providerPresets[0]?.id).toBe("ollama");
-    expect(providerPresets[0]?.apiKeyRequired).toBe(false);
-    expect(providerPresets[0]?.baseUrl).toBe("http://localhost:11434/v1");
+    expect(providerPresets[0]?.label).toBe("Ollama Cloud");
+    expect(providerPresets[0]?.apiKeyRequired).toBe(true);
+    expect(providerPresets[0]?.baseUrl).toBe("https://api.ollama.com/v1");
+  });
+
+  it("includes Ollama Local as the second provider", () => {
+    expect(providerPresets[1]?.id).toBe("ollama-local");
+    expect(providerPresets[1]?.apiKeyRequired).toBe(false);
+    expect(providerPresets[1]?.baseUrl).toBe("http://localhost:11434/v1");
   });
 
   it("includes all major providers", () => {
     const ids = providerPresets.map((p) => p.id);
     expect(ids).toContain("ollama");
+    expect(ids).toContain("ollama-local");
     expect(ids).toContain("anthropic");
     expect(ids).toContain("openai");
     expect(ids).toContain("google");
@@ -55,7 +63,7 @@ describe("provider presets", () => {
   it("finds the default model for a provider", () => {
     const ollama = findProviderPreset("ollama");
     const defaultModel = ollama ? defaultModelForProvider(ollama) : undefined;
-    expect(defaultModel?.id).toBe("qwen3-coder:32b");
+    expect(defaultModel?.id).toBe("qwen3:32b");
   });
 
   it("Anthropic uses the anthropic protocol", () => {
@@ -72,8 +80,12 @@ describe("provider presets", () => {
     expect(google?.baseUrl).toContain("generativelanguage.googleapis.com");
   });
 
-  it("Ollama does not require an API key", () => {
-    expect(findProviderPreset("ollama")?.apiKeyRequired).toBe(false);
+  it("Ollama Cloud requires an API key", () => {
+    expect(findProviderPreset("ollama")?.apiKeyRequired).toBe(true);
+  });
+
+  it("Ollama Local does not require an API key", () => {
+    expect(findProviderPreset("ollama-local")?.apiKeyRequired).toBe(false);
   });
 
   it("reasoning models have thinking and reasoning efforts", () => {
@@ -95,7 +107,7 @@ describe("provider presets", () => {
     expect(findProviderPreset("custom")?.configurableBaseUrl).toBe(true);
   });
 
-  it("Ollama has configurable base URL for remote instances", () => {
-    expect(findProviderPreset("ollama")?.configurableBaseUrl).toBe(true);
+  it("Ollama Local has configurable base URL for remote instances", () => {
+    expect(findProviderPreset("ollama-local")?.configurableBaseUrl).toBe(true);
   });
 });
