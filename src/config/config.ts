@@ -601,6 +601,8 @@ export function writeUserModelProfile(options: {
   protocol?: ModelProtocol;
   thinking?: boolean;
   reasoningEffort?: string;
+  reasoningEfforts?: string[];
+  vision?: boolean;
   contextWindow?: number;
   maxOutputTokens?: number;
   makeDefault?: boolean;
@@ -629,6 +631,8 @@ export function writeUserModelProfile(options: {
     `protocol = ${tomlValue(options.protocol ?? "openai")}`,
     `thinking = ${String(options.thinking ?? false)}`,
     ...(options.reasoningEffort ? [`reasoning_effort = ${tomlValue(options.reasoningEffort)}`] : []),
+    ...(options.reasoningEfforts ? [`reasoning_efforts = [${options.reasoningEfforts.map((e) => tomlValue(e)).join(", ")}]`] : []),
+    ...(options.vision !== undefined ? [`vision = ${String(options.vision)}`] : []),
     `context_window = ${String(options.contextWindow ?? 128_000)}`,
     `max_output_tokens = ${String(options.maxOutputTokens ?? 16_384)}`,
   ].join("\n");

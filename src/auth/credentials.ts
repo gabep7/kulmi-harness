@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig, writeUserModelProfile, type ModelProtocol } from "../config/config.js";
+import type { ProviderPreset, ProviderModelPreset } from "../config/providers.js";
 
 const execFileAsync = promisify(execFile);
 const keychainService = "dev.kulmi.api-key";
@@ -13,9 +14,13 @@ export interface CredentialChoice {
   protocol?: ModelProtocol;
   thinking?: boolean;
   reasoningEffort?: string;
+  reasoningEfforts?: string[];
+  vision?: boolean;
   contextWindow?: number;
   maxOutputTokens?: number;
   apiKeyEnv?: string;
+  providerPreset?: string;
+  modelPreset?: string;
 }
 
 export interface CredentialResolution {
@@ -172,6 +177,8 @@ export async function acceptCredential(options: {
       protocol: options.choice.protocol ?? "openai",
       thinking: options.choice.thinking ?? false,
       ...(options.choice.reasoningEffort ? { reasoningEffort: options.choice.reasoningEffort } : {}),
+      ...(options.choice.reasoningEfforts ? { reasoningEfforts: options.choice.reasoningEfforts } : {}),
+      ...(options.choice.vision !== undefined ? { vision: options.choice.vision } : {}),
       contextWindow: options.choice.contextWindow ?? 128_000,
       maxOutputTokens: options.choice.maxOutputTokens ?? 16_384,
       makeDefault: true,

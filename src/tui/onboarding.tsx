@@ -3,6 +3,7 @@ import { Box, Text, render, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { validateCredential, credentialHint, type CredentialChoice } from "../auth/credentials.js";
 import { loadConfig, type ModelProtocol } from "../config/config.js";
+import { providerPresets, findProviderPreset, defaultModelForProvider, type ProviderPreset, type ProviderModelPreset } from "../config/providers.js";
 import { glyph, theme } from "./theme.js";
 
 export class CredentialSetupCancelledError extends Error {
@@ -55,7 +56,7 @@ export async function runCredentialOnboarding(cwd = process.cwd(), requestedMode
   }
 }
 
-type Step = "base_url" | "model" | "protocol" | "api_key";
+type Step = "provider" | "model" | "base_url" | "model_id" | "protocol" | "api_key";
 
 export function CredentialSetup({
   needsProfile,
@@ -69,9 +70,13 @@ export function CredentialSetup({
   onCancel?: () => void;
 }) {
   const { exit } = useApp();
-  const [step, setStep] = useState<Step>(needsProfile ? "base_url" : "api_key");
+  const [step, setStep] = useState<Step>(needsProfile ? "provider" : "api_key");
+  const [provider, setProvider] = useState<ProviderPreset | undefined>();
+  const [providerCursor, setProviderCursor] = useState(0);
+  const [modelPreset, setModelPreset] = useState<ProviderModelPreset | undefined>();
+  const [modelCursor, setModelCursor] = useState(0);
   const [baseUrl, setBaseUrl] = useState("");
-  const [model, setModel] = useState("");
+  const [modelId, setModelId] = useState("");
   const [protocol, setProtocol] = useState<ModelProtocol>("openai");
   const [protocolInput, setProtocolInput] = useState("openai");
   const [key, setKey] = useState("");
@@ -84,27 +89,127 @@ export function CredentialSetup({
       return;
     }
     if (pressed.escape) {
-      onCancel();
-      exit();
+      if (step === "provider" || !needsProfile) {
+        onCancel();
+        exit();
+        return;
+      }
+      // Go back one step
+      if (step === "api_key") setStep(provider?.models.length ? "model" : "model_id");
+      else if (step === "model") setStep("provider");
+      else if (step === "model_id") setStep(provider?.configurableBaseUrl ? "base_url" : "provider");
+      else if (step === "base_url") setStep("provider");
+      else if (step === "protocol") setStep("model_id");
+      return;
     }
   });
 
-  const finish = (value: string) => {
-    const clean = value.trim();
-    if (!validateCredential(clean)) {
-      setError(credentialHint());
+  // ===== Provider picker =====
+  useInput((_input, key) => {
+    if (step !== "provider" || !needsProfile) return;
+    if (key.upArrow) {
+      setProviderCursor((c) => (c - 1 + providerPresets.length) % providerPresets.length);
       return;
     }
+    if (key.downArrow) {
+      setProviderCursor((c) => (c + 1) % providerPresets.length);
+      return;
+    }
+    if (key.return) {
+      const selected = providerPresets[providerCursor]!;
+      setProvider(selected);
+      setProtocol(selected.protocol);
+      setError("");
+      if (selected.id === "custom") {
+        setStep("base_url");
+      } else if (selected.configurableBaseUrl) {
+        // For configurable providers like Ollama, ask for URL first (pre-filled)
+        setBaseUrl(selected.baseUrl);
+        setStep("base_url");
+      } else if (selected.models.length > 0) {
+        setStep("model");
+      } else {
+        setStep("model_id");
+      }
+    }
+  });
+
+  // ===== Model picker =====
+  useInput((_input, key) => {
+    if (step !== "model" || !provider || provider.models.length === 0) return;
+    if (key.upArrow) {
+      setModelCursor((c) => (c - 1 + provider.models.length) % provider.models.length);
+      return;
+    }
+    if (key.downArrow) {
+      setModelCursor((c) => (c + 1) % provider.models.length);
+      return;
+    }
+    if (key.return) {
+      const selected = provider.models[modelCursor]!;
+      setModelPreset(selected);
+      setModelId(selected.id);
+      setError("");
+      if (provider.apiKeyRequired) {
+        setStep("api_key");
+      } else {
+        // No key needed (Ollama local) — finish with a dummy key
+        finishWithProvider(selected, "ollama");
+      }
+    }
+  });
+
+  function finishWithProvider(model: ProviderModelPreset, apiKey: string) {
+    if (!provider) return;
+    const profileName = slugifyProfile(model.id);
+    onComplete({
+      key: apiKey,
+      baseUrl: normalizeBaseUrl((baseUrl || provider.baseUrl).trim(), provider.protocol),
+      model: model.id,
+      profileName,
+      protocol: provider.protocol,
+      apiKeyEnv: provider.apiKeyEnv ?? `KULMI_${profileName.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase()}_API_KEY`,
+      thinking: model.thinking ?? false,
+      ...(model.reasoningEffort ? { reasoningEffort: model.reasoningEffort } : {}),
+      ...(model.reasoningEfforts ? { reasoningEfforts: model.reasoningEfforts } : {}),
+      ...(model.vision !== undefined ? { vision: model.vision } : {}),
+      contextWindow: model.contextWindow,
+      maxOutputTokens: model.maxOutputTokens,
+      providerPreset: provider.id,
+      modelPreset: model.id,
+    });
+    exit();
+  }
+
+  const finish = (value: string) => {
+    const clean = value.trim();
     if (!needsProfile) {
+      if (!validateCredential(clean)) {
+        setError(credentialHint());
+        return;
+      }
       onComplete({ key: clean });
       exit();
       return;
     }
-    const profileName = slugifyProfile(model);
+    if (provider && modelPreset) {
+      if (provider.apiKeyRequired && !validateCredential(clean)) {
+        setError(credentialHint());
+        return;
+      }
+      finishWithProvider(modelPreset, clean || "ollama");
+      return;
+    }
+    // Custom provider flow
+    if (!validateCredential(clean)) {
+      setError(credentialHint());
+      return;
+    }
+    const profileName = slugifyProfile(modelId);
     onComplete({
       key: clean,
       baseUrl: normalizeBaseUrl(baseUrl.trim(), protocol),
-      model: model.trim(),
+      model: modelId.trim(),
       profileName,
       protocol,
       apiKeyEnv: `KULMI_${profileName.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase()}_API_KEY`,
@@ -126,16 +231,21 @@ export function CredentialSetup({
     }
     setBaseUrl(clean);
     setError("");
-    setStep("model");
+    if (provider?.id === "custom") {
+      setStep("model_id");
+    } else {
+      // For configurable providers with preset models (Ollama), go to model picker
+      setStep("model");
+    }
   };
 
-  const submitModel = (value: string) => {
+  const submitModelId = (value: string) => {
     const clean = value.trim();
     if (!clean) {
       setError("Model id is required");
       return;
     }
-    setModel(clean);
+    setModelId(clean);
     setError("");
     setStep("protocol");
   };
@@ -166,48 +276,88 @@ export function CredentialSetup({
     setError("Type openai, openai-responses, or anthropic");
   };
 
+  // ===== Render =====
   return (
     <Box minHeight={16} flexDirection="column" paddingX={2} paddingY={1}>
       <Text color={theme.caramel} bold>{glyph.brand} kulmi</Text>
       <Box marginTop={2} flexDirection="column">
         <Text color={theme.cream} bold>{needsProfile ? "Set up a model provider" : "Connect"}</Text>
-        {needsProfile ? (
-          <Text color={theme.muted}>
-            Kulmi talks to OpenAI-compatible chat completions, OpenAI Responses, or Anthropic Messages endpoints.
-          </Text>
-        ) : existingProfile ? (
+        {needsProfile && step === "provider" && (
+          <Text color={theme.muted}>Select your provider. Use ↑↓ to navigate, Enter to select.</Text>
+        )}
+        {needsProfile && step !== "provider" && provider && (
+          <Text color={theme.muted}>{provider.label} — {provider.description}</Text>
+        )}
+        {!needsProfile && existingProfile && (
           <Text color={theme.muted}>
             Profile {existingProfile.name} → {existingProfile.model} at {existingProfile.baseUrl}
           </Text>
-        ) : (
+        )}
+        {!needsProfile && !existingProfile && (
           <Text color={theme.muted}>Enter the API key for your default model profile.</Text>
         )}
       </Box>
 
+      {/* Provider picker */}
+      {needsProfile && step === "provider" && (
+        <Box marginTop={1} flexDirection="column">
+          {providerPresets.map((p, i) => (
+            <Box key={p.id} paddingLeft={1}>
+              <Text color={i === providerCursor ? theme.caramel : theme.muted} bold={i === providerCursor}>
+                {i === providerCursor ? "▸ " : "  "}
+                {p.label.padEnd(28)}
+              </Text>
+              <Text color={theme.faint}> {p.description}</Text>
+            </Box>
+          ))}
+          {error ? <Text color={theme.rose}>{error}</Text> : <Text color={theme.faint}>↑↓ navigate  ·  enter select  ·  esc cancel</Text>}
+        </Box>
+      )}
+
+      {/* Model picker */}
+      {needsProfile && step === "model" && provider && provider.models.length > 0 && (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={theme.sand}>Select a model for {provider.label}:</Text>
+          {provider.models.map((m, i) => (
+            <Box key={m.id} paddingLeft={1}>
+              <Text color={i === modelCursor ? theme.caramel : theme.muted} bold={i === modelCursor}>
+                {i === modelCursor ? "▸ " : "  "}
+                {m.label.padEnd(36)}
+              </Text>
+              <Text color={theme.faint}> {(m.contextWindow / 1000).toFixed(0)}k ctx{m.thinking ? "  thinking" : ""}{m.vision ? "  vision" : ""}</Text>
+            </Box>
+          ))}
+          {error ? <Text color={theme.rose}>{error}</Text> : <Text color={theme.faint}>↑↓ navigate  ·  enter select  ·  esc back</Text>}
+        </Box>
+      )}
+
+      {/* Configurable base URL (Ollama remote or custom) */}
       {needsProfile && step === "base_url" && (
         <Field
           label="Base URL"
           value={baseUrl}
           onChange={(value) => { setBaseUrl(value); setError(""); }}
           onSubmit={submitBaseUrl}
-          placeholder="https://api.example.com/v1"
+          placeholder={provider?.baseUrl ?? "https://api.example.com/v1"}
           error={error}
-          hint="Provider endpoint root, including /v1 when the API uses it"
+          hint={provider?.configurableBaseUrl && provider.id !== "custom" ? "Press Enter to use the default, or type a remote URL" : "Provider endpoint root, including /v1 when the API uses it"}
         />
       )}
 
-      {needsProfile && step === "model" && (
+      {/* Custom model ID */}
+      {needsProfile && step === "model_id" && (
         <Field
           label="Model id"
-          value={model}
-          onChange={(value) => { setModel(value); setError(""); }}
-          onSubmit={submitModel}
+          value={modelId}
+          onChange={(value) => { setModelId(value); setError(""); }}
+          onSubmit={submitModelId}
           placeholder="provider-model-id"
           error={error}
           hint={`Endpoint: ${baseUrl}`}
         />
       )}
 
+      {/* Custom protocol */}
       {needsProfile && step === "protocol" && (
         <Field
           label="Protocol"
@@ -216,22 +366,25 @@ export function CredentialSetup({
           onSubmit={submitProtocol}
           placeholder="openai"
           error={error}
-          hint="openai (chat completions) or anthropic (messages). Enter accepts openai."
+          hint="openai (chat completions), openai-responses, or anthropic (messages). Enter accepts openai."
         />
       )}
 
+      {/* API key */}
       {step === "api_key" && (
         <Field
           label="API key"
           value={key}
           onChange={(value) => { setKey(value); setError(""); }}
           onSubmit={finish}
-          placeholder="sk-…"
+          placeholder={provider?.apiKeyHint ?? "sk-…"}
           mask="•"
           error={error}
           hint={
-            needsProfile
-              ? `Will save profile ${slugifyProfile(model)} (${protocol}) and store the key in the macOS Keychain`
+            needsProfile && provider
+              ? provider.apiKeyRequired
+                ? `Will save profile ${slugifyProfile(modelPreset?.id ?? modelId)} (${provider.protocol}) and store the key in the macOS Keychain`
+                : "Press Enter to skip — this provider does not require an API key"
               : existingProfile
                 ? `Stored for env ${existingProfile.apiKeyEnv}, never in project files`
                 : "Will be stored in macOS Keychain, never in project files"
@@ -239,7 +392,7 @@ export function CredentialSetup({
         />
       )}
 
-      <Text color={theme.faint}>enter continue  ·  esc cancel</Text>
+      <Text color={theme.faint}>enter continue  ·  esc back/cancel</Text>
     </Box>
   );
 }
@@ -302,7 +455,6 @@ function safeDisplayUrl(value: string): string {
     return "configured endpoint";
   }
 }
-
 
 function normalizeBaseUrl(value: string, protocol: ModelProtocol): string {
   const clean = value.replace(/\/$/, "");

@@ -73,6 +73,7 @@ const commands = [
   ["/fork", "fork this session"],
   ["/undo", "revert the previous turn"],
   ["/compact", "compact the transcript on demand"],
+  ["/login", "add or switch a model provider"],
   ["/auth", "change API key credentials"],
   ["/workers", "inspect child agents"],
   ["/steer", "redirect a running worker"],

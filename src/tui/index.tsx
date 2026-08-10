@@ -8,6 +8,8 @@ import { SessionController } from "../runtime/controller.js";
 import { forkSession, listSessions } from "../runtime/session-store.js";
 import { findWorkspaceRoot } from "../config/config.js";
 import { discoverCommands, expandCommand } from "../config/commands.js";
+import { runCredentialOnboarding } from "./onboarding.js";
+import { acceptCredential } from "../auth/credentials.js";
 import { allowlistEntryFor, saveAllowlistEntry } from "../security/allowlist.js";
 
 export interface RunTuiOptions {
@@ -76,6 +78,13 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       case "/compact": {
         await controller.compact();
         return "Compacted the transcript on demand";
+      }
+      case "/login": {
+        const choice = await runCredentialOnboarding(controller.workspaceRoot);
+        const accepted = await acceptCredential({ choice, cwd: controller.workspaceRoot });
+        return accepted.stored
+          ? `Connected to ${choice.model} via ${choice.providerPreset ?? choice.protocol}. Key saved in macOS Keychain.`
+          : `Connected to ${choice.model}. Key active for this session (Keychain unavailable).`;
       }
       case "/auth":
         return "Exit Kulmi and run `kulmi auth` to change credentials safely.";
