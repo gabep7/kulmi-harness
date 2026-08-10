@@ -71,25 +71,7 @@ export const providerPresets: readonly ProviderPreset[] = [
       { id: "llama3.2:3b", label: "Llama 3.2 3B (fast)", contextWindow: 128_000, maxOutputTokens: 8_192 },
     ],
   },
-  {
-    id: "ollama-local",
-    label: "Ollama (local)",
-    description: "Run models locally with Ollama. No API key needed.",
-    protocol: "openai",
-    baseUrl: "http://localhost:11434/v1",
-    apiKeyRequired: false,
-    apiKeyEnv: "OLLAMA_LOCAL_API_KEY",
-    apiKeyHint: "Press Enter to skip (local Ollama does not require a key)",
-    configurableBaseUrl: true,
-    models: [
-      { id: "qwen3-coder:32b", label: "Qwen3 Coder 32B", contextWindow: 131_072, maxOutputTokens: 32_768, default: true },
-      { id: "qwen3-coder:14b", label: "Qwen3 Coder 14B", contextWindow: 131_072, maxOutputTokens: 32_768 },
-      { id: "deepseek-r1:32b", label: "DeepSeek R1 32B", contextWindow: 128_000, maxOutputTokens: 32_768, thinking: true, reasoningEffort: "high", reasoningEfforts: ["low", "medium", "high"] },
-      { id: "llama3.3:70b", label: "Llama 3.3 70B", contextWindow: 128_000, maxOutputTokens: 32_768 },
-      { id: "qwen2.5-coder:32b", label: "Qwen2.5 Coder 32B", contextWindow: 128_000, maxOutputTokens: 32_768 },
-      { id: "llama3.2:3b", label: "Llama 3.2 3B (fast)", contextWindow: 128_000, maxOutputTokens: 8_192 },
-    ],
-  },
+
   {
     id: "anthropic",
     label: "Anthropic (Claude)",

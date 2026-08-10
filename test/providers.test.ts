@@ -9,16 +9,9 @@ describe("provider presets", () => {
     expect(providerPresets[0]?.baseUrl).toBe("https://api.ollama.com/v1");
   });
 
-  it("includes Ollama Local as the second provider", () => {
-    expect(providerPresets[1]?.id).toBe("ollama-local");
-    expect(providerPresets[1]?.apiKeyRequired).toBe(false);
-    expect(providerPresets[1]?.baseUrl).toBe("http://localhost:11434/v1");
-  });
-
   it("includes all major providers", () => {
     const ids = providerPresets.map((p) => p.id);
     expect(ids).toContain("ollama");
-    expect(ids).toContain("ollama-local");
     expect(ids).toContain("anthropic");
     expect(ids).toContain("openai");
     expect(ids).toContain("google");
@@ -84,10 +77,6 @@ describe("provider presets", () => {
     expect(findProviderPreset("ollama")?.apiKeyRequired).toBe(true);
   });
 
-  it("Ollama Local does not require an API key", () => {
-    expect(findProviderPreset("ollama-local")?.apiKeyRequired).toBe(false);
-  });
-
   it("reasoning models have thinking and reasoning efforts", () => {
     const anthropic = findProviderPreset("anthropic");
     const sonnet = anthropic?.models.find((m) => m.id === "claude-sonnet-4-20250514");
@@ -107,7 +96,5 @@ describe("provider presets", () => {
     expect(findProviderPreset("custom")?.configurableBaseUrl).toBe(true);
   });
 
-  it("Ollama Local has configurable base URL for remote instances", () => {
-    expect(findProviderPreset("ollama-local")?.configurableBaseUrl).toBe(true);
-  });
+
 });
