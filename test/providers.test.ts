@@ -13,6 +13,11 @@ describe("provider presets", () => {
     const ids = providerPresets.map((p) => p.id);
     expect(ids).toContain("ollama");
     expect(ids).toContain("anthropic");
+    expect(ids).toContain("cerebras");
+    expect(ids).toContain("azure-openai");
+    expect(ids).toContain("kimi");
+    expect(ids).toContain("minimax");
+    expect(ids).toContain("huggingface");
     expect(ids).toContain("openai");
     expect(ids).toContain("google");
     expect(ids).toContain("deepseek");
@@ -75,6 +80,20 @@ describe("provider presets", () => {
 
   it("Ollama Cloud requires an API key", () => {
     expect(findProviderPreset("ollama")?.apiKeyRequired).toBe(true);
+  });
+
+  it("Anthropic models have cost data", () => {
+    const anthropic = findProviderPreset("anthropic");
+    const sonnet = anthropic?.models.find((m) => m.id === "claude-sonnet-4-20250514");
+    expect(sonnet?.cost?.input).toBe(3);
+    expect(sonnet?.cost?.output).toBe(15);
+  });
+
+  it("OpenAI models have cost data", () => {
+    const openai = findProviderPreset("openai");
+    const gpt41 = openai?.models.find((m) => m.id === "gpt-4.1");
+    expect(gpt41?.cost?.input).toBe(2);
+    expect(gpt41?.cost?.output).toBe(8);
   });
 
   it("reasoning models have thinking and reasoning efforts", () => {

@@ -76,8 +76,8 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
         };
       }
       case "/compact": {
-        await controller.compact();
-        return "Compacted the transcript on demand";
+        await controller.compact(args.trim() || undefined);
+        return args.trim() ? "Compacted with custom instructions" : "Compacted the transcript on demand";
       }
       case "/login": {
         const choice = await runCredentialOnboarding(controller.workspaceRoot);
@@ -85,6 +85,56 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
         return accepted.stored
           ? `Connected to ${choice.model} via ${choice.providerPreset ?? choice.protocol}. Key saved in macOS Keychain.`
           : `Connected to ${choice.model}. Key active for this session (Keychain unavailable).`;
+      }
+      case "/copy": {
+        const messages = controller.messages;
+        const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant" && m.content);
+        if (!lastAssistant) return "No assistant message to copy";
+        const text = typeof lastAssistant.content === "string" ? lastAssistant.content : "";
+        if (!text) return "No text to copy";
+        try {
+          const { execFileSync } = await import("node:child_process");
+          if (process.platform === "darwin") execFileSync("pbcopy", { input: text });
+          else if (process.env.WAYLAND_DISPLAY) execFileSync("wl-copy", { input: text });
+          else execFileSync("xclip", ["-selection", "clipboard"], { input: text });
+          return "Copied to clipboard";
+        } catch {
+          return "Clipboard not available — copy manually";
+        }
+      }
+      case "/clear": {
+        // Close current controller, start fresh
+        await controller.close();
+        events = new EventBus();
+        controller = await createController(options, store, events, undefined, options.model);
+        store.seedMessages(controller.messages);
+        store.seedRunState(controller.state);
+        store.attach(events);
+        return "Started a fresh session";
+      }
+      case "/name": {
+        if (!args) return controller.state.sessionName ?? "No name set (use /name <name> to set one)";
+        return await controller.setSessionName(args.trim());
+      }
+      case "/export": {
+        const messages = controller.messages;
+        const lines: string[] = [];
+        for (const msg of messages) {
+          if (msg.role === "user") {
+            lines.push(`## User\n\n${typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content)}\n`);
+          } else if (msg.role === "assistant") {
+            const text = typeof msg.content === "string" ? msg.content : "";
+            if (text) lines.push(`## Assistant\n\n${text}\n`);
+          } else if (msg.role === "tool") {
+            const preview = msg.content.slice(0, 200);
+            lines.push(`<details><summary>Tool: ${msg.name ?? "unknown"}</summary>\n\n\`\`\`\n${preview}\n\`\`\`\n</details>\n`);
+          }
+        }
+        const markdown = `# Kulmi Session\n\n${lines.join("\n")}\n`;
+        const filename = args.trim() || `kulmi-session-${controller.sessionId.slice(0, 8)}.md`;
+        const { writeFileSync } = await import("node:fs");
+        writeFileSync(filename, markdown, "utf8");
+        return `Exported to ${filename}`;
       }
       case "/auth":
         return "Exit Kulmi and run `kulmi auth` to change credentials safely.";

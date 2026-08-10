@@ -119,9 +119,9 @@ export class Agent {
 
   // Manually compact the transcript on demand (e.g. /compact), outside the
   // automatic 78% context trigger. Only safe while the agent is idle.
-  async compact(signal: AbortSignal): Promise<void> {
+  async compact(signal: AbortSignal, instructions?: string): Promise<void> {
     if (this.#running) throw new Error("cannot compact while the agent is running");
-    await this.#compact(signal);
+    await this.#compact(signal, instructions);
   }
 
   async applyUndo(options: {
@@ -430,7 +430,7 @@ export class Agent {
     return this.#options.tools.providerTools().filter((tool) => tool.function.name !== "start_task");
   }
 
-  async #compact(signal: AbortSignal): Promise<void> {
+  async #compact(signal: AbortSignal, instructions?: string): Promise<void> {
     if (this.#messages.length < 16) {
       throw new Error("context limit reached before a safe compaction boundary was available");
     }

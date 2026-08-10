@@ -25,6 +25,8 @@ export interface ProviderModelPreset {
   vision?: boolean;
   /** Is this the recommended default model for the provider? */
   default?: boolean;
+  /** Cost per million tokens in USD */
+  cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 }
 
 export interface ProviderPreset {
@@ -82,8 +84,8 @@ export const providerPresets: readonly ProviderPreset[] = [
     apiKeyEnv: "ANTHROPIC_API_KEY",
     apiKeyHint: "sk-ant-…",
     models: [
-      { id: "claude-sonnet-4-20250514", label: "Claude Sonnet 4", contextWindow: 200_000, maxOutputTokens: 16_384, thinking: true, reasoningEffort: "medium", reasoningEfforts: ["none", "low", "medium", "high"], vision: true, default: true },
-      { id: "claude-opus-4-20250514", label: "Claude Opus 4", contextWindow: 200_000, maxOutputTokens: 16_384, thinking: true, reasoningEffort: "medium", reasoningEfforts: ["none", "low", "medium", "high"], vision: true },
+      { id: "claude-sonnet-4-20250514", label: "Claude Sonnet 4", contextWindow: 200_000, maxOutputTokens: 16_384, thinking: true, reasoningEffort: "medium", reasoningEfforts: ["none", "low", "medium", "high"], vision: true, default: true, cost: { input: 3, output: 15, cacheRead: 0.30, cacheWrite: 3.75 } },
+      { id: "claude-opus-4-20250514", label: "Claude Opus 4", contextWindow: 200_000, maxOutputTokens: 16_384, thinking: true, reasoningEffort: "medium", reasoningEfforts: ["none", "low", "medium", "high"], vision: true, cost: { input: 15, output: 75, cacheRead: 1.50, cacheWrite: 18.75 } },
       { id: "claude-haiku-3-5-20241022", label: "Claude 3.5 Haiku", contextWindow: 200_000, maxOutputTokens: 8_192, vision: true },
     ],
   },
@@ -97,8 +99,8 @@ export const providerPresets: readonly ProviderPreset[] = [
     apiKeyEnv: "OPENAI_API_KEY",
     apiKeyHint: "sk-…",
     models: [
-      { id: "gpt-4.1", label: "GPT-4.1", contextWindow: 1_047_576, maxOutputTokens: 32_768, vision: true, default: true },
-      { id: "o3", label: "o3", contextWindow: 200_000, maxOutputTokens: 100_000, thinking: true, reasoningEffort: "medium", reasoningEfforts: ["low", "medium", "high"], vision: true },
+      { id: "gpt-4.1", label: "GPT-4.1", contextWindow: 1_047_576, maxOutputTokens: 32_768, vision: true, default: true, cost: { input: 2, output: 8, cacheRead: 0.50 } },
+      { id: "o3", label: "o3", contextWindow: 200_000, maxOutputTokens: 100_000, thinking: true, reasoningEffort: "medium", reasoningEfforts: ["low", "medium", "high"], vision: true, cost: { input: 2, output: 8, cacheRead: 0.50 } },
       { id: "o4-mini", label: "o4-mini", contextWindow: 200_000, maxOutputTokens: 100_000, thinking: true, reasoningEffort: "medium", reasoningEfforts: ["low", "medium", "high"], vision: true },
       { id: "gpt-4.1-mini", label: "GPT-4.1 Mini", contextWindow: 1_047_576, maxOutputTokens: 32_768, vision: true },
       { id: "gpt-4.1-nano", label: "GPT-4.1 Nano (fast)", contextWindow: 1_047_576, maxOutputTokens: 32_768, vision: true },
@@ -128,7 +130,7 @@ export const providerPresets: readonly ProviderPreset[] = [
     apiKeyEnv: "DEEPSEEK_API_KEY",
     apiKeyHint: "sk-…",
     models: [
-      { id: "deepseek-chat", label: "DeepSeek V3", contextWindow: 64_000, maxOutputTokens: 8_192, default: true },
+      { id: "deepseek-chat", label: "DeepSeek V3", contextWindow: 64_000, maxOutputTokens: 8_192, default: true, cost: { input: 0.27, output: 1.10, cacheRead: 0.07 } },
       { id: "deepseek-reasoner", label: "DeepSeek R1", contextWindow: 64_000, maxOutputTokens: 32_768, thinking: true, reasoningEffort: "high", reasoningEfforts: ["low", "medium", "high"] },
     ],
   },
@@ -142,7 +144,7 @@ export const providerPresets: readonly ProviderPreset[] = [
     apiKeyEnv: "GROQ_API_KEY",
     apiKeyHint: "gsk_…",
     models: [
-      { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", contextWindow: 128_000, maxOutputTokens: 32_768, default: true },
+      { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", contextWindow: 128_000, maxOutputTokens: 32_768, default: true, cost: { input: 0.59, output: 0.99 } },
       { id: "deepseek-r1-distill-llama-70b", label: "DeepSeek R1 Distill 70B", contextWindow: 128_000, maxOutputTokens: 32_768, thinking: true, reasoningEffort: "high", reasoningEfforts: ["low", "medium", "high"] },
       { id: "qwen-2.5-coder-32b", label: "Qwen2.5 Coder 32B", contextWindow: 128_000, maxOutputTokens: 32_768 },
       { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B (instant)", contextWindow: 128_000, maxOutputTokens: 8_192 },
@@ -224,6 +226,76 @@ export const providerPresets: readonly ProviderPreset[] = [
       { id: "accounts/fireworks/models/qwen3-coder-32b", label: "Qwen3 Coder 32B", contextWindow: 131_072, maxOutputTokens: 32_768, default: true },
       { id: "accounts/fireworks/models/deepseek-r1", label: "DeepSeek R1", contextWindow: 128_000, maxOutputTokens: 32_768, thinking: true, reasoningEffort: "high", reasoningEfforts: ["low", "medium", "high"] },
       { id: "accounts/fireworks/models/llama-v3p3-70b-instruct", label: "Llama 3.3 70B", contextWindow: 128_000, maxOutputTokens: 32_768 },
+    ],
+  },
+  {
+    id: "cerebras",
+    label: "Cerebras",
+    description: "Fastest inference for Llama and Qwen models.",
+    protocol: "openai",
+    baseUrl: "https://api.cerebras.ai/v1",
+    apiKeyRequired: true,
+    apiKeyEnv: "CEREBRAS_API_KEY",
+    apiKeyHint: "csk-…",
+    models: [
+      { id: "llama-3.3-70b", label: "Llama 3.3 70B", contextWindow: 128_000, maxOutputTokens: 8_192, cost: { input: 0.85, output: 1.20 }, default: true },
+      { id: "qwen-2.5-coder-32b", label: "Qwen2.5 Coder 32B", contextWindow: 128_000, maxOutputTokens: 8_192, cost: { input: 0.85, output: 1.20 } },
+    ],
+  },
+  {
+    id: "azure-openai",
+    label: "Azure OpenAI",
+    description: "OpenAI models via Azure deployment. Requires Azure endpoint and deployment ID.",
+    protocol: "openai-responses",
+    baseUrl: "",
+    apiKeyRequired: true,
+    apiKeyEnv: "AZURE_OPENAI_API_KEY",
+    apiKeyHint: "…",
+    configurableBaseUrl: true,
+    models: [
+      { id: "gpt-4.1", label: "GPT-4.1", contextWindow: 1_047_576, maxOutputTokens: 32_768, vision: true, default: true, cost: { input: 2, output: 8, cacheRead: 0.50 } },
+      { id: "o3", label: "o3", contextWindow: 200_000, maxOutputTokens: 100_000, thinking: true, reasoningEffort: "medium", reasoningEfforts: ["low", "medium", "high"], vision: true, cost: { input: 2, output: 8, cacheRead: 0.50 } },
+      { id: "gpt-4.1-mini", label: "GPT-4.1 Mini", contextWindow: 1_047_576, maxOutputTokens: 32_768, vision: true },
+    ],
+  },
+  {
+    id: "kimi",
+    label: "Kimi (Moonshot)",
+    description: "Kimi For Coding models by Moonshot AI.",
+    protocol: "openai",
+    baseUrl: "https://api.moonshot.ai/v1",
+    apiKeyRequired: true,
+    apiKeyEnv: "KIMI_API_KEY",
+    apiKeyHint: "sk-…",
+    models: [
+      { id: "kimi-k2-0905-preview", label: "Kimi K2", contextWindow: 128_000, maxOutputTokens: 8_192, default: true },
+    ],
+  },
+  {
+    id: "minimax",
+    label: "MiniMax",
+    description: "MiniMax models with long context windows.",
+    protocol: "openai",
+    baseUrl: "https://api.minimaxi.chat/v1",
+    apiKeyRequired: true,
+    apiKeyEnv: "MINIMAX_API_KEY",
+    apiKeyHint: "…",
+    models: [
+      { id: "MiniMax-M1", label: "MiniMax M1", contextWindow: 1_000_000, maxOutputTokens: 8_192, default: true },
+    ],
+  },
+  {
+    id: "huggingface",
+    label: "Hugging Face",
+    description: "Inference via Hugging Face tokens. Access 100K+ models.",
+    protocol: "openai",
+    baseUrl: "https://api-inference.huggingface.co/v1",
+    apiKeyRequired: true,
+    apiKeyEnv: "HF_TOKEN",
+    apiKeyHint: "hf_…",
+    models: [
+      { id: "meta-llama/Llama-3.3-70B-Instruct", label: "Llama 3.3 70B", contextWindow: 128_000, maxOutputTokens: 8_192, default: true },
+      { id: "Qwen/Qwen2.5-Coder-32B-Instruct", label: "Qwen2.5 Coder 32B", contextWindow: 128_000, maxOutputTokens: 8_192 },
     ],
   },
   {

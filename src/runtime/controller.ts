@@ -150,6 +150,14 @@ export class SessionController {
   get state(): RunState {
     return structuredClone(this.#state);
   }
+  get sessionName(): string | undefined {
+    return this.#state.sessionName;
+  }
+  async setSessionName(name: string): Promise<string> {
+    this.#state.sessionName = name;
+    await this.#session.saveRunState(this.#state);
+    return `Session named "${name}"`;
+  }
 
   static async create(options: ControllerOptions): Promise<SessionController> {
     const loaded = options.resumeSessionId
@@ -667,7 +675,7 @@ export class SessionController {
     }
   }
 
-  async compact(): Promise<void> {
+  async compact(instructions?: string): Promise<void> {
     if (this.#closed) throw new Error("session is closed");
     if (this.#running) throw new Error("cannot compact while the session is running");
     if (this.#compacting) throw new Error("compaction is already in progress");
@@ -675,7 +683,7 @@ export class SessionController {
     const holder: { promise: Promise<void> | undefined } = { promise: undefined };
     holder.promise = (async () => {
       try {
-        await this.#agent.compact(abort.signal);
+        await this.#agent.compact(abort.signal, instructions);
         // Manual compaction rewrites the transcript outside a turn, which
         // invalidates the message boundaries recorded by every checkpoint.
         // Disable undo so it cannot splice at a now-wrong index.

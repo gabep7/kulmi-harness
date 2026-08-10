@@ -38,6 +38,7 @@ export interface CompletionRecord {
 
 export interface RunState {
   agentId: string;
+  sessionName?: string;
   parentAgentId?: string;
   mode: AgentMode;
   status: AgentStatus;
