@@ -101,14 +101,14 @@ const completeTaskTool = defineTool({
         throw new Error(`cannot complete while child agents are still running: ${pendingWorkers.join(", ")}`);
       }
       if (context.state.plan.length === 0) {
-        throw new Error("cannot complete a task without a plan");
+        throw new Error("cannot complete a task without a plan: call update_plan once with the steps you actually carried out, each completed step carrying its evidence, then call complete_task again");
       }
       const unfinished = context.state.plan.filter((step) => step.status !== "completed");
       if (unfinished.length > 0) {
-        throw new Error(`cannot complete task with unfinished plan steps: ${unfinished.map((step) => step.id).join(", ")}`);
+        throw new Error(`cannot complete task with unfinished plan steps: ${unfinished.map((step) => step.id).join(", ")}. Call update_plan marking them completed with evidence, or report the blocker.`);
       }
       if (input.evidence.length === 0) {
-        throw new Error("cannot complete a task without explicit evidence");
+        throw new Error("cannot complete a task without explicit evidence: pass evidence as a list of concrete observations, such as the command you ran and its result");
       }
       if (context.state.modifiedFiles.size > 0) {
         if (!input.verification_command) {

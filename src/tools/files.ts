@@ -36,7 +36,12 @@ const readFileTool = defineTool({
     "Read UTF-8 file; mode='lines' for exact ranges.",
   schema: z.object({
     path: z.string().min(1),
-    offset: z.number().int().positive().default(1),
+    // 1-based first line. Models routinely pass 0 meaning "the start", so the
+    // schema accepts it and execute() clamps, rather than burning a turn on a
+    // validation error. A transform cannot be used here: tool schemas are
+    // converted to JSON Schema for the provider.
+    offset: z.number().int().nonnegative().default(1)
+      .describe("First line to read, 1-based. 0 is treated as 1."),
     limit: z.number().int().positive().max(2_000).default(400),
     mode: z.enum(["summary", "lines"]).default("summary"),
   }),
@@ -51,12 +56,14 @@ const readFileTool = defineTool({
     assertNotSensitivePath(path);
     const content = await readTextFileBounded(path, input.path);
     const { lines } = splitLogicalLines(content);
+    // Treat 0 as the first line: see the offset field note above.
+    const offset = Math.max(1, input.offset);
     if (input.mode === "summary") {
       const summary = summarizeSource(input.path, content, lines, input.limit);
       if (summary) return { content: summary };
     }
     return {
-      content: renderNumberedLines(content, lines, input.offset, input.limit),
+      content: renderNumberedLines(content, lines, offset, input.limit),
     };
   },
 });

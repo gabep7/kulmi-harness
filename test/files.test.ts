@@ -148,6 +148,23 @@ describe("file tools", () => {
     expect(exact.content).toContain(' 8\t  const secretBody = "body must only appear in exact mode";');
     expect(exact.content).toContain("10\t}");
     expect(exact.content).toContain(`[4 of ${lines.length - 1} lines, sha256:${digest(content)}]`);
+
+    // Models frequently send offset 0 meaning "the start". That used to be a
+    // schema violation which cost a whole turn, so it now reads line 1.
+    const zeroOffset = await registry.execute({
+      name: "read_file",
+      argumentsJson: JSON.stringify({ path: "large.ts", mode: "lines", offset: 0, limit: 2 }),
+      callId: "read-zero-offset",
+      context,
+    });
+    expect(zeroOffset.isError, zeroOffset.content).toBe(false);
+    const fromOne = await registry.execute({
+      name: "read_file",
+      argumentsJson: JSON.stringify({ path: "large.ts", mode: "lines", offset: 1, limit: 2 }),
+      callId: "read-one-offset",
+      context,
+    });
+    expect(zeroOffset.content).toBe(fromOne.content);
   });
 
   it("emits a bounded diff and does not count no-op edits as revisions", async () => {
