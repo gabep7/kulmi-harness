@@ -82,6 +82,9 @@ function runOne(harness, task) {
       seconds: result?.seconds ?? (Date.now() - started) / 1000,
       patchLines: (result?.patch ?? "").split("\n").filter((line) => /^[+-][^+-]/.test(line)).length,
       changedFiles: result?.changedFiles?.length ?? 0,
+      // Keep the diff for failures: without it a failed run cannot be
+      // diagnosed after the fact, and the scratch worktree is already gone.
+      ...(result && !result.passed ? { patch: result.patch ?? "" } : {}),
       error: parsed ? undefined : (stderr.trim().split("\n").at(-1) ?? "no json output"),
     });
   });
