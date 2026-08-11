@@ -25,6 +25,7 @@ Kulmi is a general-purpose autonomous coding harness with a fast full-screen ter
 - [File editing](#file-editing)
 - [Prompt caching](#prompt-caching)
 - [Development](#development)
+- [Startup and memory](#startup-and-memory)
 - [Design references](#design-references)
 
 ## Requirements
@@ -465,6 +466,33 @@ Two suites stay outside `pnpm run check`:
 
 - `pnpm run test:live` performs a low-output two-request smoke test covering thinking, tool-call reasoning replay, tool-result pairing, streaming, and cache telemetry. It needs a real key and incurs provider usage.
 - `pnpm run eval` runs the SWE-style eval suite under `evals/`. Each task copies a fixture repo to a temporary directory, runs `kulmi exec` against a prompt, and judges the result solely by the task's verify command. Use it to regression-test harness changes. `KULMI_EVAL_BIN` swaps the executable under test and `KULMI_EVAL_MODEL` selects the model profile. Pass `--json` for machine-readable results, `--task <name>` to run a single task, and `--keep` to retain the temporary working directory. A task may define `repo_url` and `base_commit` to run against a real upstream repository instead of a fixture, and `fail_to_pass` plus `pass_to_pass` test lists to record per-test outcomes alongside the verify command. The runner also extracts the model's patch, changed files, and best-effort usage lines for each result.
+- `node evals/compare.mjs --harness kulmi,pi` runs the same tasks against other agent CLIs and reports pass rate, time, and patch size. See [evals/README.md](evals/README.md).
+
+## Startup and memory
+
+Interactive latency and idle footprint are treated as regressions, not
+preferences. Measured on macOS with Node 22:
+
+| metric | value |
+| --- | --- |
+| `kulmi doctor` startup | ~165ms |
+| idle TUI resident memory | ~130MB |
+
+Two rules keep those numbers down, and both are load-bearing:
+
+- Expensive optional dependencies are imported on demand, never at module
+  scope. `playwright-core` (~240ms) loads on the first `browser_qa` call, the
+  ink UI (~190ms) loads only for the interactive TUI so `exec`, `rpc`, and
+  `doctor` skip it, and the MCP SDK (~24MB) loads only when the config actually
+  declares servers. `test/controller-mcp-lazy.test.ts` fails if the MCP import
+  becomes eager again.
+- `zod` accounts for roughly 12MB and is unavoidable, since every tool schema
+  depends on it. Remaining memory is V8 and ink baseline, so the practical way
+  to reduce it further is fewer eagerly loaded tool modules, not a rewrite.
+
+Model latency dominates task wall clock: startup is about 1% of a typical
+15-second task, so harness-level turn count matters far more than process
+startup.
 
 The release gate and tag procedure is in [docs/releasing.md](docs/releasing.md).
 
