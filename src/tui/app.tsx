@@ -483,7 +483,7 @@ export function TuiApp(props: TuiAppProps) {
 
         {snapshot.reasoning && <Thinking text={snapshot.reasoning} expanded={snapshot.expandedThinking} width={width} />}
 
-        {snapshot.plan.length > 0 && <PlanBlock plan={snapshot.plan} />}
+        {showPlan(snapshot.plan) && <PlanBlock plan={snapshot.plan} />}
         {snapshot.completion && <CompletionBlock completion={snapshot.completion} />}
 
         {help && <Help onClose={() => setHelp(false)} custom={props.customCommands ?? []} />}
@@ -599,6 +599,14 @@ function Thinking({ text, expanded, width }: { text: string; expanded: boolean; 
   );
 }
 
+// A one-step plan that is already finished restates what the answer above
+// just said. A single step still in progress is useful, so keep that.
+function showPlan(plan: PlanStep[]): boolean {
+  if (plan.length === 0) return false;
+  if (plan.length > 1) return true;
+  return plan[0]?.status !== "completed";
+}
+
 function PlanBlock({ plan }: { plan: PlanStep[] }) {
   const done = plan.filter((step) => step.status === "completed").length;
   return (
@@ -617,6 +625,19 @@ function PlanBlock({ plan }: { plan: PlanStep[] }) {
 }
 
 function CompletionBlock({ completion }: { completion: CompletionSummary }) {
+  // The framed box earns its space only when files changed: that is when the
+  // file list and verification matter. A read-only answer collapses to one
+  // line, since the assistant message above already carried the content.
+  const readOnlyRun = completion.status === "completed" && completion.modifiedFiles.length === 0;
+  if (readOnlyRun) {
+    const check = completion.verificationCommands[0];
+    return (
+      <Box marginTop={1}>
+        <Text color={theme.sage}>{glyph.success} </Text>
+        <Text color={theme.faint}>{check ? `done  ·  ${check}` : "done"}</Text>
+      </Box>
+    );
+  }
   return (
     <Box marginTop={1} borderStyle="round" borderColor={completion.status === "completed" ? theme.sage : theme.rust} paddingX={1} flexDirection="column">
       <Text color={completion.status === "completed" ? theme.sage : theme.rose} bold>{completion.status}</Text>
