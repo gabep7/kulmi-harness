@@ -76,7 +76,7 @@ describe("Kulmi TUI", () => {
     expect(frame).toContain("│ Evidence attached");
     expect(frame).not.toContain("**Cache path**");
     expect(frame).toContain("What should we build?");
-    expect(frame).toContain("1,100 tokens");
+    expect(frame).toContain("1,100 tok");
     expect(frame).toContain("80% cache");
   });
 

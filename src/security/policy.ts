@@ -503,7 +503,10 @@ function isValidator(argv: string[]): boolean {
   // reach this point and deliberately have no clause here.
   if (program === "make") return args.some((arg) => /^(?:test|check|lint|build)$/.test(arg));
   if (["node", "python", "python3"].includes(program)) {
-    if (program === "node" && args.includes("--test")) return true;
+    // --test runs the built-in runner and --check is a real syntax verification
+    // of a named file. Other `python -m` forms are blocked earlier, so only
+    // pytest reaches here and it is handled at that block.
+    if (program === "node" && (args.includes("--test") || args.includes("--check"))) return true;
     const script = args.find((arg) => !arg.startsWith("-"));
     return Boolean(script && validatorScriptPattern.test(basename(script)));
   }

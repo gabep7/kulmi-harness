@@ -600,15 +600,25 @@ function FeedRow({ item, width }: { item: FeedItem; width: number }) {
     // Tool activity reads as terminal output: a status glyph, what ran, and the
     // outcome, with continuation lines indented under it. No frame.
     <Box flexDirection="column" paddingLeft={1}>
+      {/* Outcome and duration ride the right edge of the same line, so a wide
+          terminal carries information instead of whitespace. */}
       <Box>
-        <Text color={item.status === "error" ? theme.rose : item.status === "done" ? theme.sage : theme.tool}>
-          {item.status === "error" ? glyph.error : item.status === "done" ? glyph.success : glyph.active}{" "}
-        </Text>
-        <Text color={theme.ink}>{item.title}</Text>
-        {item.durationMs !== undefined && <Text color={theme.faint}>  {formatDuration(item.durationMs)}</Text>}
+        <Box flexGrow={1}>
+          <Text color={item.status === "error" ? theme.rose : item.status === "done" ? theme.sage : theme.tool}>
+            {`${item.status === "error" ? glyph.error : item.status === "done" ? glyph.success : glyph.active} `}
+          </Text>
+          <Text color={theme.ink} wrap="truncate-end">{item.title}</Text>
+          {item.detail && <Text color={theme.faint} wrap="truncate-end">  {item.detail}</Text>}
+        </Box>
+        <Box flexShrink={0}>
+          {item.summary && (
+            <Text color={item.status === "error" ? theme.rose : theme.muted}>
+              {clampLine(item.summary, Math.max(12, Math.floor(width / 3)))}
+            </Text>
+          )}
+          {item.durationMs !== undefined && <Text color={theme.faint}>  {formatDuration(item.durationMs)}</Text>}
+        </Box>
       </Box>
-      {item.detail && <Text color={theme.faint}>   {clampLine(item.detail, Math.max(16, width - 6))}</Text>}
-      {item.summary && <Text color={item.status === "error" ? theme.rose : theme.muted}>   {clampLine(item.summary, Math.max(16, width - 14))}</Text>}
       {item.diff && <Text color={theme.faint}>   {item.diff}</Text>}
     </Box>
   );
@@ -959,26 +969,34 @@ function Footer({ runtime, status, busy, agents, usage, contextTokens, contextWi
   const barColor = fillRatio >= 0.9 ? "red" : fillRatio >= 0.78 ? "yellow" : theme.faint;
   const cacheInput = usage.cacheHitTokens + usage.cacheMissTokens;
   const cachePercent = cacheInput > 0 ? Math.round(usage.cacheHitTokens / cacheInput * 100) : 0;
+  // One status line that spans the terminal: session facts on the left, usage
+  // and context pushed to the right edge, so wide terminals are not half empty.
+  const left = [
+    runtime.model,
+    runtime.mode === "task" ? "goal" : "chat",
+    autonomyLabel(runtime.autonomy),
+    ...(agents > 0 ? [`${agents} agent${agents === 1 ? "" : "s"}`] : []),
+    busy ? "esc stop" : "? help",
+  ].join("  ·  ");
   return (
-    <Box flexDirection="column">
-      <Box>
+    <Box>
+      <Box flexGrow={1}>
         <Text color={theme.faint} wrap="truncate-end">
-          {runtime.model}  ·  <Text color={statusColor(status)}>{status}</Text>  ·  {runtime.mode === "task" ? "goal" : "chat"}  ·  {autonomyLabel(runtime.autonomy)}
-          {agents > 0 ? `  ·  ${agents} agent${agents === 1 ? "" : "s"}` : ""}
-          {"  ·  "}{busy ? "esc stop" : "? help"}
+          <Text color={statusColor(status)}>{status}</Text>{"  ·  "}{left}
         </Text>
       </Box>
-      {usage.totalTokens > 0 && (
-        <Box>
-          <Text color={theme.faint}>{usage.totalTokens.toLocaleString()} tokens  ·  {cachePercent}% cache</Text>
-        </Box>
-      )}
-      {contextTokens > 0 && (
-        <Box>
-          <Text color={barColor}>{bar}</Text>
-          <Text color={theme.faint}>  {fillPercent}% context{fillRatio >= 0.78 ? " (compacting soon)" : ""}</Text>
-        </Box>
-      )}
+      <Box flexShrink={0}>
+        {usage.totalTokens > 0 && (
+          <Text color={theme.faint}>{usage.totalTokens.toLocaleString()} tok  </Text>
+        )}
+        {cacheInput > 0 && <Text color={theme.faint}>{cachePercent}% cache  </Text>}
+        {contextTokens > 0 && (
+          <>
+            <Text color={barColor}>{bar}</Text>
+            <Text color={theme.faint}> {fillPercent}%{fillRatio >= 0.78 ? " compacting soon" : ""}</Text>
+          </>
+        )}
+      </Box>
     </Box>
   );
 }

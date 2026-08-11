@@ -123,6 +123,10 @@ describe("command policy", () => {
     expect(decideCommand("node dist/test.js", "medium").verification).toBe(true);
     expect(decideCommand("node verify.mjs", "medium").verification).toBe(true);
     expect(decideCommand("node --test test/unit", "medium").verification).toBe(true);
+    // node --check is a real syntax verification of a named file. Without this
+    // the agent's passing check is refused and it has to invent another one.
+    expect(decideCommand("node --check a.mjs", "medium").verification).toBe(true);
+    expect(decideCommand("node app.mjs", "medium").verification).toBe(false);
     expect(decideCommand("./verify.sh", "medium").verification).toBe(true);
     // Common verification script names must be recognized. When they are not,
     // completion is gated on a check that already passed, and the agent writes
