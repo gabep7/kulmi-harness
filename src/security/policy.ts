@@ -476,7 +476,11 @@ function isPackageMutation(argv: string[]): boolean {
   );
 }
 
-const validatorScriptPattern = /(?:^|[._-])(?:tests?|spec|verify|check)(?:$|[._-])/i;
+// Names that identify a script as a verification step. A passing check that is
+// not recognized here is worse than cosmetic: completion is gated on a recorded
+// verification, so the agent is pushed into writing a throwaway wrapper script
+// just to get its real check acknowledged.
+const validatorScriptPattern = /(?:^|[._-])(?:tests?|spec|verify|verification|check|checks|smoke|sanity|validate|validation|e2e|lint|typecheck)(?:$|[._-])/i;
 
 function isValidator(argv: string[]): boolean {
   const program = basename(argv[0] ?? "");

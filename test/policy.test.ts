@@ -124,9 +124,22 @@ describe("command policy", () => {
     expect(decideCommand("node verify.mjs", "medium").verification).toBe(true);
     expect(decideCommand("node --test test/unit", "medium").verification).toBe(true);
     expect(decideCommand("./verify.sh", "medium").verification).toBe(true);
-    expect(decideCommand("node smoke.mjs", "medium").verification).toBe(false);
+    // Common verification script names must be recognized. When they are not,
+    // completion is gated on a check that already passed, and the agent writes
+    // a throwaway wrapper script just to satisfy the gate.
+    expect(decideCommand("node smoke.mjs", "medium").verification).toBe(true);
+    expect(decideCommand("node sanity.mjs", "medium").verification).toBe(true);
+    expect(decideCommand("node validate.mjs", "medium").verification).toBe(true);
+    expect(decideCommand("node e2e.mjs", "medium").verification).toBe(true);
+    expect(decideCommand("./lint.sh", "medium").verification).toBe(true);
+    // Word-boundary matching must still exclude incidental substrings.
     expect(decideCommand("node server.js", "medium").verification).toBe(false);
     expect(decideCommand("./checkout.sh", "medium").verification).toBe(false);
+    expect(decideCommand("./checker.sh", "medium").verification).toBe(false);
+    expect(decideCommand("node testing-utils.mjs", "medium").verification).toBe(false);
+    // A command that writes files is never recorded as a verification, so a
+    // wider name list cannot be used to launder a mutation.
+    expect(decideCommand("node smoke.mjs > out.txt", "medium")).toMatchObject({ risk: "low" });
   });
 
   it("allows local dev commands at trusted autonomy", () => {
