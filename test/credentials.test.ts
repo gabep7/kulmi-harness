@@ -100,11 +100,11 @@ describe("credential onboarding", () => {
       cwd,
       choice: {
         key: "sk-123456789",
-        baseUrl: "https://a6.a6api.com/v1",
-        model: "grok-4.5",
-        profileName: "a6-grok",
+        baseUrl: "https://api.example.com/v1",
+        model: "custom-4",
+        profileName: "custom-model",
         protocol: "openai",
-        apiKeyEnv: "A6_GROK_API_KEY",
+        apiKeyEnv: "CUSTOM_API_KEY",
         thinking: true,
         reasoningEffort: "high",
         contextWindow: 500_000,
@@ -112,20 +112,20 @@ describe("credential onboarding", () => {
       },
       keychain,
     });
-    expect(result).toMatchObject({ model: "a6-grok", source: "prompt", stored: true });
+    expect(result).toMatchObject({ model: "custom-model", source: "prompt", stored: true });
     const config = await import("../src/config/config.js").then((mod) => mod.loadConfig(cwd));
-    expect(config.defaultModel).toBe("a6-grok");
-    expect(config.models["a6-grok"]).toMatchObject({
-      model: "grok-4.5",
-      baseUrl: "https://a6.a6api.com/v1",
-      apiKeyEnv: "A6_GROK_API_KEY",
+    expect(config.defaultModel).toBe("custom-model");
+    expect(config.models["custom-model"]).toMatchObject({
+      model: "custom-4",
+      baseUrl: "https://api.example.com/v1",
+      apiKeyEnv: "CUSTOM_API_KEY",
       thinking: true,
       reasoningEffort: "high",
       contextWindow: 500_000,
       maxOutputTokens: 65_536,
     });
-    expect(process.env.A6_GROK_API_KEY).toBe("sk-123456789");
-    expect(await keychain.read("A6_GROK_API_KEY")).toBe("sk-123456789");
+    expect(process.env.CUSTOM_API_KEY).toBe("sk-123456789");
+    expect(await keychain.read("CUSTOM_API_KEY")).toBe("sk-123456789");
   });
 
   it("does not return a key saved for a different api_key_env account", async () => {
