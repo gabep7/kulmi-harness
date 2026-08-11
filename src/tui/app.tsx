@@ -503,8 +503,8 @@ export function TuiApp(props: TuiAppProps) {
             <>
               {visibleTools.length > 0 && (
                 <Box marginTop={1} flexDirection="column">
-                  <Text color={theme.tool} bold>{glyph.tool} tool activity  <Text color={theme.faint}>{tools.length}</Text></Text>
-                  {tools.length > visibleTools.length && <Text color={theme.faint}>  +{tools.length - visibleTools.length} more</Text>}
+                  {/* No group header: tool lines read as output, not a panel. */}
+                  {tools.length > visibleTools.length && <Text color={theme.faint}> +{tools.length - visibleTools.length} earlier steps</Text>}
                   {visibleTools.map((item) => <FeedRow key={item.id} item={item} width={width} />)}
                 </Box>
               )}
@@ -521,13 +521,8 @@ export function TuiApp(props: TuiAppProps) {
           );
         })()}
         {snapshot.streaming && (
-          <Box marginTop={1} flexDirection="column">
-            <Text color={theme.assistant} bold>
-              {glyph.assistant} assistant  <Text color={theme.muted}>responding, {wordCount(snapshot.streaming)} words</Text>
-            </Text>
-            <Box paddingLeft={2}>
-              <MarkdownBlock text={snapshot.streaming} width={Math.max(20, width - 2)} />
-            </Box>
+          <Box marginTop={1} flexDirection="column" paddingLeft={1}>
+            <MarkdownBlock text={snapshot.streaming} width={Math.max(20, width - 2)} />
             {snapshot.citations.length > 0 && <SourcesBlock citations={snapshot.citations} width={width} />}
           </Box>
         )}
@@ -576,65 +571,55 @@ function TabBar({ tabs }: { tabs: TuiTabInfo[] }) {
 
 function Welcome({ width }: { width: number }) {
   return (
+    // One quiet line, like a shell banner rather than a splash screen.
     <Box flexDirection="column" marginBottom={1} width={Math.min(width, 72)}>
-      <Text color={theme.assistant} bold>{glyph.brand} kulmi</Text>
-      <Text color={theme.muted}>A focused workspace for changes, investigation, and verification.</Text>
-      <Box marginTop={1}><Text color={theme.faint}>Try  </Text><Text color={theme.user}>inspect this repo and fix the highest-impact issue</Text></Box>
+      <Box>
+        <Text color={theme.assistant}>{glyph.brand} kulmi</Text>
+        <Text color={theme.faint}>  type a task, or ? for help</Text>
+      </Box>
     </Box>
   );
 }
 
 function FeedRow({ item, width }: { item: FeedItem; width: number }) {
   if (item.kind === "user") return (
-    <Box marginTop={1} flexDirection="column" paddingLeft={1}>
-      <Text color={theme.user} bold>{glyph.user} you</Text>
-      <Box paddingLeft={2}><Text color={theme.cream}>{item.text.trim()}</Text></Box>
+    // Echo the prompt the way a shell does: on the prompt line itself, so the
+    // transcript reads as a session log instead of a chat UI.
+    <Box marginTop={1} paddingLeft={1}>
+      <Text color={theme.user}>{glyph.user} </Text>
+      <Text color={theme.cream}>{item.text.trim()}</Text>
     </Box>
   );
   if (item.kind === "assistant") return (
     <Box marginTop={1} flexDirection="column" paddingLeft={1}>
-      <Text color={theme.assistant} bold>{glyph.assistant} assistant</Text>
-      <Box paddingLeft={2}><MarkdownBlock text={item.text} width={width} /></Box>
+      <MarkdownBlock text={item.text} width={width} />
       {item.citations && item.citations.length > 0 && <SourcesBlock citations={item.citations} width={width} />}
     </Box>
   );
   if (item.kind === "tool") return (
-    <Box
-      marginTop={1}
-      width={Math.max(20, width)}
-      borderStyle="single"
-      borderColor={item.status === "error" ? theme.rose : item.status === "done" ? theme.sage : theme.tool}
-      paddingX={1}
-      flexDirection="column"
-    >
+    // Tool activity reads as terminal output: a status glyph, what ran, and the
+    // outcome, with continuation lines indented under it. No frame.
+    <Box flexDirection="column" paddingLeft={1}>
       <Box>
-        <Text color={item.status === "error" ? theme.rose : item.status === "done" ? theme.sage : theme.tool} bold>
+        <Text color={item.status === "error" ? theme.rose : item.status === "done" ? theme.sage : theme.tool}>
           {item.status === "error" ? glyph.error : item.status === "done" ? glyph.success : glyph.active}{" "}
         </Text>
-        <Text color={theme.tool} bold>tool</Text>
-        <Text color={theme.cream}>  {item.title}</Text>
+        <Text color={theme.ink}>{item.title}</Text>
         {item.durationMs !== undefined && <Text color={theme.faint}>  {formatDuration(item.durationMs)}</Text>}
       </Box>
-      {item.detail && <Text color={theme.muted}>  {clampLine(item.detail, Math.max(16, width - 6))}</Text>}
-      {item.summary && <Text color={item.status === "error" ? theme.rose : theme.sage}>  result  {clampLine(item.summary, Math.max(16, width - 14))}</Text>}
-      {item.diff && <Text color={theme.faint}>  diff  {item.diff}</Text>}
+      {item.detail && <Text color={theme.faint}>   {clampLine(item.detail, Math.max(16, width - 6))}</Text>}
+      {item.summary && <Text color={item.status === "error" ? theme.rose : theme.muted}>   {clampLine(item.summary, Math.max(16, width - 14))}</Text>}
+      {item.diff && <Text color={theme.faint}>   {item.diff}</Text>}
     </Box>
   );
   if (item.kind === "worker") return (
-    <Box
-      marginTop={1}
-      width={Math.max(20, width)}
-      borderStyle="single"
-      borderColor={item.status === "running" ? theme.worker : theme.cocoa}
-      paddingX={1}
-      flexDirection="column"
-    >
+    <Box flexDirection="column" paddingLeft={1}>
       <Box>
         <Text color={statusColor(item.status)}>{item.status === "running" ? glyph.active : item.status === "completed" ? glyph.success : glyph.error}{" "}</Text>
-        <Text color={theme.worker} bold>worker</Text>
-        <Text color={theme.cream}>  {clampLine(item.title, Math.max(16, width - 14))}</Text>
+        <Text color={theme.worker}>worker </Text>
+        <Text color={theme.ink}>{clampLine(item.title, Math.max(16, width - 14))}</Text>
       </Box>
-      {item.activity && <Text color={item.status === "running" ? theme.muted : theme.faint}>  {clampLine(item.activity, Math.max(16, width - 6))}</Text>}
+      {item.activity && <Text color={theme.faint}>   {clampLine(item.activity, Math.max(16, width - 6))}</Text>}
     </Box>
   );
   const color = item.kind === "error" ? theme.rose : theme.muted;
@@ -707,12 +692,19 @@ function CompletionBlock({ completion }: { completion: CompletionSummary }) {
     );
   }
   return (
-    <Box marginTop={1} borderStyle="round" borderColor={completion.status === "completed" ? theme.sage : theme.rust} paddingX={1} flexDirection="column">
-      <Text color={completion.status === "completed" ? theme.sage : theme.rose} bold>{completion.status}</Text>
-      <Text color={theme.muted}>{completion.modifiedFiles.length} changed file{completion.modifiedFiles.length === 1 ? "" : "s"}</Text>
-      {completion.summary && <Text color={theme.ink}>{completion.summary}</Text>}
-      {completion.modifiedFiles.slice(0, 5).map((path) => <Text key={path} color={theme.faint}>· {path}</Text>)}
-      {completion.verificationCommands.map((command) => <Text key={command} color={theme.sand}>✓ {command}</Text>)}
+    <Box marginTop={1} flexDirection="column" paddingLeft={1}>
+      <Box>
+        <Text color={completion.status === "completed" ? theme.sage : theme.rose}>
+          {completion.status === "completed" ? glyph.success : glyph.error}{" "}
+        </Text>
+        <Text color={completion.status === "completed" ? theme.sage : theme.rose}>{completion.status}</Text>
+        <Text color={theme.faint}>
+          {"  "}{completion.modifiedFiles.length} changed file{completion.modifiedFiles.length === 1 ? "" : "s"}
+        </Text>
+      </Box>
+      {completion.summary && <Text color={theme.ink}>   {completion.summary}</Text>}
+      {completion.modifiedFiles.slice(0, 5).map((path) => <Text key={path} color={theme.faint}>   {path}</Text>)}
+      {completion.verificationCommands.map((command) => <Text key={command} color={theme.faint}>   {glyph.success} {command}</Text>)}
     </Box>
   );
 }
@@ -789,7 +781,9 @@ function Composer({ value, onChange, onSubmit, busy }: { value: string; onChange
   });
 
   return (
-    <Box marginTop={busy ? 0 : 1} borderStyle="round" borderColor={busy ? theme.faint : theme.cocoa} paddingX={1}>
+    // A bare prompt line, like a shell. A framed input is the single strongest
+    // cue that something is an "app" rather than a terminal.
+    <Box marginTop={busy ? 0 : 1} paddingLeft={1}>
       <Text color={busy ? theme.faint : theme.user}>{glyph.user} </Text>
       {value.length === 0
         ? <Text color={theme.faint}>{placeholder}</Text>
@@ -828,11 +822,14 @@ function LoadingStatus() {
 
 function Approval({ request }: { request: PermissionRequest }) {
   return (
-    <Box marginTop={1} borderStyle="round" borderColor={theme.rust} paddingX={1} flexDirection="column">
-      <Text color={theme.rose} bold>approval required  <Text color={theme.muted}>{request.risk} risk</Text></Text>
-      <Text color={theme.ink}>{request.reason}</Text>
-      {request.command && <Text color={theme.sand}>$ {request.command}</Text>}
-      <Text color={theme.muted}><Text color={theme.sage}>y</Text> allow once   {request.risk !== "high" && <><Text color={theme.sage}>a</Text> allow always   </>}<Text color={theme.rose}>n</Text> deny</Text>
+    <Box marginTop={1} flexDirection="column" paddingLeft={1}>
+      <Box>
+        <Text color={theme.rose}>{glyph.pending} approval required</Text>
+        <Text color={theme.faint}>  {request.risk} risk</Text>
+      </Box>
+      <Text color={theme.ink}>   {request.reason}</Text>
+      {request.command && <Text color={theme.sand}>   $ {request.command}</Text>}
+      <Text color={theme.faint}>   <Text color={theme.sage}>y</Text> allow once   {request.risk !== "high" && <><Text color={theme.sage}>a</Text> allow always   </>}<Text color={theme.rose}>n</Text> deny</Text>
     </Box>
   );
 }
@@ -926,11 +923,10 @@ function MarkdownBlock({ text, width }: { text: string; width: number }) {
         const fence = raw.match(/^```\s*([\w-]*)/);
         if (fence) {
           code = !code;
-          return code && fence[1]
-            ? <Text key={index} color={theme.faint}>code · {fence[1]}</Text>
-            : null;
+          // No language chip: a fenced block is just indented output here.
+          return null;
         }
-        if (code) return <Text key={index} color={theme.cream} backgroundColor={theme.panel}>  {raw || " "}</Text>;
+        if (code) return <Text key={index} color={theme.sand}>  {raw || " "}</Text>;
         const heading = raw.match(/^#{1,6}\s+(.+)/);
         if (heading) return <Text key={index} color={theme.cream} bold><InlineMarkdown text={heading[1]!} /></Text>;
         const task = raw.match(/^\s*[-*]\s+\[([ xX])\]\s+(.+)/);
@@ -1001,7 +997,7 @@ function InlineMarkdown({ text }: { text: string }) {
       return <Text key={index} bold color={theme.cream}>{part.slice(2, -2)}</Text>;
     }
     if (part.startsWith("`") && part.endsWith("`")) {
-      return <Text key={index} color={theme.sand} backgroundColor={theme.panel}> {part.slice(1, -1)} </Text>;
+      return <Text key={index} color={theme.sand}>{part.slice(1, -1)}</Text>;
     }
     if (part.startsWith("~~") && part.endsWith("~~")) {
       return <Text key={index} strikethrough color={theme.muted}>{part.slice(2, -2)}</Text>;

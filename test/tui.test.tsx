@@ -59,9 +59,9 @@ describe("Kulmi TUI", () => {
     expect(frame).toContain("test-model");
     expect(frame).toContain("Improve the cache layer");
     expect(frame).toContain("Read file");
-    expect(frame).toContain("you");
-    expect(frame).toContain("assistant");
-    expect(frame).toContain("tool activity");
+    // The transcript reads like terminal output, so it is asserted on content
+    // rather than on "you"/"assistant" speaker labels.
+    expect(frame).toContain("Result");
     expect(frame).toContain("Audit cache behavior");
     expect(frame).toContain("chat");
     expect(frame).not.toContain("processed");
@@ -797,7 +797,6 @@ describe("Kulmi TUI", () => {
     });
     await pause();
     expect(view.lastFrame()).toContain("partial answer");
-    expect(view.lastFrame()).toContain("responding");
     expect(view.lastFrame()).toContain("Example docs");
 
     await bus.emit({ type: "assistant.message", agentId: "root", text: "partial answer" });
