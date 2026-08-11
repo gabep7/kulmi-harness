@@ -6,7 +6,7 @@
 // "--model <name>"; KULMI_EVAL_TASKS_DIR overrides the tasks
 // directory (used by tests).
 import { spawn } from "node:child_process";
-import { cp, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { access, cp, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -215,6 +215,20 @@ if (values.task) {
 if (names.length === 0) {
   console.error(`no tasks found in ${tasksDir}`);
   process.exit(1);
+}
+
+// A missing build otherwise shows up as every task "failing" in a fraction of a
+// second, which reads like a harness regression. Rebuilding also wipes dist/
+// mid-run, so check before spending money on model calls. KULMI_COMPARE_CLI is
+// set by evals/compare.mjs, whose kulmi shim runs the same build.
+{
+  const cli = process.env.KULMI_EVAL_BIN
+    ? process.env.KULMI_COMPARE_CLI
+    : join(repoRoot, "dist", "cli.js");
+  if (cli && !(await access(cli).then(() => true, () => false))) {
+    console.error(`missing ${cli}: run pnpm build before the evals, and do not rebuild while they run`);
+    process.exit(1);
+  }
 }
 
 const results = [];
