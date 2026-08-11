@@ -70,6 +70,27 @@ survive a first plausible attempt:
   checkpoint while versions are per-stream, so events are silently skipped once a
   second stream exists.
 
+Measured with `deepseek-v4-flash`, 3 runs per task per harness:
+
+| task | kulmi median | pi median | spread |
+| --- | --- | --- | --- |
+| perf-complexity | 16.0s | 36.9s | 2.3x |
+| unicode-truncate | 53.0s | 229.5s | 4.3x |
+| cache-stampede | 25.4s | 35.8s | 1.4x |
+| concurrent-ledger | 21.5s | 29.3s | 1.4x |
+
+Both harnesses still pass 12/12 on this set, so difficulty here shows up as time
+and effort rather than failure. That is worth stating plainly: these tasks are
+harder but not yet capability-limiting for this model. They are useful because
+they separate harnesses far more sharply than the easy set, where every task
+finishes in about ten seconds and the two are within noise of each other.
+
+To build a set that actually breaks a pass rate, the promising directions are
+tasks whose difficulty does not collapse once the bug is located: real upstream
+repositories via `repo_url` and `base_commit`, tasks needing a change across many
+interdependent files, and specifications with mutually constraining requirements
+where a fix for one requirement breaks another.
+
 ## Baseline
 
 Recorded with `deepseek-v4-flash:0731` via Ollama Cloud, autonomy `high`:
