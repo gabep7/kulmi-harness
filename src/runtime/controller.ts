@@ -43,7 +43,20 @@ import { attachImageTool } from "../tools/media.js";
 import { disposeSessionClients, lspTool } from "../tools/lsp.js";
 import { processTools, ProcessManager } from "../tools/processes.js";
 import { resolveExistingCredential } from "../auth/credentials.js";
-import { connectMcpServers, type McpConnection } from "../mcp/client.js";
+import type { McpConnection } from "../mcp/client.js";
+
+// The MCP SDK costs roughly 20MB of resident memory to load, so sessions
+// without configured servers must not import it at all.
+async function connectMcpServers(
+  ...args: Parameters<typeof import("../mcp/client.js")["connectMcpServers"]>
+): Promise<McpConnection> {
+  const [configs] = args;
+  if (configs.length === 0) {
+    return { tools: [], errors: [], async dispose() {} };
+  }
+  const { connectMcpServers: connect } = await import("../mcp/client.js");
+  return connect(...args);
+}
 import { AnthropicProvider } from "../provider/anthropic.js";
 import { OpenAIResponsesProvider } from "../provider/openai-responses.js";
 import { loadAllowlist, matchesAllowlist } from "../security/allowlist.js";
