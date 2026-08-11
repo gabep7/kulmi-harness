@@ -197,8 +197,19 @@ The same formatter drives the headless renderer, so neither surface prints raw t
 | `Ctrl+O` | Expand or collapse the current thinking stream |
 | `Ctrl+C` | Stop an active run, or exit while idle |
 | `Shift+Tab` | Cycle autonomy: `read`, `low`, `medium`, `high`, `trusted` |
+| `Ctrl+T` | Open a new tab, up to nine |
+| `Alt+1` .. `Alt+9` | Switch to a tab by position |
+| `Ctrl+W` | Close the current tab; the last tab exits with `Ctrl+C` |
 | `?` | Open the compact command and shortcut guide |
 | Enter during a run | Steer the root agent; the message is injected at the next step boundary |
+
+### Tabs
+
+Each tab is its own session with its own controller, transcript, model, and
+autonomy. A tab keeps running when you switch away, so you can start a long task,
+move to another tab, and come back to a finished result. The tab bar is hidden
+entirely while only one tab exists, and shows `◉` for the active tab and `○` for
+a background one.
 
 ### Commands
 

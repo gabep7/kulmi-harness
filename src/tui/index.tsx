@@ -1,5 +1,5 @@
 import { render } from "ink";
-import { TuiApp, type TuiCommandResult, type TuiRuntimeInfo } from "./app.js";
+import { TuiApp, type TuiCommandResult, type TuiRuntimeInfo, type TuiTabInfo, type TuiTabResult } from "./app.js";
 import { TuiStore } from "./store.js";
 import { EventBus } from "../core/events.js";
 import type { AutonomyLevel } from "../core/types.js";
@@ -23,11 +23,24 @@ export interface RunTuiOptions {
 
 const autonomyCycle: AutonomyLevel[] = ["read", "low", "medium", "high", "trusted"];
 
+// Tabs are session slots. Each keeps its own controller and event bus alive so a
+// background tab continues working while you look at another one, which is the
+// whole point of having tabs rather than just switching sessions.
+interface Tab {
+  controller: SessionController;
+  events: EventBus;
+  abort?: AbortController;
+}
+
+const MAX_TABS = 9;
+
 export async function runTui(options: RunTuiOptions): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("interactive TUI requires a terminal");
   const store = new TuiStore();
   let events = new EventBus();
   let controller = await createController(options, store, events, options.resumeSessionId, options.model);
+  const tabs: Tab[] = [{ controller, events }];
+  let activeTab = 0;
   store.seedMessages(controller.messages);
   store.seedRunState(controller.state);
   store.attach(events);
@@ -38,12 +51,19 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
   const submit = async (prompt: string) => {
     store.echoUserMessage(prompt);
     activeAbort = new AbortController();
+    // Record the abort on the owning tab, not just the active one: the user can
+    // switch away mid-run, and that tab must still be cancellable and show busy.
+    const owner = tabs[activeTab];
+    const running = activeAbort;
+    if (owner) owner.abort = running;
+    const target = controller;
     try {
-      await controller.run(prompt, activeAbort.signal);
+      await target.run(prompt, running.signal);
     } catch (error) {
-      if (!activeAbort.signal.aborted) store.addNotice(error instanceof Error ? error.message : String(error), true);
+      if (!running.signal.aborted) store.addNotice(error instanceof Error ? error.message : String(error), true);
     } finally {
-      activeAbort = undefined;
+      if (owner?.abort === running) delete owner.abort;
+      if (activeAbort === running) activeAbort = undefined;
     }
   };
   const command = async (name: string, args: string): Promise<TuiCommandResult> => {
@@ -204,6 +224,52 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
     await previous.close();
     return runtimeInfo(controller);
   };
+  // Showing a tab means re-pointing the shared store at that tab's controller.
+  // The previous controller is deliberately left running.
+  const showTab = (index: number): TuiRuntimeInfo => {
+    const tab = tabs[index];
+    if (!tab) return runtimeInfo(controller);
+    activeTab = index;
+    controller = tab.controller;
+    events = tab.events;
+    activeAbort = tab.abort;
+    store.attach(events);
+    instance?.clear();
+    store.replaceSession(controller.messages, controller.state);
+    return runtimeInfo(controller);
+  };
+
+  const tabSummaries = (): TuiTabInfo[] => tabs.map((tab, index) => ({
+    index,
+    sessionId: tab.controller.sessionId,
+    label: tab.controller.state.sessionName ?? tab.controller.modelProfile,
+    busy: Boolean(tab.abort),
+    active: index === activeTab,
+  }));
+
+  const newTab = async (): Promise<TuiTabResult> => {
+    if (tabs.length >= MAX_TABS) throw new Error(`at most ${MAX_TABS} tabs`);
+    const nextEvents = new EventBus();
+    const next = await createController(options, store, nextEvents, undefined, options.model);
+    tabs.push({ controller: next, events: nextEvents });
+    return { runtime: showTab(tabs.length - 1), tabs: tabSummaries() };
+  };
+
+  const selectTab = async (index: number): Promise<TuiTabResult> => {
+    return { runtime: showTab(index), tabs: tabSummaries() };
+  };
+
+  const closeTab = async (): Promise<TuiTabResult | undefined> => {
+    // The last tab is the session itself: closing it means quitting, which the
+    // caller handles, so report nothing here.
+    if (tabs.length <= 1) return undefined;
+    const [closed] = tabs.splice(activeTab, 1);
+    closed?.abort?.abort(new Error("tab closed"));
+    const runtime = showTab(Math.min(activeTab, tabs.length - 1));
+    if (closed) await closed.controller.close().catch(() => undefined);
+    return { runtime, tabs: tabSummaries() };
+  };
+
   const cycleAutonomy = async (): Promise<TuiRuntimeInfo> => {
     const current = autonomyCycle.indexOf(controller.autonomy);
     const next = autonomyCycle[(current + 1) % autonomyCycle.length] ?? "medium";
@@ -237,6 +303,9 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
       onExit={close}
       onSteer={(message) => controller.steer(message)}
       onSwitchModel={switchModel}
+      onNewTab={newTab}
+      onSelectTab={selectTab}
+      onCloseTab={closeTab}
       onListEfforts={() => controller.listReasoningEfforts()}
       onSetEffort={(effort) => controller.setReasoningEffort(effort)}
       onAlwaysAllow={(request) => {
@@ -255,7 +324,11 @@ export async function runTui(options: RunTuiOptions): Promise<void> {
     activeAbort?.abort(new Error("session closed"));
     store.close();
     if (!closing) activeAbort?.abort();
-    await controller.close();
+    // Every tab owns a live controller, so all of them need tearing down.
+    for (const tab of tabs) {
+      tab.abort?.abort(new Error("session closed"));
+      await tab.controller.close().catch(() => undefined);
+    }
   }
 }
 

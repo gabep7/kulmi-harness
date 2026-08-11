@@ -24,6 +24,9 @@ export interface TuiAppProps {
   onSwitchModel?: (name: string) => Promise<TuiRuntimeInfo>;
   onListEfforts?: () => string[];
   onSetEffort?: (effort: string) => string;
+  onNewTab?: () => Promise<TuiTabResult>;
+  onSelectTab?: (index: number) => Promise<TuiTabResult>;
+  onCloseTab?: () => Promise<TuiTabResult | undefined>;
   onCancel: () => void;
   onExit: () => void;
 }
@@ -51,6 +54,19 @@ export interface TuiRuntimeInfo {
   autonomy: AutonomyLevel;
   contextWindow: number;
   mode: AgentMode;
+}
+
+export interface TuiTabInfo {
+  index: number;
+  sessionId: string;
+  label: string;
+  busy: boolean;
+  active: boolean;
+}
+
+export interface TuiTabResult {
+  runtime: TuiRuntimeInfo;
+  tabs: TuiTabInfo[];
 }
 
 export type TuiCommandResult = string | {
@@ -158,6 +174,13 @@ export function TuiApp(props: TuiAppProps) {
     mode: props.mode ?? "chat",
     contextWindow: props.contextWindow,
   });
+  const [tabs, setTabs] = useState<TuiTabInfo[]>([]);
+
+  const applyTabs = (result: TuiTabResult | undefined) => {
+    if (!result) return;
+    setRuntime(result.runtime);
+    setTabs(result.tabs);
+  };
 
   useEffect(() => {
     const resize = () => setSize(terminalSize(stdout));
@@ -337,6 +360,34 @@ export function TuiApp(props: TuiAppProps) {
       props.store.toggleThinking();
       return;
     }
+    // Tabs. ctrl+t opens one, ctrl+w closes the current one, and alt+<n> jumps
+    // directly. Switching never waits on the outgoing tab, so a background run
+    // keeps going.
+    if (key.ctrl && value === "t" && props.onNewTab) {
+      void props.onNewTab().then(applyTabs, (error: unknown) => {
+        props.store.addNotice(error instanceof Error ? error.message : String(error), true);
+      });
+      return;
+    }
+    if (key.ctrl && value === "w" && props.onCloseTab) {
+      void props.onCloseTab().then((result) => {
+        if (!result) {
+          props.store.addNotice("Last tab: use ctrl+c to exit");
+          return;
+        }
+        applyTabs(result);
+      }, (error: unknown) => {
+        props.store.addNotice(error instanceof Error ? error.message : String(error), true);
+      });
+      return;
+    }
+    if (key.meta && /^[1-9]$/.test(value) && props.onSelectTab) {
+      const index = Number.parseInt(value, 10) - 1;
+      void props.onSelectTab(index).then(applyTabs, (error: unknown) => {
+        props.store.addNotice(error instanceof Error ? error.message : String(error), true);
+      });
+      return;
+    }
     if (key.shift && key.tab && !busyRef.current && props.onCycleAutonomy) {
       setBusyState(true);
       void props.onCycleAutonomy().then((next) => {
@@ -500,8 +551,25 @@ export function TuiApp(props: TuiAppProps) {
               : efforts
                 ? <EffortPicker efforts={efforts} cursor={effortCursor} model={runtime.model} />
                 : <Composer value={input} onChange={handleComposerChange} onSubmit={submit} busy={busy} />}
+        {tabs.length > 1 && <TabBar tabs={tabs} />}
         <Footer runtime={runtime} status={snapshot.status} busy={busy} agents={snapshot.live.filter((item) => item.kind === "worker").length} usage={snapshot.usage} contextTokens={snapshot.contextTokens} contextWindow={runtime.contextWindow} />
       </Box>
+    </Box>
+  );
+}
+
+// Only rendered with more than one tab, so a single-session terminal keeps the
+// same quiet layout it had before tabs existed.
+function TabBar({ tabs }: { tabs: TuiTabInfo[] }) {
+  return (
+    <Box>
+      {tabs.map((tab, position) => (
+        <Text key={tab.sessionId} color={tab.active ? theme.caramel : theme.faint}>
+          {position > 0 ? "  " : ""}
+          {tab.active ? glyph.active : tab.busy ? glyph.pending : "○"}
+          {` ${tab.index + 1} ${tab.label}`}
+        </Text>
+      ))}
     </Box>
   );
 }
@@ -827,6 +895,7 @@ function Help({ onClose, custom }: { onClose: () => void; custom: ReadonlyArray<
         </Box>
       )}
       <Text color={theme.faint}>esc stop  ·  ctrl+o thinking  ·  shift+tab autonomy  ·  ctrl+c exit  ·  ? close</Text>
+      <Text color={theme.faint}>ctrl+t new tab  ·  alt+1..9 switch tab  ·  ctrl+w close tab</Text>
     </Box>
   );
 }

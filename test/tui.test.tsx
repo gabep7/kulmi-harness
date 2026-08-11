@@ -103,6 +103,85 @@ describe("Kulmi TUI", () => {
     await expect(pending).resolves.toBe(true);
   });
 
+  it("opens, switches, and closes tabs from the keyboard", async () => {
+    const store = new TuiStore();
+    // The tab bar must stay hidden for a single session and appear only once a
+    // second tab exists, so ordinary use keeps the same quiet layout.
+    let tabs = [{ index: 0, sessionId: "s0", label: "alpha", busy: false, active: true }];
+    const onNewTab = vi.fn(async () => {
+      tabs = [
+        { index: 0, sessionId: "s0", label: "alpha", busy: true, active: false },
+        { index: 1, sessionId: "s1", label: "beta", busy: false, active: true },
+      ];
+      return { runtime: runtimeStub("beta"), tabs };
+    });
+    const onSelectTab = vi.fn(async (index: number) => {
+      tabs = tabs.map((tab) => ({ ...tab, active: tab.index === index }));
+      return { runtime: runtimeStub(index === 0 ? "alpha" : "beta"), tabs };
+    });
+    const onCloseTab = vi.fn(async () => {
+      tabs = [{ index: 0, sessionId: "s0", label: "alpha", busy: false, active: true }];
+      return { runtime: runtimeStub("alpha"), tabs };
+    });
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        contextWindow={128000}
+        onSubmit={async () => undefined}
+        onCommand={async () => undefined}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+        onNewTab={onNewTab}
+        onSelectTab={onSelectTab}
+        onCloseTab={onCloseTab}
+      />,
+    );
+    await pause();
+    expect(stripAnsi(view.lastFrame() ?? "")).not.toContain("1 alpha");
+
+    view.stdin.write("\u0014"); // ctrl+t
+    await pause();
+    expect(onNewTab).toHaveBeenCalled();
+    const withTabs = stripAnsi(view.lastFrame() ?? "");
+    expect(withTabs).toContain("1 alpha");
+    expect(withTabs).toContain("2 beta");
+
+    view.stdin.write("\u001b1"); // alt+1
+    await pause();
+    expect(onSelectTab).toHaveBeenCalledWith(0);
+
+    view.stdin.write("\u0017"); // ctrl+w
+    await pause();
+    expect(onCloseTab).toHaveBeenCalled();
+    expect(stripAnsi(view.lastFrame() ?? "")).not.toContain("2 beta");
+  });
+
+  it("reports that the last tab cannot be closed", async () => {
+    const store = new TuiStore();
+    const view = render(
+      <TuiApp
+        store={store}
+        model="test-model"
+        sessionId="session_1234567890abcdef"
+        cwd="/workspace/kulmi"
+        autonomy="medium"
+        contextWindow={128000}
+        onSubmit={async () => undefined}
+        onCommand={async () => undefined}
+        onCancel={() => undefined}
+        onExit={() => undefined}
+        onCloseTab={async () => undefined}
+      />,
+    );
+    view.stdin.write("\u0017");
+    await pause();
+    expect(stripAnsi(view.frames.join("\n"))).toContain("Last tab");
+  });
+
   it("denies a permission request when enter is pressed", async () => {
     const store = new TuiStore();
     const pending = store.requestPermission({ tool: "shell", risk: "high", reason: "removes a file", command: "rm old.txt", input: {} });
@@ -783,4 +862,15 @@ describe("Kulmi TUI", () => {
 
 function pause(ms = 50): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function runtimeStub(model: string) {
+  return {
+    model,
+    sessionId: "session_1234567890abcdef",
+    cwd: "/workspace/kulmi",
+    autonomy: "medium" as const,
+    contextWindow: 128_000,
+    mode: "chat" as const,
+  };
 }
