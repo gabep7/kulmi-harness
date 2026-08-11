@@ -85,22 +85,36 @@ model, otherwise the numbers measure the model rather than the harness. Use
 
 | harness | pass | rate | total | median | patch lines |
 | --- | --- | --- | --- | --- | --- |
-| kulmi | 14/14 | 100% | 279.4s | 14.9s | 163 |
-| pi | 14/14 | 100% | 209.6s | 12.3s | 160 |
+| kulmi | 14/14 | 100% | 211.1s | 15.4s | 165 |
+| pi | 14/14 | 100% | 198.4s | 10.2s | 157 |
 
-Per-task medians, kulmi versus pi: async-order 16.2 / 16.5, edge-case-parser
-13.9 / 11.9, fix-failing-test 12.7 / 8.3, hidden-regression 30.6 / 18.1,
-implement-function 8.8 / 8.9, multi-file-trace 26.8 / 30.8, refactor-rename
-30.8 / 10.3.
+Per-task medians, kulmi versus pi: async-order 15.1 / 9.5, edge-case-parser
+13.7 / 9.1, fix-failing-test 14.6 / 7.4, hidden-regression 14.4 / 15.0,
+implement-function 8.5 / 7.3, multi-file-trace 21.1 / 40.1, refactor-rename
+18.1 / 10.8.
 
-Equal correctness at equal patch size. The median gap started at 1.72x and is
-now 1.21x after removing three sources of wasted turns (a `read_file` offset
-schema that rejected 0, completion preconditions the prompt never stated, and an
-unexplained `cd` block). Startup is not the cause: at ~165ms it is about 1% of a
-task. The remaining gap is concentrated in `refactor-rename` and
-`hidden-regression`, so that is where to look next, not in the runtime.
+Equal correctness at comparable patch size. Total time is close (1.06x, from
+1.33x), though the per-task median is still 1.5x because pi finishes small tasks
+faster while kulmi wins the hardest one, `multi-file-trace`, by a wide margin.
 
-Single runs are noisy. One `hidden-regression` run took 202s against a normal
-12s because of provider-side stalls and retry backoff, which is why retries are
-now surfaced as notices and why `--runs` matters before believing a delta.
+Startup is not the lever: at ~165ms it is about 1% of a task. Wasted turns are.
+Profiling runs with `-o stream-json` and counting tool errors found four
+harness-caused stalls, each worth seconds per task:
+
+- `read_file` rejected `offset: 0`, which models send constantly.
+- `complete_task` required a plan that the prompt never asked for, costing two
+  round trips.
+- `cd` was blocked without the prompt saying so.
+- Verification name matching did not recognize `smoke`, `sanity`, `validate`,
+  `e2e`, `lint`, or the gradle/maven/dotnet runners. This one was the worst:
+  because completion is gated on a *recorded* verification, an agent whose real
+  `node smoke.mjs` check already passed was pushed into writing a throwaway
+  `verify.mjs` wrapper purely to satisfy the gate. Fixing it took
+  `refactor-rename` from 30.3s to 12.4s in isolation.
+
+Beware two measurement traps. `pnpm build` deletes `dist/`, so building while
+evals run makes every task "fail" in a fraction of a second; the runner now
+aborts with a clear message instead. And provider stalls are real: one
+`hidden-regression` run took 202s against a normal 12s, which is why retries are
+surfaced as notices and why `--runs` matters before believing any delta.
 
