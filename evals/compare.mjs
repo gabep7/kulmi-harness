@@ -92,9 +92,13 @@ function runOne(harness, task) {
 }
 
 const table = [];
-for (const harness of harnesses) {
+// Interleave harnesses within each attempt. Running one harness to completion
+// and then the next makes the comparison hostage to provider drift: a slow
+// period lands entirely on whichever harness happened to be running. Paired
+// back-to-back runs let both meet the same conditions.
+for (let attempt = 1; attempt <= runs; attempt += 1) {
   for (const task of tasks) {
-    for (let attempt = 1; attempt <= runs; attempt += 1) {
+    for (const harness of harnesses) {
       const result = await runOne(harness, task);
       table.push({ harness, task, attempt, ...result });
       if (!values.json) {
@@ -123,7 +127,7 @@ const summary = harnesses.map((harness) => {
 });
 
 if (values.json) {
-  process.stdout.write(`${JSON.stringify({ results: table, summary }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ results: table, summary, paired: pairedStats() }, null, 2)}\n`);
 } else {
   console.log(`\n${"harness".padEnd(10)} ${"pass".padEnd(9)} ${"rate".padEnd(6)} ${"total s".padEnd(9)} median s  patch lines`);
   for (const row of summary) {
@@ -131,6 +135,54 @@ if (values.json) {
       `${row.harness.padEnd(10)} ${`${row.passed}/${row.total}`.padEnd(9)} ${`${Math.round(row.passRate * 100)}%`.padEnd(6)} ${row.totalSeconds.toFixed(1).padEnd(9)} ${row.medianSeconds.toFixed(1).padStart(8)}  ${String(row.patchLines).padStart(11)}`,
     );
   }
+  const paired = pairedStats();
+  if (paired) {
+    console.log(`\nper-task medians (${paired.left} vs ${paired.right})`);
+    for (const row of paired.tasks) {
+      const faster = row.ratio < 1 ? paired.left : paired.right;
+      console.log(
+        `  ${row.task.padEnd(22)} ${row.leftSeconds.toFixed(1).padStart(6)}s ${row.leftPass}  ${row.rightSeconds.toFixed(1).padStart(6)}s ${row.rightPass}   ${row.ratio.toFixed(2)}x ${faster} faster`,
+      );
+    }
+    console.log(
+      `\n${paired.left} is ${paired.speedup >= 1 ? `${paired.speedup.toFixed(2)}x faster` : `${(1 / paired.speedup).toFixed(2)}x slower`} than ${paired.right} on the median task`,
+    );
+    console.log(`per-task speed wins: ${paired.left} ${paired.leftWins}, ${paired.right} ${paired.rightWins}`);
+  }
+}
+
+// Paired comparison is the honest one: compare the two harnesses task by task,
+// since absolute times move with provider load but a per-task ratio does not.
+function pairedStats() {
+  if (harnesses.length !== 2) return undefined;
+  const [left, right] = harnesses;
+  const rows = [];
+  for (const task of tasks) {
+    const leftRuns = table.filter((row) => row.harness === left && row.task === task);
+    const rightRuns = table.filter((row) => row.harness === right && row.task === task);
+    if (leftRuns.length === 0 || rightRuns.length === 0) continue;
+    const leftSeconds = median(leftRuns.map((row) => row.seconds));
+    const rightSeconds = median(rightRuns.map((row) => row.seconds));
+    rows.push({
+      task,
+      leftSeconds,
+      rightSeconds,
+      leftPass: `${leftRuns.filter((row) => row.passed).length}/${leftRuns.length}`,
+      rightPass: `${rightRuns.filter((row) => row.passed).length}/${rightRuns.length}`,
+      ratio: rightSeconds === 0 ? 1 : leftSeconds / rightSeconds,
+    });
+  }
+  if (rows.length === 0) return undefined;
+  return {
+    left,
+    right,
+    tasks: rows,
+    // Median of per-task ratios, not a ratio of totals: one slow task cannot
+    // dominate the headline number.
+    speedup: 1 / median(rows.map((row) => row.ratio)),
+    leftWins: rows.filter((row) => row.ratio < 1).length,
+    rightWins: rows.filter((row) => row.ratio > 1).length,
+  };
 }
 
 function median(values) {
