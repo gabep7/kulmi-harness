@@ -1,5 +1,4 @@
 import { existsSync } from "node:fs";
-import { chromium } from "playwright-core";
 import { z } from "zod";
 import { defineTool } from "./types.js";
 import { assertPublicUrl } from "./web-search.js";
@@ -28,6 +27,9 @@ export const browserQaTool = defineTool({
     await assertPublicUrl(new URL(input.url), { allowLoopback: true });
     const executablePath = chromiumCandidates.find((path) => existsSync(path));
     if (!executablePath) throw new Error("Chromium not found. Install Chrome/Chromium or set KULMI_CHROMIUM to the executable path.");
+    // Imported on demand: playwright-core costs a few hundred ms to load, and
+    // most sessions never open a browser.
+    const { chromium } = await import("playwright-core");
     const browser = await chromium.launch({ executablePath, headless: true });
     let closing: Promise<void> | undefined;
     const closeBrowser = (): Promise<void> => closing ??= browser.close();

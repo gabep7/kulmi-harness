@@ -16,13 +16,26 @@ import { forkSession, listSessions, SessionStore } from "./runtime/session-store
 import { attachRenderer, headlessExitCode, isBrokenPipeError, parseSessionLimit } from "./cli/render.js";
 import { runRpcServer } from "./rpc/server.js";
 import type { PermissionRequest } from "./tools/types.js";
-import { runTui } from "./tui/index.js";
 import { acceptCredential, resolveExistingCredential } from "./auth/credentials.js";
-import { CredentialSetupCancelledError, runCredentialOnboarding } from "./tui/onboarding.js";
+import { CredentialSetupCancelledError } from "./auth/setup-cancelled.js";
 import { sandboxAvailability } from "./runtime/process.js";
 import { resolveToolBinary } from "./runtime/binaries.js";
 
 type ApprovalMode = "never" | "on-request";
+
+// The ink-based UI costs a few hundred milliseconds to import, so headless
+// commands like `exec`, `rpc`, and `doctor` must not pay for it.
+async function runTui(...args: Parameters<typeof import("./tui/index.js")["runTui"]>): Promise<void> {
+  const { runTui: run } = await import("./tui/index.js");
+  return run(...args);
+}
+
+async function runCredentialOnboarding(
+  ...args: Parameters<typeof import("./tui/onboarding.js")["runCredentialOnboarding"]>
+): ReturnType<typeof import("./tui/onboarding.js")["runCredentialOnboarding"]> {
+  const { runCredentialOnboarding: run } = await import("./tui/onboarding.js");
+  return run(...args);
+}
 for (const stream of [process.stdout, process.stderr]) {
   stream.on("error", (error: NodeJS.ErrnoException) => {
     if (isBrokenPipeError(error)) process.exit(0);

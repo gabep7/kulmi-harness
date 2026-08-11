@@ -6,12 +6,9 @@ import { loadConfig, type ModelProtocol } from "../config/config.js";
 import { providerPresets, findProviderPreset, defaultModelForProvider, type ProviderPreset, type ProviderModelPreset } from "../config/providers.js";
 import { glyph, theme } from "./theme.js";
 
-export class CredentialSetupCancelledError extends Error {
-  constructor() {
-    super("credential setup cancelled");
-    this.name = "CredentialSetupCancelledError";
-  }
-}
+import { CredentialSetupCancelledError } from "../auth/setup-cancelled.js";
+
+export { CredentialSetupCancelledError };
 
 export async function runCredentialOnboarding(cwd = process.cwd(), requestedModel?: string): Promise<CredentialChoice> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
