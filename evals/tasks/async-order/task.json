@@ -1,0 +1,10 @@
+{
+  "prompt": "mapLimit in map-limit.mjs is documented to run at most `limit` mappers concurrently, but it currently runs serially. Rewrite it to honor the concurrency limit while keeping results in input order and rejecting with the first error. node test.mjs must pass. Do not change test.mjs.",
+  "timeout_seconds": 420,
+  "verify": "node test.mjs",
+  "fail_to_pass": ["node test.mjs"],
+  "pass_to_pass": [
+    "node --input-type=module -e 'import {mapLimit} from \"./map-limit.mjs\"; import assert from \"node:assert/strict\"; assert.deepEqual(await mapLimit([], 3, async () => 1), [], \"empty input must yield empty output\");'",
+    "node --input-type=module -e 'import {mapLimit} from \"./map-limit.mjs\"; import assert from \"node:assert/strict\"; let peak=0, n=0; await mapLimit([1,2,3,4], 1, async () => { n+=1; peak=Math.max(peak,n); await new Promise(r=>setTimeout(r,5)); n-=1; }); assert.equal(peak,1,\"limit 1 must stay serial\");'"
+  ]
+}

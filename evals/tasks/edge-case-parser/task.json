@@ -1,0 +1,12 @@
+{
+  "prompt": "parseLine in parse-csv.mjs only handles the trivial case. Implement it properly according to the spec comment so that node test.mjs passes. Do not change test.mjs, and do not special-case the literal test inputs.",
+  "timeout_seconds": 420,
+  "verify": "node test.mjs",
+  "fail_to_pass": ["node test.mjs"],
+  "pass_to_pass": [
+    "node --input-type=module -e 'import {parseLine} from \"./parse-csv.mjs\"; import assert from \"node:assert/strict\"; assert.deepEqual(parseLine(\"\"), [\"\"], \"empty line is one empty field\");'",
+    "node --input-type=module -e 'import {parseLine} from \"./parse-csv.mjs\"; import assert from \"node:assert/strict\"; assert.deepEqual(parseLine(\" a , b \"), [\" a \", \" b \"], \"unquoted whitespace is preserved\");'",
+    "node --input-type=module -e 'import {parseLine} from \"./parse-csv.mjs\"; import assert from \"node:assert/strict\"; assert.deepEqual(parseLine(\"a,b,\"), [\"a\", \"b\", \"\"], \"trailing empty field is kept\");'",
+    "node --input-type=module -e 'import {parseLine} from \"./parse-csv.mjs\"; import assert from \"node:assert/strict\"; assert.deepEqual(parseLine(String.raw`\"a\"\"\",\"\"\"b\"`), [\"a\\\"\", \"\\\"b\"], \"escaped quotes at field edges\");'"
+  ]
+}

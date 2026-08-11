@@ -1,0 +1,13 @@
+{
+  "prompt": "node test.mjs fails in this project: checkout totals are wrong for some baskets. Find the real root cause across config.mjs, money.mjs, pricing.mjs and checkout.mjs and fix it. Do not change test.mjs, and do not hardcode expected totals or special-case the test inputs.",
+  "timeout_seconds": 600,
+  "verify": "node test.mjs",
+  "fail_to_pass": ["node test.mjs"],
+  "pass_to_pass": [
+    "node --input-type=module -e 'import {checkout} from \"./checkout.mjs\"; import assert from \"node:assert/strict\"; assert.equal(checkout([]), 0, \"empty basket must total 0\");'",
+    "node --input-type=module -e 'import {checkout} from \"./checkout.mjs\"; import assert from \"node:assert/strict\"; assert.equal(checkout([{price:99.99,quantity:1}]), 120.99, \"just below the 5% tier gets no discount\");'",
+    "node --input-type=module -e 'import {checkout} from \"./checkout.mjs\"; import assert from \"node:assert/strict\"; assert.equal(checkout([{price:100,quantity:1}]), 114.95, \"exactly at the tier boundary gets 5%\");'",
+    "node --input-type=module -e 'import {checkout} from \"./checkout.mjs\"; import assert from \"node:assert/strict\"; assert.equal(checkout([{price:0.1,quantity:3}]), 0.36, \"cent rounding must stay integer based\");'",
+    "! grep -RqE '137\\\\.94|653\\\\.4|60\\\\.5' config.mjs money.mjs pricing.mjs checkout.mjs"
+  ]
+}

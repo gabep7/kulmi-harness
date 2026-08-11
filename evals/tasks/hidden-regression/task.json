@@ -1,0 +1,10 @@
+{
+  "prompt": "Running node test.mjs in this project fails. Fix cache.mjs so that node test.mjs passes. Do not change test.mjs, and do not break any other documented behavior of the cache.",
+  "timeout_seconds": 420,
+  "verify": "node test.mjs",
+  "fail_to_pass": ["node test.mjs"],
+  "pass_to_pass": [
+    "node --input-type=module -e 'import {LruCache} from \"./cache.mjs\"; import assert from \"node:assert/strict\"; let t=0; const c=new LruCache({limit:5,ttlMs:100,now:()=>t}); c.set(\"a\",1); t=50; assert.equal(c.get(\"a\"),1,\"entry is still fresh at t=50\"); t=101; assert.equal(c.get(\"a\"),undefined,\"ttl is measured from insertion, reads must not extend it\");'",
+    "node --input-type=module -e 'import {LruCache} from \"./cache.mjs\"; import assert from \"node:assert/strict\"; const c=new LruCache({limit:2}); c.set(\"a\",1); c.set(\"b\",2); c.set(\"c\",3); assert.equal(c.size,2,\"size limit must hold\"); c.set(\"c\",4); assert.equal(c.size,2,\"updating an existing key must not grow the cache\"); assert.equal(c.get(\"c\"),4);'"
+  ]
+}
