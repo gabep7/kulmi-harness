@@ -1,0 +1,12 @@
+{
+  "prompt": "truncateToWidth in truncate.mjs does not follow its documented rules: node test.mjs fails. Implement the width and cluster handling described in the spec comment. Do not change test.mjs, and do not special-case the literal test inputs.",
+  "timeout_seconds": 900,
+  "verify": "node test.mjs",
+  "fail_to_pass": ["node test.mjs"],
+  "pass_to_pass": [
+    "node --input-type=module -e 'import {truncateToWidth} from \"./truncate.mjs\"; import assert from \"node:assert/strict\"; assert.equal(truncateToWidth(\"\", 5), \"\", \"empty stays empty\"); assert.equal(truncateToWidth(\"abc\", 10), \"abc\");'",
+    "node --input-type=module -e 'import {truncateToWidth} from \"./truncate.mjs\"; import assert from \"node:assert/strict\"; assert.equal(truncateToWidth(\"abcdef\", 6), \"abcdef\", \"exact fit keeps every character and adds no ellipsis\");'",
+    "node --input-type=module -e 'import {truncateToWidth} from \"./truncate.mjs\"; import assert from \"node:assert/strict\"; const out = truncateToWidth(\"aaaaaa\", 3); assert.ok(out.length <= 3 && out.endsWith(\"…\"), JSON.stringify(out));'",
+    "! grep -RqE 'cafe|家族|hello w' truncate.mjs"
+  ]
+}

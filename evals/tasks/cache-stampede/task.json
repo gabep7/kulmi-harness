@@ -1,0 +1,12 @@
+{
+  "prompt": "The Loader in loader.mjs does not follow its documented contract: node test.mjs fails. Fix loader.mjs so it satisfies the contract in the comment. Do not change test.mjs, and do not special-case the test inputs.",
+  "timeout_seconds": 900,
+  "verify": "node test.mjs",
+  "fail_to_pass": ["node test.mjs"],
+  "pass_to_pass": [
+    "node --input-type=module -e 'import {Loader} from \"./loader.mjs\"; import assert from \"node:assert/strict\"; const l=new Loader(async k=>k.toUpperCase()); assert.equal(await l.get(\"x\"), \"X\"); assert.equal(await l.get(\"x\"), \"X\");'",
+    "node --input-type=module -e 'import {Loader} from \"./loader.mjs\"; import assert from \"node:assert/strict\"; let n=0; const l=new Loader(async()=>{n+=1; return n;}); const a=await l.get(\"k\"); const b=await l.get(\"k\"); assert.equal(a,b,\"cached value must be stable\"); assert.equal(n,1);'",
+    "node --input-type=module -e 'import {Loader} from \"./loader.mjs\"; import assert from \"node:assert/strict\"; let n=0; const l=new Loader(async()=>{n+=1; throw new Error(\"always\");}); await assert.rejects(l.get(\"k\")); await assert.rejects(l.get(\"k\")); assert.equal(n,2,\"a rejected load must never be cached\");'",
+    "node --input-type=module -e 'import {Loader} from \"./loader.mjs\"; import assert from \"node:assert/strict\"; const l=new Loader(async k=>k); assert.equal(await l.get(0), 0, \"falsy keys and values must work\"); assert.equal(await l.get(\"\"), \"\");'"
+  ]
+}

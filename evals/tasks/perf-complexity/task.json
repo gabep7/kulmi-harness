@@ -1,0 +1,14 @@
+{
+  "prompt": "countLowerBefore in rank.mjs is correct but too slow: node test.mjs fails its scaling check. Make it fast enough while keeping the exact same results. Do not change test.mjs and do not weaken or skip any assertion.",
+  "timeout_seconds": 900,
+  "verify": "node test.mjs",
+  "fail_to_pass": [
+    "node test.mjs",
+    "node --input-type=module -e 'import {countLowerBefore} from \"./rank.mjs\"; import assert from \"node:assert/strict\"; const n=100000; const e=Array.from({length:n},(_,i)=>({score:n-i})); const t=Date.now(); const r=countLowerBefore(e); if (Date.now()-t > 4000) throw new Error(\"descending input must also be fast\"); assert.equal(r[n-1], 0);'"
+  ],
+  "pass_to_pass": [
+    "node --input-type=module -e 'import {countLowerBefore} from \"./rank.mjs\"; import assert from \"node:assert/strict\"; assert.deepEqual(countLowerBefore([]), []); assert.deepEqual(countLowerBefore([{score:1}]), [0]);'",
+    "node --input-type=module -e 'import {countLowerBefore} from \"./rank.mjs\"; import assert from \"node:assert/strict\"; const e=Array.from({length:300},()=>({score:Math.floor(Math.random()*20)-10})); const ref=e.map((x,i)=>e.slice(0,i).filter(y=>y.score<x.score).length); assert.deepEqual(countLowerBefore(e), ref, \"must match brute force\");'",
+    "node --input-type=module -e 'import {countLowerBefore} from \"./rank.mjs\"; import assert from \"node:assert/strict\"; assert.deepEqual(countLowerBefore([{score:2.5},{score:2.5},{score:2.4}]), [0,0,0], \"fractional scores must work\");'"
+  ]
+}
