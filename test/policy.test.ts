@@ -132,6 +132,12 @@ describe("command policy", () => {
     expect(decideCommand("node validate.mjs", "medium").verification).toBe(true);
     expect(decideCommand("node e2e.mjs", "medium").verification).toBe(true);
     expect(decideCommand("./lint.sh", "medium").verification).toBe(true);
+    // JVM and .NET project test runners.
+    expect(decideCommand("./gradlew test", "medium").verification).toBe(true);
+    expect(decideCommand("mvn verify", "medium").verification).toBe(true);
+    expect(decideCommand("dotnet test", "medium").verification).toBe(true);
+    expect(decideCommand("mvn deploy", "medium").verification).toBe(false);
+    expect(decideCommand("dotnet run", "medium").verification).toBe(false);
     // Word-boundary matching must still exclude incidental substrings.
     expect(decideCommand("node server.js", "medium").verification).toBe(false);
     expect(decideCommand("./checkout.sh", "medium").verification).toBe(false);

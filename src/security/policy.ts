@@ -493,6 +493,14 @@ function isValidator(argv: string[]): boolean {
   }
   if (program === "cargo") return ["test", "check", "clippy", "build"].includes(args[0] ?? "");
   if (program === "go") return args[0] === "test";
+  // JVM, .NET, and alternative JS runtimes: without these, a passing project
+  // test suite is not recorded and completion is blocked on work already done.
+  if (["gradle", "gradlew", "mvn", "mvnw"].includes(program)) {
+    return args.some((arg) => /^(?:test|check|verify)$/.test(arg));
+  }
+  if (program === "dotnet") return ["test", "build"].includes(args[0] ?? "");
+  // bun and deno are blocked earlier as direct interpreters, so they never
+  // reach this point and deliberately have no clause here.
   if (program === "make") return args.some((arg) => /^(?:test|check|lint|build)$/.test(arg));
   if (["node", "python", "python3"].includes(program)) {
     if (program === "node" && args.includes("--test")) return true;
