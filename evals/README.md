@@ -61,3 +61,35 @@ Recorded with `deepseek-v4-flash:0731` via Ollama Cloud, autonomy `high`:
 7/7 in 176s total. A cheap fast model clearing the suite means these tasks are
 the floor, not the ceiling: when it saturates, add harder tasks rather than
 trusting the number.
+
+## Cross-harness comparison
+
+`evals/compare.mjs` runs the same tasks against several agent CLIs and reports
+pass rate, wall-clock time, and patch size:
+
+```sh
+KULMI_COMPARE_MODEL=ds-flash PI_PROVIDER=deepseek PI_MODEL=deepseek-v4-flash \
+  node evals/compare.mjs --harness kulmi,pi
+```
+
+Each harness is a shim in `evals/harnesses/` that receives
+`exec --auto high <prompt>` with the prompt as the last argument. Adapters exist
+for kulmi, pi, opencode, and claude. Models are set per shim via
+`KULMI_COMPARE_MODEL`, `PI_MODEL`, `OPENCODE_MODEL`, and `CLAUDE_MODEL`.
+
+Comparisons are only meaningful when every harness runs the same underlying
+model, otherwise the numbers measure the model rather than the harness. Use
+`--runs N` to average over agent nondeterminism before trusting a gap.
+
+### Result, deepseek-v4-flash, 7 tasks
+
+| harness | pass | rate | total | median | patch lines |
+| --- | --- | --- | --- | --- | --- |
+| kulmi | 7/7 | 100% | 138.8s | 19.1s | 85 |
+| pi | 7/7 | 100% | 106.8s | 11.1s | 99 |
+
+Same correctness, and kulmi produces smaller patches, but pi is meaningfully
+faster per task. The gap is not process startup (~190ms, about 1% of a task):
+it is turn count and time to first edit. That is the thing to optimize, and it
+is now measurable here.
+
