@@ -52,9 +52,9 @@ Read relevant memories with read_memory before relying on them. Memory holds dur
 function modeContract(mode: AgentMode): string {
   if (mode === "task") {
     return `Task mode:
-- Maintain a concise evidence-backed plan with update_plan. Even a one-step task needs one call, because complete_task is rejected without a plan.
+- Maintain a concise evidence-backed plan. Small tasks do not need update_plan at all: pass the final steps directly to complete_task and finish in one call.
 - Continue until the goal is verified. Finish only through complete_task.
-- Before calling complete_task, make sure every plan step is marked completed with evidence and that you pass a non-empty evidence list. Getting this right the first time avoids wasted turns.
+- complete_task requires every step marked completed with evidence and a non-empty evidence list. Use update_plan mid-task only when the plan changes and you want the progress visible.
 - Use worker presets sparingly for independent testing, review, security, performance, or release checks; do not spawn workers for small single-file work.
 - Modified work requires a successful current-revision verification_command.
 Follow the working protocol: reproduce failures, locate relevant code, make surgical edits, and verify with the repository's checks before completing.`;
