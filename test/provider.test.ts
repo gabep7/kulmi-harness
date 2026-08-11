@@ -81,6 +81,23 @@ describe("OpenAIProvider", () => {
     });
   });
 
+  it("tolerates null tool call fields in stream chunks", async () => {
+    const url = await serve(servers, (_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":null}}]}}]}\n\n');
+      response.write('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"type":null,"id":null,"function":{"name":null,"arguments":"{\\"path\\":\\"README.md\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n');
+      response.end('data: [DONE]\n\n');
+    });
+
+    const result = await new OpenAIProvider(model(url)).complete(simpleRequest());
+
+    expect(result.message.tool_calls).toEqual([{
+      id: "call_1",
+      type: "function",
+      function: { name: "read_file", arguments: '{"path":"README.md"}' },
+    }]);
+  });
+
   it("allows a profile to opt out of streamed usage", async () => {
     let requestBody: Record<string, unknown> = {};
     const url = await serve(servers, (request, response) => {

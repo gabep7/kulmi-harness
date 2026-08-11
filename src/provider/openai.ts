@@ -55,13 +55,13 @@ const wireChunkSchema = z.object({
         logo_url: z.string().optional(),
       }).passthrough()).nullable().optional(),
       tool_calls: z.array(z.object({
-        index: z.number().int().nonnegative().optional(),
-        id: z.string().optional(),
-        type: z.string().optional(),
+        index: z.number().int().nonnegative().nullable().optional(),
+        id: z.string().nullable().optional(),
+        type: z.string().nullable().optional(),
         function: z.object({
-          name: z.string().optional(),
-          arguments: z.string().optional(),
-        }).passthrough().optional(),
+          name: z.string().nullable().optional(),
+          arguments: z.string().nullable().optional(),
+        }).passthrough().nullable().optional(),
       }).passthrough()).nullable().optional(),
     }).passthrough().optional(),
     finish_reason: z.string().nullable().optional(),
@@ -535,5 +535,4 @@ function toCitation(value: WireCitation): WebCitation | undefined {
     ...(value.logo_url ? { logoUrl: value.logo_url } : {}),
   };
 }
-
 
