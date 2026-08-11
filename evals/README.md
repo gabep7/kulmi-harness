@@ -81,15 +81,26 @@ Comparisons are only meaningful when every harness runs the same underlying
 model, otherwise the numbers measure the model rather than the harness. Use
 `--runs N` to average over agent nondeterminism before trusting a gap.
 
-### Result, deepseek-v4-flash, 7 tasks
+### Result, deepseek-v4-flash, 7 tasks x 2 runs
 
 | harness | pass | rate | total | median | patch lines |
 | --- | --- | --- | --- | --- | --- |
-| kulmi | 7/7 | 100% | 138.8s | 19.1s | 85 |
-| pi | 7/7 | 100% | 106.8s | 11.1s | 99 |
+| kulmi | 14/14 | 100% | 279.4s | 14.9s | 163 |
+| pi | 14/14 | 100% | 209.6s | 12.3s | 160 |
 
-Same correctness, and kulmi produces smaller patches, but pi is meaningfully
-faster per task. The gap is not process startup (~190ms, about 1% of a task):
-it is turn count and time to first edit. That is the thing to optimize, and it
-is now measurable here.
+Per-task medians, kulmi versus pi: async-order 16.2 / 16.5, edge-case-parser
+13.9 / 11.9, fix-failing-test 12.7 / 8.3, hidden-regression 30.6 / 18.1,
+implement-function 8.8 / 8.9, multi-file-trace 26.8 / 30.8, refactor-rename
+30.8 / 10.3.
+
+Equal correctness at equal patch size. The median gap started at 1.72x and is
+now 1.21x after removing three sources of wasted turns (a `read_file` offset
+schema that rejected 0, completion preconditions the prompt never stated, and an
+unexplained `cd` block). Startup is not the cause: at ~165ms it is about 1% of a
+task. The remaining gap is concentrated in `refactor-rename` and
+`hidden-regression`, so that is where to look next, not in the runtime.
+
+Single runs are noisy. One `hidden-regression` run took 202s against a normal
+12s because of provider-side stalls and retry backoff, which is why retries are
+now surfaced as notices and why `--runs` matters before believing a delta.
 
