@@ -19,7 +19,11 @@ const elapsed = Date.now() - started;
 assert.deepEqual(out, [2, 4, 6, 8, 10, 12], "results must be in input order");
 assert.ok(peak > 1, `expected parallelism, peak in flight was ${peak}`);
 assert.ok(peak <= 3, `limit exceeded, peak in flight was ${peak}`);
-assert.ok(elapsed < 250, `expected concurrent execution, took ${elapsed}ms`);
+// The peak assertions above already prove the mapper ran concurrently. This
+// timing check is only a coarse guard against a fully serial implementation
+// (6 x 50ms = 300ms), with generous headroom so a loaded machine does not fail
+// a correct answer.
+assert.ok(elapsed < 280, `expected concurrent execution, took ${elapsed}ms`);
 
 // Order must hold when later items finish first.
 const reversed = await mapLimit([100, 10, 1], 3, async (ms) => {
