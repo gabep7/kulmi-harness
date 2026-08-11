@@ -241,6 +241,13 @@ export class Agent {
             agentId: state.agentId,
             citations,
           }).then(() => undefined),
+          // Without this a stalled or rate-limited provider looks like the
+          // harness hanging: retries can add minutes of silent backoff.
+          onRetry: (notice) => events.emit({
+            type: "notice",
+            agentId: state.agentId,
+            message: `provider retry ${notice.attempt}/${notice.maxAttempts} in ${Math.round(notice.delayMs)}ms: ${notice.error.message}`,
+          }).then(() => undefined),
         });
         await events.emit({ type: "usage", agentId: state.agentId, usage: response.usage });
         if (response.searchError) {

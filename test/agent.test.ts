@@ -57,6 +57,61 @@ describe("Agent", () => {
     ]);
   });
 
+  it("surfaces provider retries as notices so backoff is not silent", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
+    // A stalled or rate-limited provider can spend minutes in backoff. Without
+    // a notice that is indistinguishable from the harness hanging.
+    const provider: ModelProvider = {
+      name: "retrying",
+      model: "test-model",
+      async complete(request) {
+        await request.onRetry?.({
+          attempt: 2,
+          maxAttempts: 3,
+          delayMs: 1_500,
+          error: Object.assign(new Error("stream idle timeout"), { retryable: true }) as never,
+        });
+        return { message: { role: "assistant", content: "recovered" }, finishReason: "stop", usage: zeroUsage() };
+      },
+    };
+    const events = new EventBus();
+    const notices: string[] = [];
+    events.on((envelope) => {
+      if (envelope.event.type === "notice") notices.push(envelope.event.message);
+    });
+    const session = await SessionStore.create({ cwd: workspace, model: provider.model });
+    session.attach(events);
+    const state: RunState = {
+      agentId: "agent_retry",
+      mode: "chat",
+      status: "idle",
+      plan: [],
+      modifiedFiles: new Set(),
+      verifications: [],
+      revision: 0,
+    };
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([]),
+      events,
+      session,
+      checkpoint: new CheckpointStore(session.path, workspace),
+      artifacts: new ArtifactStore(session.path),
+      state,
+      systemPrompt: "stable",
+      workspaceRoot: workspace,
+      cwd: workspace,
+      autonomy: "medium",
+      maxSteps: 4,
+      commandTimeoutMs: 1_000,
+      maxOutputBytes: 10_000,
+      contextWindow: 1_000_000,
+    });
+
+    await agent.run("hello", new AbortController().signal);
+    expect(notices.some((message) => /provider retry 2\/3 in 1500ms: stream idle timeout/.test(message))).toBe(true);
+  });
+
   it("round-trips reasoning and returns the accepted completion summary", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "kulmi-workspace-"));
     const provider = new ScriptedProvider([
