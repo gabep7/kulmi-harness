@@ -1,0 +1,16 @@
+{
+  "prompt": "node test.mjs fails in this project: the balance projection loses events once more than one stream is involved. Find the real root cause across store.mjs and projection.mjs and fix it. Do not change test.mjs, do not hardcode expected balances, and keep the optimistic concurrency behavior of the store intact.",
+  "timeout_seconds": 900,
+  "verify": "node test.mjs",
+  "fail_to_pass": [
+    "node test.mjs",
+    "node --input-type=module -e 'import {openLedger} from \"./projection.mjs\"; import assert from \"node:assert/strict\"; const {store,projection}=openLedger(); for (let i=0;i<50;i+=1) store.append(`s${i%5}`, Math.floor(i/5), [{type:\"credit\",account:\"acc\",amount:1}]); for (let i=0;i<5;i+=1) projection.apply(`s${i}`); for (let i=0;i<5;i+=1) projection.apply(`s${i}`); assert.equal(projection.balance(\"acc\"),50,\"many streams must each be fully applied exactly once\");'"
+  ],
+  "pass_to_pass": [
+    "node --input-type=module -e 'import {openLedger} from \"./projection.mjs\"; import assert from \"node:assert/strict\"; const {store,projection}=openLedger(); store.append(\"a\",0,[{type:\"credit\",account:\"z\",amount:5}]); projection.apply(\"a\"); assert.equal(projection.balance(\"z\"),5);'",
+    "node --input-type=module -e 'import {openLedger} from \"./projection.mjs\"; import assert from \"node:assert/strict\"; const {projection}=openLedger(); assert.equal(projection.balance(\"missing\"),0,\"unknown accounts read as zero\");'",
+    "node --input-type=module -e 'import {openLedger} from \"./projection.mjs\"; import assert from \"node:assert/strict\"; const {store}=openLedger(); store.append(\"s\",0,[{type:\"credit\",account:\"x\",amount:1}]); assert.throws(()=>store.append(\"s\",0,[{type:\"credit\",account:\"x\",amount:1}]),/version conflict/,\"stale writers must still be rejected\");'",
+    "node --input-type=module -e 'import {openLedger} from \"./projection.mjs\"; import assert from \"node:assert/strict\"; const {store}=openLedger(); store.append(\"s\",0,[{type:\"credit\",account:\"x\",amount:1},{type:\"credit\",account:\"x\",amount:1}]); const events=store.read(\"s\"); assert.deepEqual(events.map(e=>e.version),[1,2],\"versions must stay gapless from 1\");'",
+    "! grep -RqE '\\b(30|14|70|75|60|50)\\b' projection.mjs"
+  ]
+}

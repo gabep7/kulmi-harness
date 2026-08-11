@@ -39,10 +39,36 @@ scratch copy that:
 3. Every guard still passes under a genuinely correct fix.
 4. At least one guard fails under the tempting-but-wrong fix.
 
-Step 4 is what separates a real eval from a decorative one. For example
-`hidden-regression` is solved by making `get` refresh recency, but a fix that
-reinserts through `set` also resets the TTL clock, and a guard catches exactly
-that.
+Steps 1 to 3 are automated:
+
+```sh
+python3 evals/validate-task.py evals/tasks/<name> reference.mjs:target.mjs
+```
+
+That copies a known-good implementation over the named fixture file and reports
+each check before and after. It exists because it caught two real mistakes in
+this suite: guards that actually tested the bug, so they failed on the fixture
+and belonged in `fail_to_pass` instead. Step 4 stays manual, and it is what
+separates a real eval from a decorative one. For example `hidden-regression` is
+solved by making `get` refresh recency, but a fix that reinserts through `set`
+also resets the TTL clock, and a guard catches exactly that.
+
+### Difficulty
+
+The first seven tasks are solved reliably by a cheap fast model, so they measure
+regressions rather than capability. The harder set targets failure modes that
+survive a first plausible attempt:
+
+- `perf-complexity` needs an algorithmic rewrite, not a patch: the quadratic
+  version takes 21s against a 4s budget, so only sub-quadratic scaling passes.
+- `unicode-truncate` needs grapheme clusters, surrogate pairs, East Asian widths,
+  and ZWJ sequences handled together. This is the slowest task in the suite by a
+  wide margin.
+- `cache-stampede` needs in-flight deduplication where the obvious fix, caching
+  the promise, is wrong because it also caches failures.
+- `concurrent-ledger` hides a cross-file bug: the projection keeps one global
+  checkpoint while versions are per-stream, so events are silently skipped once a
+  second stream exists.
 
 ## Baseline
 
