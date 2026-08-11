@@ -6,7 +6,9 @@ describe("provider presets", () => {
     expect(providerPresets[0]?.id).toBe("ollama");
     expect(providerPresets[0]?.label).toBe("Ollama Cloud");
     expect(providerPresets[0]?.apiKeyRequired).toBe(true);
-    expect(providerPresets[0]?.baseUrl).toBe("https://api.ollama.com/v1");
+    // api.ollama.com 301-redirects, which loses a POST body, so the preset must
+    // point at the canonical host.
+    expect(providerPresets[0]?.baseUrl).toBe("https://ollama.com/v1");
   });
 
   it("includes all major providers", () => {
@@ -61,7 +63,7 @@ describe("provider presets", () => {
   it("finds the default model for a provider", () => {
     const ollama = findProviderPreset("ollama");
     const defaultModel = ollama ? defaultModelForProvider(ollama) : undefined;
-    expect(defaultModel?.id).toBe("qwen3:32b");
+    expect(defaultModel?.id).toBe("deepseek-v4-flash:0731");
   });
 
   it("Anthropic uses the anthropic protocol", () => {

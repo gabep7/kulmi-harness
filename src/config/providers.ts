@@ -58,19 +58,23 @@ export const providerPresets: readonly ProviderPreset[] = [
     label: "Ollama Cloud",
     description: "Hosted Ollama models in the cloud. Get an API key at ollama.com.",
     protocol: "openai",
-    baseUrl: "https://api.ollama.com/v1",
+    // api.ollama.com 301-redirects to ollama.com, and a redirected POST loses
+    // the request, so the canonical host must be used directly.
+    baseUrl: "https://ollama.com/v1",
     apiKeyRequired: true,
     apiKeyEnv: "OLLAMA_API_KEY",
     apiKeyHint: "Get a key at ollama.com",
+    // Verified against GET /v1/models and a live chat completion. Ollama Cloud
+    // serves hosted frontier models, not the small local tags.
     models: [
-      { id: "qwen3:32b", label: "Qwen3 32B", contextWindow: 131_072, maxOutputTokens: 32_768, default: true },
-      { id: "qwen3-coder:32b", label: "Qwen3 Coder 32B", contextWindow: 131_072, maxOutputTokens: 32_768 },
-      { id: "qwen3-coder:14b", label: "Qwen3 Coder 14B", contextWindow: 131_072, maxOutputTokens: 32_768 },
-      { id: "deepseek-r1:32b", label: "DeepSeek R1 32B", contextWindow: 128_000, maxOutputTokens: 32_768, thinking: true, reasoningEffort: "high", reasoningEfforts: ["low", "medium", "high"] },
-      { id: "deepseek-r1:14b", label: "DeepSeek R1 14B", contextWindow: 128_000, maxOutputTokens: 32_768, thinking: true, reasoningEffort: "high", reasoningEfforts: ["low", "medium", "high"] },
-      { id: "llama3.3:70b", label: "Llama 3.3 70B", contextWindow: 128_000, maxOutputTokens: 32_768 },
-      { id: "qwen2.5-coder:32b", label: "Qwen2.5 Coder 32B", contextWindow: 128_000, maxOutputTokens: 32_768 },
-      { id: "llama3.2:3b", label: "Llama 3.2 3B (fast)", contextWindow: 128_000, maxOutputTokens: 8_192 },
+      { id: "deepseek-v4-flash:0731", label: "DeepSeek V4 Flash (fast)", contextWindow: 200_000, maxOutputTokens: 32_768, default: true },
+      { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", contextWindow: 200_000, maxOutputTokens: 32_768 },
+      { id: "kimi-k2.7-code", label: "Kimi K2.7 Code", contextWindow: 200_000, maxOutputTokens: 32_768 },
+      { id: "glm-5.2", label: "GLM 5.2", contextWindow: 200_000, maxOutputTokens: 32_768 },
+      { id: "qwen3.5:397b", label: "Qwen3.5 397B", contextWindow: 200_000, maxOutputTokens: 32_768 },
+      { id: "minimax-m3", label: "MiniMax M3", contextWindow: 200_000, maxOutputTokens: 32_768 },
+      { id: "gpt-oss:120b", label: "GPT-OSS 120B", contextWindow: 128_000, maxOutputTokens: 32_768 },
+      { id: "gpt-oss:20b", label: "GPT-OSS 20B (fast)", contextWindow: 128_000, maxOutputTokens: 32_768 },
     ],
   },
 
